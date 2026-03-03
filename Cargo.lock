@@ -231,6 +231,7 @@ dependencies = [
  "async-trait",
  "freebird-traits",
  "freebird-types",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
@@ -262,6 +263,7 @@ dependencies = [
  "freebird-traits",
  "freebird-types",
  "futures",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-stream",
@@ -276,7 +278,6 @@ dependencies = [
  "freebird-traits",
  "freebird-types",
  "serde",
- "serde_json",
  "thiserror",
  "tracing",
 ]
