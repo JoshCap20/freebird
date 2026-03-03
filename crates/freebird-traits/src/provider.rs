@@ -148,6 +148,16 @@ pub trait Provider: Send + Sync + 'static {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError>;
 }
 
+/// Classifies the kind of network failure for targeted retry strategies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetworkErrorKind {
+    Timeout,
+    ConnectionRefused,
+    DnsFailure,
+    TlsError,
+    Other,
+}
+
 /// Provider-specific errors.
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
@@ -166,10 +176,10 @@ pub enum ProviderError {
     #[error("provider API error: {status} — {body}")]
     ApiError { status: u16, body: String },
 
-    #[error("network error: {reason}")]
+    #[error("network error ({kind:?}): {reason}")]
     Network {
         reason: String,
-        is_timeout: bool,
+        kind: NetworkErrorKind,
         status_code: Option<u16>,
     },
 
