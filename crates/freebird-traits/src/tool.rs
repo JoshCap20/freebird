@@ -13,7 +13,7 @@ use crate::provider::ToolDefinition;
 /// Finer-grained than a simple read/write/execute model — separating
 /// `FileDelete` from `FileWrite`, `ProcessSpawn` from `ShellExecute`,
 /// and inbound vs. outbound network access enables least-privilege grants.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
     FileRead,
