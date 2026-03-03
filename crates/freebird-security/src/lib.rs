@@ -6,4 +6,5 @@ pub mod egress;
 pub mod error;
 pub mod injection;
 pub mod paths;
+pub mod safe_types;
 pub mod taint;
