@@ -62,7 +62,7 @@ pub struct ModelInfo {
 /// The input to a provider completion request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionRequest {
-    pub model: String,
+    pub model: ModelId,
     pub system_prompt: Option<String>,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDefinition>,
@@ -108,7 +108,7 @@ pub struct CompletionResponse {
     pub message: Message,
     pub stop_reason: StopReason,
     pub usage: TokenUsage,
-    pub model: String,
+    pub model: ModelId,
 }
 
 /// Why the model stopped generating.
@@ -293,6 +293,42 @@ mod tests {
         assert_eq!(back.id.as_str(), "anthropic");
         assert_eq!(back.features.len(), 3);
         assert!(back.supports(&ProviderFeature::Vision));
+    }
+
+    #[test]
+    fn test_completion_request_model_is_model_id() {
+        let request = CompletionRequest {
+            model: ModelId::from("claude-opus-4-6-20250929"),
+            system_prompt: None,
+            messages: vec![],
+            tools: vec![],
+            max_tokens: 1024,
+            temperature: None,
+            stop_sequences: vec![],
+        };
+        assert_eq!(request.model.as_str(), "claude-opus-4-6-20250929");
+
+        // Serde roundtrip preserves the newtype
+        let json = serde_json::to_string(&request).unwrap();
+        let back: CompletionRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.model.as_str(), "claude-opus-4-6-20250929");
+    }
+
+    #[test]
+    fn test_completion_response_model_is_model_id() {
+        let response = CompletionResponse {
+            message: Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "hello".into(),
+                }],
+                timestamp: chrono::Utc::now(),
+            },
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+            model: ModelId::from("claude-opus-4-6-20250929"),
+        };
+        assert_eq!(response.model.as_str(), "claude-opus-4-6-20250929");
     }
 
     #[test]
