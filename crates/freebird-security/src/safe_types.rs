@@ -150,8 +150,17 @@ pub struct SafeShellArg(String);
 const MAX_ARG_LEN: usize = 4096;
 
 /// Characters that could enable command injection.
+///
+/// Covers: pipes, command chaining, variable expansion, subshells,
+/// redirection, quoting (which can break out of quoted contexts),
+/// backslash escaping, glob expansion, and history expansion.
 const FORBIDDEN_CHARS: &[char] = &[
-    '|', ';', '&', '$', '`', '(', ')', '{', '}', '<', '>', '\0', '\n', '\r',
+    '|', ';', '&', '$', '`', '(', ')', '{', '}', '<', '>', // operators & redirection
+    '\'', '"',
+    '\\', // quoting & escaping — defense-in-depth against quoted context breakout
+    '!',  // history expansion in bash
+    '*', '?', '[', ']', // glob expansion
+    '\0', '\n', '\r', // null byte & newline injection
 ];
 
 impl SafeShellArg {
@@ -479,6 +488,58 @@ mod tests {
         match result.unwrap_err() {
             SecurityError::ForbiddenCharacter { character, .. } => {
                 assert_eq!(character, '$');
+            }
+            other => panic!("expected ForbiddenCharacter, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_safe_shell_arg_rejects_single_quote() {
+        let t = Tainted::new("arg'injection");
+        let result = SafeShellArg::from_tainted(&t);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SecurityError::ForbiddenCharacter { character, .. } => {
+                assert_eq!(character, '\'');
+            }
+            other => panic!("expected ForbiddenCharacter, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_safe_shell_arg_rejects_double_quote() {
+        let t = Tainted::new("arg\"injection");
+        let result = SafeShellArg::from_tainted(&t);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SecurityError::ForbiddenCharacter { character, .. } => {
+                assert_eq!(character, '"');
+            }
+            other => panic!("expected ForbiddenCharacter, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_safe_shell_arg_rejects_backslash() {
+        let t = Tainted::new("arg\\injection");
+        let result = SafeShellArg::from_tainted(&t);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SecurityError::ForbiddenCharacter { character, .. } => {
+                assert_eq!(character, '\\');
+            }
+            other => panic!("expected ForbiddenCharacter, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_safe_shell_arg_rejects_glob() {
+        let t = Tainted::new("*.txt");
+        let result = SafeShellArg::from_tainted(&t);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SecurityError::ForbiddenCharacter { character, .. } => {
+                assert_eq!(character, '*');
             }
             other => panic!("expected ForbiddenCharacter, got: {other:?}"),
         }
