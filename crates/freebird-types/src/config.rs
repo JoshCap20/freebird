@@ -18,8 +18,21 @@ pub struct AppConfig {
 /// Runtime behavior configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {
+    /// Default LLM model ID (e.g., "claude-opus-4-6-20250929").
     pub default_model: String,
+    /// Default provider ID — must match a `ProviderConfig::id` in `providers`.
+    pub default_provider: String,
+    /// System prompt prepended to every new conversation. None = no system prompt.
+    pub system_prompt: Option<String>,
+    /// Maximum tokens per provider response.
+    pub max_output_tokens: u32,
+    /// Maximum provider round-trips in a single agentic turn.
+    pub max_tool_rounds: usize,
+    /// Sampling temperature. `None` lets the provider use its default.
+    pub temperature: Option<f32>,
+    /// Maximum turns (user-assistant exchanges) before requiring a new session.
     pub max_turns_per_session: usize,
+    /// Seconds to wait for in-flight work during graceful shutdown.
     pub drain_timeout_secs: u64,
 }
 
@@ -55,6 +68,9 @@ pub enum ChannelKind {
 pub struct ChannelConfig {
     pub id: String,
     pub kind: ChannelKind,
+    /// Optional prompt string for interactive channels (e.g., "you> " for CLI).
+    /// Consumed by channel implementations. None = channel uses its own default.
+    pub prompt: Option<String>,
 }
 
 /// Tool sandbox configuration.
@@ -93,4 +109,117 @@ pub struct LoggingConfig {
     pub level: String,
     pub format: String,
     pub audit_dir: Option<PathBuf>,
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal valid TOML config with the given `[runtime]` block.
+    /// All non-runtime sections use fixed valid values so tests can focus
+    /// on runtime field variations without duplicating boilerplate.
+    fn config_toml_with_runtime(runtime_block: &str) -> String {
+        format!(
+            r#"
+[runtime]
+{runtime_block}
+
+[[providers]]
+id = "anthropic"
+kind = "anthropic"
+
+[[channels]]
+id = "cli"
+kind = "cli"
+
+[tools]
+sandbox_root = "~/.freebird/sandbox"
+default_timeout_secs = 30
+
+[memory]
+kind = "file"
+
+[security]
+max_tool_calls_per_turn = 25
+require_consent_above = "high"
+
+[logging]
+level = "info"
+format = "pretty"
+"#
+        )
+    }
+
+    #[test]
+    fn test_default_config_deserializes() {
+        let toml_str = include_str!("../../../config/default.toml");
+        let config: AppConfig =
+            toml::from_str(toml_str).expect("default.toml should deserialize into AppConfig");
+
+        assert_eq!(config.runtime.default_model, "claude-opus-4-6-20250929");
+        assert_eq!(config.runtime.default_provider, "anthropic");
+        assert_eq!(
+            config.runtime.system_prompt.as_deref(),
+            Some("You are FreeBird, a helpful AI assistant.")
+        );
+        assert_eq!(config.runtime.max_output_tokens, 8192);
+        assert_eq!(config.runtime.max_tool_rounds, 10);
+        assert_eq!(config.runtime.temperature, Some(0.7));
+        assert_eq!(config.runtime.max_turns_per_session, 50);
+        assert_eq!(config.runtime.drain_timeout_secs, 30);
+        assert_eq!(config.channels[0].prompt, Some("you> ".to_string()));
+    }
+
+    #[test]
+    fn test_optional_fields_absent() {
+        let toml_str = config_toml_with_runtime(
+            r#"default_model = "claude-opus-4-6-20250929"
+default_provider = "anthropic"
+max_output_tokens = 8192
+max_tool_rounds = 10
+max_turns_per_session = 50
+drain_timeout_secs = 30"#,
+        );
+        let config: AppConfig = toml::from_str(&toml_str).expect("minimal TOML should deserialize");
+
+        assert!(config.runtime.system_prompt.is_none());
+        assert!(config.runtime.temperature.is_none());
+        assert!(config.channels[0].prompt.is_none());
+    }
+
+    #[test]
+    fn test_missing_required_field_errors() {
+        let toml_str = config_toml_with_runtime(
+            r#"default_model = "claude-opus-4-6-20250929"
+max_output_tokens = 8192
+max_tool_rounds = 10
+max_turns_per_session = 50
+drain_timeout_secs = 30"#,
+        );
+        let result = toml::from_str::<AppConfig>(&toml_str);
+        assert!(
+            result.is_err(),
+            "missing default_provider should cause deserialization error"
+        );
+    }
+
+    #[test]
+    fn test_temperature_none_when_absent() {
+        let toml_str = config_toml_with_runtime(
+            r#"default_model = "claude-opus-4-6-20250929"
+default_provider = "anthropic"
+max_output_tokens = 8192
+max_tool_rounds = 10
+max_turns_per_session = 50
+drain_timeout_secs = 30"#,
+        );
+        let config: AppConfig =
+            toml::from_str(&toml_str).expect("TOML without temperature should deserialize");
+
+        assert!(
+            config.runtime.temperature.is_none(),
+            "temperature should be None when absent, not a default value"
+        );
+    }
 }

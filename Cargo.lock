@@ -347,6 +347,7 @@ dependencies = [
  "freebird-traits",
  "serde",
  "serde_json",
+ "toml",
  "uuid",
 ]
 
