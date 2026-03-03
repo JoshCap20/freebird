@@ -61,3 +61,7 @@ define_id!(
     /// Identifies a registered tool.
     ToolId
 );
+define_id!(
+    /// Identifies a specific model offered by a provider.
+    ModelId
+);
