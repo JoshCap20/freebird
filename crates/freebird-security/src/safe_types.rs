@@ -72,7 +72,7 @@ impl SafeMessage {
 ///
 /// Produced by: tool input extraction.
 /// Consumed by: filesystem tools (`read_file`, `write_file`).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SafeFilePath {
     resolved: PathBuf,
     root: PathBuf,
@@ -687,6 +687,21 @@ mod tests {
         let t = Tainted::new("display test");
         let redacted = Redacted::from_tainted(&t);
         assert_eq!(format!("{redacted}"), "display test");
+    }
+
+    // ── SafeFilePath Clone test ──────────────────────────────────
+
+    #[test]
+    fn test_clone_produces_equal_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let test_file = tmp.path().join("file.txt");
+        std::fs::write(&test_file, "test").unwrap();
+
+        let t = Tainted::new("file.txt");
+        let original = SafeFilePath::from_tainted(&t, tmp.path()).unwrap();
+        let cloned = original.clone();
+        assert_eq!(original.as_path(), cloned.as_path());
+        assert_eq!(original.root(), cloned.root());
     }
 
     // ── Property-based test ──────────────────────────────────────
