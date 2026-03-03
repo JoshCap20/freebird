@@ -17,7 +17,7 @@ tracing = { workspace = true }
 url = { workspace = true }
 ring = { workspace = true }
 hex = { workspace = true }
-tokio = { workspace = true }
+tokio = { version = "1", default-features = false, features = ["sync"] }
 
 [dev-dependencies]
 proptest = { workspace = true }

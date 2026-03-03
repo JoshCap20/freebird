@@ -87,10 +87,16 @@ pub enum AuditEventType {
     },
     PairingCodeIssued {
         channel_id: String,
+        /// Channel-specific sender identifier (e.g., phone number).
+        /// Separate from `AuditEntry::session_id` because pairing occurs
+        /// before a session is established (CLAUDE.md §14).
+        sender_id: String,
         // NOTE: Never log the actual pairing code — only that one was issued.
     },
     PairingApproved {
         channel_id: String,
+        /// Channel-specific sender identifier (e.g., phone number).
+        sender_id: String,
     },
     AuthenticationFailed {
         key_id: String,
@@ -108,22 +114,69 @@ pub enum AuditEventType {
 /// Chain metadata wrapping a domain event.
 ///
 /// `sequence` + `timestamp` + `previous_hash` form the tamper-evident chain.
+///
+/// Fields are `pub(crate)` to prevent external crates from constructing
+/// entries that bypass [`AuditLogger::record`]'s chain integrity invariants
+/// (CLAUDE.md §3.2, §30).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntry {
-    pub sequence: u64,
-    pub session_id: String,
-    pub event: AuditEventType,
-    pub timestamp: DateTime<Utc>,
-    pub previous_hash: String,
+    pub(crate) sequence: u64,
+    pub(crate) session_id: String,
+    pub(crate) event: AuditEventType,
+    pub(crate) timestamp: DateTime<Utc>,
+    pub(crate) previous_hash: String,
+}
+
+impl AuditEntry {
+    /// Sequence number of this entry in the log (0-indexed).
+    #[must_use]
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Session that generated this event.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// The domain event.
+    #[must_use]
+    pub const fn event(&self) -> &AuditEventType {
+        &self.event
+    }
+
+    /// When this event was recorded.
+    #[must_use]
+    pub const fn timestamp(&self) -> DateTime<Utc> {
+        self.timestamp
+    }
 }
 
 /// The on-disk format: entry + its HMAC.
 ///
 /// One `AuditLine` = one JSONL line in the audit log file.
+///
+/// Fields are `pub(crate)` — external crates read entries via accessor
+/// methods, never construct `AuditLine` directly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditLine {
-    pub entry: AuditEntry,
-    pub hmac: String,
+    pub(crate) entry: AuditEntry,
+    pub(crate) hmac: String,
+}
+
+impl AuditLine {
+    /// The audit entry.
+    #[must_use]
+    pub const fn entry(&self) -> &AuditEntry {
+        &self.entry
+    }
+
+    /// The HMAC-SHA256 hex string for this entry.
+    #[must_use]
+    pub fn hmac(&self) -> &str {
+        &self.hmac
+    }
 }
 
 // ── AuditLogger ─────────────────────────────────────────────────────
@@ -167,6 +220,34 @@ fn compute_hmac(entry: &AuditEntry, key: &hmac::Key) -> Result<String, SecurityE
     Ok(hex::encode(tag.as_ref()))
 }
 
+/// Verify that an `AuditEntry`'s HMAC matches the expected hex-encoded value.
+///
+/// Uses `ring::hmac::verify` which performs constant-time comparison internally,
+/// avoiding timing oracle attacks.
+///
+/// Returns `AuditCorruption` with `line: 0` as a placeholder — callers must
+/// override the line number via `.map_err()` to provide the actual position.
+fn verify_entry_hmac(
+    entry: &AuditEntry,
+    key: &hmac::Key,
+    expected_hex: &str,
+) -> Result<(), SecurityError> {
+    let json = serde_json::to_string(entry).map_err(|e| SecurityError::AuditCorruption {
+        line: 0, // Caller overrides with actual line number.
+        reason: format!("entry serialization failed during verification: {e}"),
+    })?;
+    let expected_bytes = hex::decode(expected_hex).map_err(|_| SecurityError::AuditCorruption {
+        line: 0, // Caller overrides with actual line number.
+        reason: "invalid HMAC hex encoding".into(),
+    })?;
+    hmac::verify(key, json.as_bytes(), &expected_bytes).map_err(|_| {
+        SecurityError::AuditCorruption {
+            line: 0, // Caller overrides with actual line number.
+            reason: "HMAC mismatch — entry has been modified".into(),
+        }
+    })
+}
+
 impl AuditLogger {
     /// Create a new audit logger backed by a file at `path`.
     ///
@@ -174,6 +255,10 @@ impl AuditLogger {
     /// - Reads existing entries and verifies the hash chain on startup
     ///   (CLAUDE.md §31: "Startup routine verifies audit chain integrity").
     /// - Recovers from a partial trailing line (crash recovery) by truncating it.
+    ///
+    /// **Note:** This performs blocking file I/O (read, truncate, open). Call
+    /// during startup or from a blocking context — not from an active async
+    /// task without `spawn_blocking`.
     ///
     /// # Errors
     ///
@@ -317,8 +402,13 @@ impl AuditLogger {
                 reason: format!("read error: {e}"),
             })?;
 
+            // The audit logger never writes empty lines. Any empty line
+            // indicates tampering (insertion to obscure the log).
             if line.trim().is_empty() {
-                continue;
+                return Err(SecurityError::AuditCorruption {
+                    line: line_num,
+                    reason: "unexpected empty line — audit log may have been tampered with".into(),
+                });
             }
 
             let audit_line: AuditLine =
@@ -335,20 +425,18 @@ impl AuditLogger {
                 });
             }
 
-            // Recompute HMAC and compare.
-            let computed = compute_hmac(&audit_line.entry, signing_key).map_err(|_| {
-                SecurityError::AuditCorruption {
-                    line: line_num,
-                    reason: "failed to recompute HMAC".into(),
-                }
-            })?;
-
-            if computed != audit_line.hmac {
-                return Err(SecurityError::AuditCorruption {
-                    line: line_num,
-                    reason: "HMAC mismatch — entry has been modified".into(),
-                });
-            }
+            // Verify HMAC (constant-time via ring::hmac::verify).
+            verify_entry_hmac(&audit_line.entry, signing_key, &audit_line.hmac).map_err(
+                |e| match e {
+                    SecurityError::AuditCorruption { reason, .. } => {
+                        SecurityError::AuditCorruption {
+                            line: line_num,
+                            reason,
+                        }
+                    }
+                    other => other,
+                },
+            )?;
 
             expected_prev_hash = audit_line.hmac;
         }
@@ -379,8 +467,15 @@ impl AuditLogger {
         let mut next_sequence: u64 = 0;
 
         for (line_num, line) in lines.iter().enumerate() {
+            // The audit logger never writes empty lines. Any empty line
+            // indicates tampering, unless it's a trailing empty line from
+            // `str::lines()` split behavior (which doesn't happen — `lines()`
+            // does not yield a trailing empty string for a trailing newline).
             if line.trim().is_empty() {
-                continue;
+                return Err(SecurityError::AuditCorruption {
+                    line: line_num,
+                    reason: "unexpected empty line — audit log may have been tampered with".into(),
+                });
             }
 
             // Try parsing the line. If this is the last line and it fails,
@@ -390,11 +485,14 @@ impl AuditLogger {
                 Err(e) => {
                     if line_num == lines.len() - 1 {
                         // Last line is partial — truncate it.
+                        // NOTE: +1 assumes Unix line endings (\n). This is correct
+                        // because `writeln!` writes \n and the target platforms are
+                        // macOS/Linux (CLAUDE.md targets darwin).
                         let valid_byte_len: u64 = lines
                             .get(..line_num)
                             .unwrap_or(&[])
                             .iter()
-                            .map(|l| l.len() as u64 + 1) // +1 for newline
+                            .map(|l| l.len() as u64 + 1)
                             .sum();
                         return Ok((next_sequence, last_valid_hmac, Some(valid_byte_len)));
                     }
@@ -413,20 +511,18 @@ impl AuditLogger {
                 });
             }
 
-            // Verify HMAC.
-            let computed = compute_hmac(&audit_line.entry, signing_key).map_err(|_| {
-                SecurityError::AuditCorruption {
-                    line: line_num,
-                    reason: "failed to recompute HMAC".into(),
-                }
-            })?;
-
-            if computed != audit_line.hmac {
-                return Err(SecurityError::AuditCorruption {
-                    line: line_num,
-                    reason: "HMAC mismatch — entry has been modified".into(),
-                });
-            }
+            // Verify HMAC (constant-time via ring::hmac::verify).
+            verify_entry_hmac(&audit_line.entry, signing_key, &audit_line.hmac).map_err(
+                |e| match e {
+                    SecurityError::AuditCorruption { reason, .. } => {
+                        SecurityError::AuditCorruption {
+                            line: line_num,
+                            reason,
+                        }
+                    }
+                    other => other,
+                },
+            )?;
 
             next_sequence = audit_line.entry.sequence + 1;
             last_valid_hmac = audit_line.hmac;
@@ -764,9 +860,11 @@ mod tests {
             },
             AuditEventType::PairingCodeIssued {
                 channel_id: "signal".into(),
+                sender_id: "+15551234567".into(),
             },
             AuditEventType::PairingApproved {
                 channel_id: "signal".into(),
+                sender_id: "+15551234567".into(),
             },
             AuditEventType::AuthenticationFailed {
                 key_id: "freebird_abc".into(),
@@ -993,6 +1091,79 @@ mod tests {
         assert!(AuditLogger::verify_chain(&path, &test_key()).is_ok());
     }
 
+    // ── 17a. test_verify_chain_detects_inserted_empty_line ────────
+
+    #[tokio::test]
+    async fn test_verify_chain_detects_inserted_empty_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let key = test_key();
+        let logger = AuditLogger::new(&path, test_key()).unwrap();
+
+        logger.record("s1", sample_event()).await.unwrap();
+        logger
+            .record(
+                "s1",
+                AuditEventType::SessionEnded {
+                    reason: "done".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // Insert an empty line between entries.
+        let content = std::fs::read_to_string(&path).unwrap();
+        let file_lines: Vec<&str> = content.lines().collect();
+        let with_empty = format!("{}\n\n{}\n", file_lines[0], file_lines[1]);
+        std::fs::write(&path, with_empty).unwrap();
+
+        let result = AuditLogger::verify_chain(&path, &key);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SecurityError::AuditCorruption { line: 1, reason } => {
+                assert!(reason.contains("empty line"), "reason: {reason}");
+            }
+            other => panic!("expected AuditCorruption at line 1, got: {other:?}"),
+        }
+    }
+
+    // ── 17a2. test_new_detects_inserted_empty_line ──────────────────
+
+    #[tokio::test]
+    async fn test_new_detects_inserted_empty_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let logger = AuditLogger::new(&path, test_key()).unwrap();
+
+        logger.record("s1", sample_event()).await.unwrap();
+        logger
+            .record(
+                "s1",
+                AuditEventType::SessionEnded {
+                    reason: "done".into(),
+                },
+            )
+            .await
+            .unwrap();
+        drop(logger);
+
+        // Insert an empty line between entries.
+        let content = std::fs::read_to_string(&path).unwrap();
+        let file_lines: Vec<&str> = content.lines().collect();
+        let with_empty = format!("{}\n\n{}\n", file_lines[0], file_lines[1]);
+        std::fs::write(&path, with_empty).unwrap();
+
+        // Reopening the logger triggers verify_and_recover, which should reject.
+        let result = AuditLogger::new(&path, test_key());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SecurityError::AuditCorruption { line: 1, reason } => {
+                assert!(reason.contains("empty line"), "reason: {reason}");
+            }
+            other => panic!("expected AuditCorruption at line 1, got: {other:?}"),
+        }
+    }
+
     // ── 17b. test_verify_chain_nonexistent_file ────────────────────
 
     #[test]
@@ -1147,6 +1318,7 @@ mod tests {
             },
             AuditEventType::PairingCodeIssued {
                 channel_id: "signal".into(),
+                sender_id: "+15551234567".into(),
             },
             AuditEventType::EgressBlocked {
                 host: "api.anthropic.com".into(),
