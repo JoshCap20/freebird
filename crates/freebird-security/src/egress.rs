@@ -12,6 +12,14 @@ use crate::error::SecurityError;
 ///
 /// Default policy is deny-all: only hosts explicitly added to the allowlist
 /// are reachable. The agent cannot modify its own egress policy.
+///
+/// # Future: DNS rebinding prevention
+///
+/// This policy validates hostnames but does not verify resolved IP addresses.
+/// A DNS rebinding attack could cause an allowlisted hostname to resolve to
+/// a private/loopback IP (`10.x`, `172.16-31.x`, `192.168.x`, `127.x`, `::1`),
+/// enabling SSRF to internal services. IP validation should be added at the
+/// HTTP client layer before outbound connections are established.
 pub struct EgressPolicy {
     allowed_hosts: HashSet<String>,
     allowed_ports: HashSet<u16>,
@@ -36,6 +44,11 @@ impl EgressPolicy {
     /// Validate a parsed URL against this policy.
     ///
     /// Checks that the host is in the allowlist and the port is permitted.
+    /// When no explicit port is present in the URL, defaults to 443 (HTTPS).
+    ///
+    /// **Assumption**: This method is designed to be called after scheme
+    /// validation (e.g., by `SafeUrl::from_tainted()` which enforces HTTPS).
+    /// The port default of 443 is incorrect for non-HTTPS schemes.
     ///
     /// # Errors
     ///
