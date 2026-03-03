@@ -1,0 +1,12 @@
+[runtime]
+default_model = "claude-opus-4-6-20250929"
+max_turns_per_session = 50
+drain_timeout_secs = 30
+
+[[providers]]
+id = "anthropic"
+kind = "anthropic"
+
+[[channels]]
+id = "cli"
+kind = "cli"

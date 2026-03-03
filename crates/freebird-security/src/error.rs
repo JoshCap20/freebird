@@ -1,0 +1,1 @@
+//! SecurityError enum.

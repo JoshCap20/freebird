@@ -1,0 +1,26 @@
+[package]
+name = "freebird-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Freebird daemon binary — the composition root"
+
+[[bin]]
+name = "freebird"
+path = "src/main.rs"
+
+[dependencies]
+freebird-traits = { workspace = true }
+freebird-types = { workspace = true }
+freebird-security = { workspace = true }
+freebird-runtime = { workspace = true }
+freebird-providers = { workspace = true }
+freebird-channels = { workspace = true }
+freebird-tools = { workspace = true }
+freebird-memory = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+figment = { workspace = true }
+anyhow = { workspace = true }

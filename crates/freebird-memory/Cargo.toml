@@ -1,0 +1,15 @@
+[package]
+name = "freebird-memory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Memory backend implementations for Freebird — file-based, SQLite, etc."
+
+[dependencies]
+freebird-traits = { workspace = true }
+freebird-types = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }

@@ -70,6 +70,8 @@ freebird-daemon      Binary entry point, config, lifecycle
 
 Dependencies flow in one direction. `freebird-traits` and `freebird-types` depend on nothing internal. Security primitives live in `freebird-security` and are used everywhere — they aren't an afterthought bolted onto the runtime.
 
+Will likely eventually move crates to separate repos if project is ever big enough
+
 ## Status
 
 Freebird is in early development. The current focus is on the core agent loop, CLI channel, Anthropic provider, and the security layer described above.
