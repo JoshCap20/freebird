@@ -13,6 +13,14 @@ use crate::provider::ToolDefinition;
 /// Finer-grained than a simple read/write/execute model — separating
 /// `FileDelete` from `FileWrite`, `ProcessSpawn` from `ShellExecute`,
 /// and inbound vs. outbound network access enables least-privilege grants.
+///
+/// # Variant ordering contract
+///
+/// `Ord` is derived, so variant declaration order determines `BTreeSet`
+/// iteration and serialization order. Reordering variants changes the
+/// byte-level representation of serialized `CapabilityGrant`s, which
+/// breaks HMAC signatures over persisted grants. **Append new variants
+/// at the end only.**
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
@@ -25,6 +33,10 @@ pub enum Capability {
     NetworkListen,
     EnvRead,
 }
+
+/// The number of variants in [`Capability`]. Used by test helpers to
+/// detect when a new variant is added without updating exhaustive lists.
+pub const CAPABILITY_VARIANT_COUNT: usize = 8;
 
 /// How dangerous a tool invocation is — drives consent prompts and audit depth.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

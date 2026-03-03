@@ -242,7 +242,14 @@ mod tests {
     }
 
     /// Helper: all capabilities.
+    ///
+    /// Guarded by a static assertion against `CAPABILITY_VARIANT_COUNT` so
+    /// adding a new variant without updating this list is a compile error.
     fn all_caps() -> BTreeSet<Capability> {
+        const _: () = assert!(
+            freebird_traits::tool::CAPABILITY_VARIANT_COUNT == 8,
+            "Capability variant added — update all_caps() and arbitrary_capability()"
+        );
         caps(&[
             Capability::FileRead,
             Capability::FileWrite,
@@ -808,6 +815,43 @@ mod tests {
         let json1 = serde_json::to_string(&grant).expect("serialize 1");
         let json2 = serde_json::to_string(&grant).expect("serialize 2");
         assert_eq!(json1, json2, "BTreeSet should produce deterministic JSON");
+    }
+
+    // ── Deserialization safety tests ──────────────────────────────
+
+    #[test]
+    fn test_deserialized_grant_enforces_sandbox_on_sub_grant() {
+        // Simulate a grant loaded from disk whose sandbox_root is stale
+        // (e.g., the directory was deleted and recreated elsewhere).
+        // sub_grant() must still enforce containment via canonicalize().
+        let tmp = TempDir::new().expect("create temp dir");
+        let parent_path = tmp.path().canonicalize().expect("canonicalize");
+        let child_dir = parent_path.join("child");
+        std::fs::create_dir(&child_dir).expect("create child dir");
+
+        // Construct via new(), serialize, then deserialize — round-tripped
+        // grants have canonical paths only if the filesystem hasn't changed.
+        let grant =
+            CapabilityGrant::new(all_caps(), parent_path.clone(), None).expect("should be Ok");
+        let json = serde_json::to_string(&grant).expect("serialize");
+        let deserialized: CapabilityGrant = serde_json::from_str(&json).expect("deserialize");
+
+        // sub_grant to a subdirectory should still work
+        let child = deserialized
+            .sub_grant(BTreeSet::new(), child_dir, None)
+            .expect("sub_grant to subdirectory should succeed");
+        assert!(child.sandbox_root().starts_with(&parent_path));
+
+        // sub_grant to an outside directory should still be rejected
+        let other = TempDir::new().expect("create other dir");
+        let other_path = other.path().canonicalize().expect("canonicalize");
+        let err = deserialized
+            .sub_grant(BTreeSet::new(), other_path, None)
+            .expect_err("sub_grant outside sandbox should fail");
+        assert!(
+            matches!(err, SecurityError::SubGrantSandboxEscape { .. }),
+            "expected SubGrantSandboxEscape, got {err:?}"
+        );
     }
 
     // ── Property-based tests ───────────────────────────────────────
