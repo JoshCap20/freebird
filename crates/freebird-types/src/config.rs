@@ -140,18 +140,44 @@ pub struct LoggingConfig {
 }
 
 #[cfg(test)]
+// `indexing_slicing`: tests index into known-length config arrays (e.g., `channels[0]`).
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
-    /// Build a minimal valid TOML config with the given `[runtime]` block.
-    /// All non-runtime sections use fixed valid values so tests can focus
-    /// on runtime field variations without duplicating boilerplate.
-    fn config_toml_with_runtime(runtime_block: &str) -> String {
+    /// Build a minimal valid TOML config with customizable sections.
+    ///
+    /// All sections use fixed valid defaults so tests can focus on one
+    /// section at a time without duplicating boilerplate. Pass section
+    /// overrides as `(section_name, toml_body)` pairs — they replace
+    /// the corresponding default section entirely.
+    fn config_toml(overrides: &[(&str, &str)]) -> String {
+        let runtime = overrides.iter().find(|(k, _)| *k == "runtime").map_or(
+            r#"default_model = "m"
+default_provider = "p"
+max_output_tokens = 1
+max_tool_rounds = 1
+max_turns_per_session = 1
+drain_timeout_secs = 1"#,
+            |(_, v)| v,
+        );
+
+        let security = overrides.iter().find(|(k, _)| *k == "security").map_or(
+            r#"max_tool_calls_per_turn = 25
+require_consent_above = "high""#,
+            |(_, v)| v,
+        );
+
+        let logging = overrides.iter().find(|(k, _)| *k == "logging").map_or(
+            r#"level = "info"
+format = "pretty""#,
+            |(_, v)| v,
+        );
+
         format!(
             r#"
 [runtime]
-{runtime_block}
+{runtime}
 
 [[providers]]
 id = "anthropic"
@@ -169,14 +195,17 @@ default_timeout_secs = 30
 kind = "file"
 
 [security]
-max_tool_calls_per_turn = 25
-require_consent_above = "high"
+{security}
 
 [logging]
-level = "info"
-format = "pretty"
+{logging}
 "#
         )
+    }
+
+    /// Convenience: build a config with only a runtime override.
+    fn config_toml_with_runtime(runtime_block: &str) -> String {
+        config_toml(&[("runtime", runtime_block)])
     }
 
     #[test]
@@ -275,40 +304,9 @@ drain_timeout_secs = 1"#,
             ("high", RiskLevel::High),
             ("critical", RiskLevel::Critical),
         ] {
-            let toml_str = format!(
-                r#"
-[runtime]
-default_model = "m"
-default_provider = "p"
-max_output_tokens = 1
-max_tool_rounds = 1
-max_turns_per_session = 1
-drain_timeout_secs = 1
-
-[[providers]]
-id = "p"
-kind = "anthropic"
-
-[[channels]]
-id = "c"
-kind = "cli"
-
-[tools]
-sandbox_root = "/tmp"
-default_timeout_secs = 1
-
-[memory]
-kind = "file"
-
-[security]
-max_tool_calls_per_turn = 1
-require_consent_above = "{value}"
-
-[logging]
-level = "info"
-format = "pretty"
-"#
-            );
+            let security_block =
+                format!("max_tool_calls_per_turn = 1\nrequire_consent_above = \"{value}\"");
+            let toml_str = config_toml(&[("security", &security_block)]);
             let config: AppConfig = toml::from_str(&toml_str).unwrap();
             assert_eq!(config.security.require_consent_above, expected);
         }
@@ -316,39 +314,11 @@ format = "pretty"
 
     #[test]
     fn test_security_config_invalid_risk_level_errors() {
-        let toml_str = r#"
-[runtime]
-default_model = "m"
-default_provider = "p"
-max_output_tokens = 1
-max_tool_rounds = 1
-max_turns_per_session = 1
-drain_timeout_secs = 1
-
-[[providers]]
-id = "p"
-kind = "anthropic"
-
-[[channels]]
-id = "c"
-kind = "cli"
-
-[tools]
-sandbox_root = "/tmp"
-default_timeout_secs = 1
-
-[memory]
-kind = "file"
-
-[security]
-max_tool_calls_per_turn = 1
-require_consent_above = "banana"
-
-[logging]
-level = "info"
-format = "pretty"
-"#;
-        let result = toml::from_str::<AppConfig>(toml_str);
+        let toml_str = config_toml(&[(
+            "security",
+            "max_tool_calls_per_turn = 1\nrequire_consent_above = \"banana\"",
+        )]);
+        let result = toml::from_str::<AppConfig>(&toml_str);
         assert!(
             result.is_err(),
             "invalid risk level should fail deserialization"
@@ -396,39 +366,8 @@ format = "pretty"
 
     #[test]
     fn test_invalid_log_level_errors() {
-        let toml_str = r#"
-[runtime]
-default_model = "m"
-default_provider = "p"
-max_output_tokens = 1
-max_tool_rounds = 1
-max_turns_per_session = 1
-drain_timeout_secs = 1
-
-[[providers]]
-id = "p"
-kind = "anthropic"
-
-[[channels]]
-id = "c"
-kind = "cli"
-
-[tools]
-sandbox_root = "/tmp"
-default_timeout_secs = 1
-
-[memory]
-kind = "file"
-
-[security]
-max_tool_calls_per_turn = 1
-require_consent_above = "high"
-
-[logging]
-level = "verbose"
-format = "pretty"
-"#;
-        let result = toml::from_str::<AppConfig>(toml_str);
+        let toml_str = config_toml(&[("logging", "level = \"verbose\"\nformat = \"pretty\"")]);
+        let result = toml::from_str::<AppConfig>(&toml_str);
         assert!(
             result.is_err(),
             "invalid log level should fail deserialization"
@@ -437,39 +376,8 @@ format = "pretty"
 
     #[test]
     fn test_invalid_log_format_errors() {
-        let toml_str = r#"
-[runtime]
-default_model = "m"
-default_provider = "p"
-max_output_tokens = 1
-max_tool_rounds = 1
-max_turns_per_session = 1
-drain_timeout_secs = 1
-
-[[providers]]
-id = "p"
-kind = "anthropic"
-
-[[channels]]
-id = "c"
-kind = "cli"
-
-[tools]
-sandbox_root = "/tmp"
-default_timeout_secs = 1
-
-[memory]
-kind = "file"
-
-[security]
-max_tool_calls_per_turn = 1
-require_consent_above = "high"
-
-[logging]
-level = "info"
-format = "xml"
-"#;
-        let result = toml::from_str::<AppConfig>(toml_str);
+        let toml_str = config_toml(&[("logging", "level = \"info\"\nformat = \"xml\"")]);
+        let result = toml::from_str::<AppConfig>(&toml_str);
         assert!(
             result.is_err(),
             "invalid log format should fail deserialization"
