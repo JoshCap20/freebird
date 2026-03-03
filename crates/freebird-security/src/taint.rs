@@ -1,3 +1,22 @@
+/*
+SECURITY INVARIANT
+-------------------
+
+The types in this module are the primary compile-time security boundary
+for untrusted input. DO NOT weaken these invariants without a formal
+security review.
+
+- `Tainted` and `TaintedToolInput` MUST NOT implement `Display`, `Deref`,
+    `AsRef<str>`, `Into<String>`, or any other convenience that exposes the
+    contained raw string/JSON to downstream crates.
+- The inner value accessor is intentionally `pub(crate)` (or private).
+    Changing its visibility to `pub` or exposing an API that returns the raw
+    value is a security regression.
+- Any removal or relaxation of these rules requires: (1) a code review
+    explicitly approving the change, and (2) an entry in the security
+    changelog documenting the rationale.
+*/
+
 //! Opaque wrappers for untrusted external input.
 //!
 //! `Tainted` wraps raw string input from channels. `TaintedToolInput` wraps
