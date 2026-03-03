@@ -15,6 +15,13 @@ security review.
 - Any removal or relaxation of these rules requires: (1) a code review
     explicitly approving the change, and (2) an entry in the security
     changelog documenting the rationale.
+
+ENFORCEMENT: These invariants are enforced by code review, not compile-fail
+tests. trybuild-based compile-fail tests were evaluated and deferred: they
+are brittle across compiler versions, produce opaque failure messages, and
+add a heavy dev-dependency for checks that are trivially caught in review.
+The `pub(crate)` boundary is the primary enforcement mechanism — any attempt
+to call `inner()` from outside this crate is a hard compiler error.
 */
 
 //! Opaque wrappers for untrusted external input.
