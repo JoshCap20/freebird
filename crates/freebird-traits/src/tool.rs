@@ -39,7 +39,14 @@ pub enum Capability {
 pub const CAPABILITY_VARIANT_COUNT: usize = 8;
 
 /// How dangerous a tool invocation is — drives consent prompts and audit depth.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// # Variant ordering contract
+///
+/// `Ord` is derived so that `Low < Medium < High < Critical`. The consent
+/// gate (CLAUDE.md §15) compares `tool_risk >= config.require_consent_above`
+/// — this ordering makes that comparison correct.  **Append new variants
+/// at the end only; inserting in the middle changes comparison semantics.**
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RiskLevel {
     Low,
@@ -112,4 +119,42 @@ pub enum ToolError {
 
     #[error("security violation in tool `{tool}`: {reason}")]
     SecurityViolation { tool: String, reason: String },
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_risk_level_ordering_low_through_critical() {
+        assert!(RiskLevel::Low < RiskLevel::Medium);
+        assert!(RiskLevel::Medium < RiskLevel::High);
+        assert!(RiskLevel::High < RiskLevel::Critical);
+    }
+
+    #[test]
+    fn test_risk_level_consent_gate_comparison() {
+        // Simulates the consent gate check: tool_risk >= config.require_consent_above
+        let threshold = RiskLevel::High;
+        assert!(RiskLevel::Critical >= threshold);
+        assert!(RiskLevel::High >= threshold);
+        assert!(RiskLevel::Medium < threshold);
+        assert!(RiskLevel::Low < threshold);
+    }
+
+    #[test]
+    fn test_risk_level_serde_roundtrip() {
+        for (level, expected_json) in [
+            (RiskLevel::Low, "\"low\""),
+            (RiskLevel::Medium, "\"medium\""),
+            (RiskLevel::High, "\"high\""),
+            (RiskLevel::Critical, "\"critical\""),
+        ] {
+            let json = serde_json::to_string(&level).unwrap();
+            assert_eq!(json, expected_json);
+            let back: RiskLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, level);
+        }
+    }
 }

@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use freebird_traits::tool::RiskLevel;
+
 /// Top-level application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -37,7 +39,7 @@ pub struct RuntimeConfig {
 }
 
 /// Which LLM provider backend to use.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
     Anthropic,
@@ -55,7 +57,7 @@ pub struct ProviderConfig {
 }
 
 /// Which transport channel to use.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChannelKind {
     Cli,
@@ -81,8 +83,7 @@ pub struct ToolsConfig {
 }
 
 /// Which memory storage backend to use.
-/// TODO: Extend this with in-memory, Redis, Postgres, vector DBs, etc. as needed.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryKind {
     File,
@@ -100,30 +101,83 @@ pub struct MemoryConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityConfig {
     pub max_tool_calls_per_turn: usize,
-    pub require_consent_above: String,
+    /// Minimum risk level that requires explicit human consent before tool
+    /// execution. Tools at this level or above trigger the consent gate.
+    pub require_consent_above: RiskLevel,
+}
+
+/// Log severity level.
+///
+/// Replaces raw `String` per CLAUDE.md §3.2 ("make illegal states
+/// unrepresentable") and §30 ("magic strings → enums").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+/// Log output format.
+///
+/// Replaces raw `String` per CLAUDE.md §3.2 and §30.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogFormat {
+    Pretty,
+    Json,
+    Compact,
 }
 
 /// Logging and audit configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingConfig {
-    pub level: String,
-    pub format: String,
+    pub level: LogLevel,
+    pub format: LogFormat,
     pub audit_dir: Option<PathBuf>,
 }
 
 #[cfg(test)]
+// `indexing_slicing`: tests index into known-length config arrays (e.g., `channels[0]`).
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
-    /// Build a minimal valid TOML config with the given `[runtime]` block.
-    /// All non-runtime sections use fixed valid values so tests can focus
-    /// on runtime field variations without duplicating boilerplate.
-    fn config_toml_with_runtime(runtime_block: &str) -> String {
+    /// Build a minimal valid TOML config with customizable sections.
+    ///
+    /// All sections use fixed valid defaults so tests can focus on one
+    /// section at a time without duplicating boilerplate. Pass section
+    /// overrides as `(section_name, toml_body)` pairs — they replace
+    /// the corresponding default section entirely.
+    fn config_toml(overrides: &[(&str, &str)]) -> String {
+        let runtime = overrides.iter().find(|(k, _)| *k == "runtime").map_or(
+            r#"default_model = "m"
+default_provider = "p"
+max_output_tokens = 1
+max_tool_rounds = 1
+max_turns_per_session = 1
+drain_timeout_secs = 1"#,
+            |(_, v)| v,
+        );
+
+        let security = overrides.iter().find(|(k, _)| *k == "security").map_or(
+            r#"max_tool_calls_per_turn = 25
+require_consent_above = "high""#,
+            |(_, v)| v,
+        );
+
+        let logging = overrides.iter().find(|(k, _)| *k == "logging").map_or(
+            r#"level = "info"
+format = "pretty""#,
+            |(_, v)| v,
+        );
+
         format!(
             r#"
 [runtime]
-{runtime_block}
+{runtime}
 
 [[providers]]
 id = "anthropic"
@@ -141,14 +195,17 @@ default_timeout_secs = 30
 kind = "file"
 
 [security]
-max_tool_calls_per_turn = 25
-require_consent_above = "high"
+{security}
 
 [logging]
-level = "info"
-format = "pretty"
+{logging}
 "#
         )
+    }
+
+    /// Convenience: build a config with only a runtime override.
+    fn config_toml_with_runtime(runtime_block: &str) -> String {
+        config_toml(&[("runtime", runtime_block)])
     }
 
     #[test]
@@ -220,6 +277,110 @@ drain_timeout_secs = 30"#,
         assert!(
             config.runtime.temperature.is_none(),
             "temperature should be None when absent, not a default value"
+        );
+    }
+
+    // ── New tests for enum config fields ──────────────────────────────
+
+    #[test]
+    fn test_security_config_require_consent_above_is_risk_level() {
+        let toml_str = config_toml_with_runtime(
+            r#"default_model = "m"
+default_provider = "p"
+max_output_tokens = 1
+max_tool_rounds = 1
+max_turns_per_session = 1
+drain_timeout_secs = 1"#,
+        );
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(config.security.require_consent_above, RiskLevel::High);
+    }
+
+    #[test]
+    fn test_security_config_all_risk_levels() {
+        for (value, expected) in [
+            ("low", RiskLevel::Low),
+            ("medium", RiskLevel::Medium),
+            ("high", RiskLevel::High),
+            ("critical", RiskLevel::Critical),
+        ] {
+            let security_block =
+                format!("max_tool_calls_per_turn = 1\nrequire_consent_above = \"{value}\"");
+            let toml_str = config_toml(&[("security", &security_block)]);
+            let config: AppConfig = toml::from_str(&toml_str).unwrap();
+            assert_eq!(config.security.require_consent_above, expected);
+        }
+    }
+
+    #[test]
+    fn test_security_config_invalid_risk_level_errors() {
+        let toml_str = config_toml(&[(
+            "security",
+            "max_tool_calls_per_turn = 1\nrequire_consent_above = \"banana\"",
+        )]);
+        let result = toml::from_str::<AppConfig>(&toml_str);
+        assert!(
+            result.is_err(),
+            "invalid risk level should fail deserialization"
+        );
+    }
+
+    #[test]
+    fn test_log_level_serde_roundtrip() {
+        for (level, expected_json) in [
+            (LogLevel::Trace, "\"trace\""),
+            (LogLevel::Debug, "\"debug\""),
+            (LogLevel::Info, "\"info\""),
+            (LogLevel::Warn, "\"warn\""),
+            (LogLevel::Error, "\"error\""),
+        ] {
+            let json = serde_json::to_string(&level).unwrap();
+            assert_eq!(json, expected_json);
+            let back: LogLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, level);
+        }
+    }
+
+    #[test]
+    fn test_log_format_serde_roundtrip() {
+        for (fmt, expected_json) in [
+            (LogFormat::Pretty, "\"pretty\""),
+            (LogFormat::Json, "\"json\""),
+            (LogFormat::Compact, "\"compact\""),
+        ] {
+            let json = serde_json::to_string(&fmt).unwrap();
+            assert_eq!(json, expected_json);
+            let back: LogFormat = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, fmt);
+        }
+    }
+
+    #[test]
+    fn test_logging_config_deserialized_from_default_toml() {
+        let toml_str = include_str!("../../../config/default.toml");
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+
+        assert_eq!(config.logging.level, LogLevel::Info);
+        assert_eq!(config.logging.format, LogFormat::Pretty);
+    }
+
+    #[test]
+    fn test_invalid_log_level_errors() {
+        let toml_str = config_toml(&[("logging", "level = \"verbose\"\nformat = \"pretty\"")]);
+        let result = toml::from_str::<AppConfig>(&toml_str);
+        assert!(
+            result.is_err(),
+            "invalid log level should fail deserialization"
+        );
+    }
+
+    #[test]
+    fn test_invalid_log_format_errors() {
+        let toml_str = config_toml(&[("logging", "level = \"info\"\nformat = \"xml\"")]);
+        let result = toml::from_str::<AppConfig>(&toml_str);
+        assert!(
+            result.is_err(),
+            "invalid log format should fail deserialization"
         );
     }
 }

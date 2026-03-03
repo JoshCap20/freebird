@@ -19,3 +19,7 @@ allow = [
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+deny = [
+    { name = "openssl", wrappers = [] },
+    { name = "openssl-sys", wrappers = [] },
+]
