@@ -120,6 +120,21 @@ impl TaintedToolInput {
         SafeFilePath::from_tainted(&tainted, sandbox)
     }
 
+    /// Extract a string field and validate it as a path for file creation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SecurityError::MissingField` if the key doesn't exist or
+    /// isn't a string. Returns path-related errors if validation fails.
+    pub fn extract_path_for_creation(
+        &self,
+        key: &str,
+        sandbox: &Path,
+    ) -> Result<SafeFilePath, SecurityError> {
+        let tainted = self.extract_string(key)?;
+        SafeFilePath::from_tainted_for_creation(&tainted, sandbox)
+    }
+
     /// Extract a string field and validate it as a shell argument.
     ///
     /// # Errors
@@ -236,5 +251,44 @@ mod tests {
             "Debug must not reveal JSON contents"
         );
         assert!(debug.contains("TaintedToolInput"));
+    }
+
+    #[test]
+    fn test_extract_path_for_creation_valid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = TaintedToolInput::new(serde_json::json!({
+            "path": "newfile.txt"
+        }));
+        let safe = input.extract_path_for_creation("path", tmp.path()).unwrap();
+        let expected = tmp.path().canonicalize().unwrap().join("newfile.txt");
+        assert_eq!(safe.as_path(), expected);
+    }
+
+    #[test]
+    fn test_extract_path_for_creation_missing_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = TaintedToolInput::new(serde_json::json!({"other": "value"}));
+        let result = input.extract_path_for_creation("path", tmp.path());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SecurityError::MissingField { field, .. } => {
+                assert_eq!(field, "path");
+            }
+            other => panic!("expected MissingField, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_extract_path_for_creation_non_string() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = TaintedToolInput::new(serde_json::json!({"path": 42}));
+        let result = input.extract_path_for_creation("path", tmp.path());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SecurityError::MissingField { field, .. } => {
+                assert_eq!(field, "path");
+            }
+            other => panic!("expected MissingField, got: {other:?}"),
+        }
     }
 }
