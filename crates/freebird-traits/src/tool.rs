@@ -48,9 +48,14 @@ pub struct ToolInfo {
 }
 
 /// Context passed to every tool invocation by the runtime.
+///
+/// The runtime verifies capability grants and logs audit events before
+/// calling `Tool::execute`. This context provides sandbox boundaries and
+/// the granted capabilities for tools that need sub-capability checks.
 pub struct ToolContext<'a> {
     pub session_id: &'a SessionId,
     pub sandbox_root: &'a Path,
+    pub granted_capabilities: &'a [Capability],
 }
 
 /// The result of a tool execution.
