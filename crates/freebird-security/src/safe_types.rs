@@ -79,34 +79,15 @@ pub struct SafeFilePath {
 }
 
 impl SafeFilePath {
-    /// Validate untrusted input as a filesystem path within a sandbox.
+    /// Shared early-rejection checks for all path constructors.
     ///
-    /// - Rejects null bytes
-    /// - Canonicalizes (resolves symlinks, `..`, `.`)
-    /// - Verifies result is within sandbox root
-    ///
-    /// # Errors
-    ///
-    /// Returns `SecurityError::PathTraversal` if the path contains null bytes
-    /// or escapes the sandbox after canonicalization.
-    /// Returns `SecurityError::PathResolution` if canonicalization fails.
-    pub fn from_tainted(t: &Tainted, sandbox: &Path) -> Result<Self, SecurityError> {
-        let raw = t.inner();
-
-        // Reject empty/whitespace-only — likely a tool input bug, not a real path.
-        // Without this, root.join("").canonicalize() silently succeeds and returns
-        // the root — a surprising non-error that could mask tool implementation bugs.
+    /// Rejects inputs that are categorically invalid regardless of which
+    /// constructor is being used:
+    /// - Empty or whitespace-only (masks tool input bugs)
+    /// - Null bytes (OS-level path separator confusion)
+    /// - Absolute paths (`PathBuf::join` silently discards the root)
+    fn reject_invalid_raw(raw: &str, sandbox: &Path) -> Result<(), SecurityError> {
         if raw.trim().is_empty() {
-            return Err(SecurityError::PathTraversal {
-                attempted: PathBuf::from(raw),
-                sandbox: sandbox.to_owned(),
-            });
-        }
-
-        // Reject absolute paths before join() — PathBuf::join with an absolute
-        // path silently discards the root, which produces confusing errors downstream.
-        // Catching it here gives a clear PathTraversal error every time.
-        if raw.starts_with('/') || raw.starts_with('\\') {
             return Err(SecurityError::PathTraversal {
                 attempted: PathBuf::from(raw),
                 sandbox: sandbox.to_owned(),
@@ -119,6 +100,33 @@ impl SafeFilePath {
                 sandbox: sandbox.to_owned(),
             });
         }
+
+        if raw.starts_with('/') || raw.starts_with('\\') {
+            return Err(SecurityError::PathTraversal {
+                attempted: PathBuf::from(raw),
+                sandbox: sandbox.to_owned(),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Validate untrusted input as a filesystem path within a sandbox.
+    ///
+    /// - Rejects empty, whitespace-only, and absolute paths
+    /// - Rejects null bytes
+    /// - Canonicalizes (resolves symlinks, `..`, `.`)
+    /// - Verifies result is within sandbox root
+    ///
+    /// # Errors
+    ///
+    /// Returns `SecurityError::PathTraversal` if the path is empty, absolute,
+    /// contains null bytes, or escapes the sandbox after canonicalization.
+    /// Returns `SecurityError::PathResolution` if canonicalization fails
+    /// (e.g., the path does not exist).
+    pub fn from_tainted(t: &Tainted, sandbox: &Path) -> Result<Self, SecurityError> {
+        let raw = t.inner();
+        Self::reject_invalid_raw(raw, sandbox)?;
 
         let root = sandbox
             .canonicalize()
@@ -157,7 +165,7 @@ impl SafeFilePath {
     ///
     /// # Errors
     ///
-    /// - `PathTraversal` — null bytes, empty input, absolute path, sandbox escape,
+    /// - `PathTraversal` — empty input, absolute path, null bytes, sandbox escape,
     ///   no filename component, trailing slash, or existing symlink pointing outside sandbox
     /// - `PathResolution` — parent directory doesn't exist or sandbox can't be canonicalized
     ///
@@ -170,32 +178,9 @@ impl SafeFilePath {
     /// for kernel-level fix.
     pub fn from_tainted_for_creation(t: &Tainted, sandbox: &Path) -> Result<Self, SecurityError> {
         let raw = t.inner();
+        Self::reject_invalid_raw(raw, sandbox)?;
 
-        // 1. Reject empty/whitespace-only
-        if raw.trim().is_empty() {
-            return Err(SecurityError::PathTraversal {
-                attempted: PathBuf::from(raw),
-                sandbox: sandbox.to_owned(),
-            });
-        }
-
-        // 2. Reject null bytes
-        if raw.contains('\0') {
-            return Err(SecurityError::PathTraversal {
-                attempted: PathBuf::from(raw),
-                sandbox: sandbox.to_owned(),
-            });
-        }
-
-        // 3. Reject absolute paths
-        if raw.starts_with('/') || raw.starts_with('\\') {
-            return Err(SecurityError::PathTraversal {
-                attempted: PathBuf::from(raw),
-                sandbox: sandbox.to_owned(),
-            });
-        }
-
-        // 4. Reject trailing slash (indicates directory, not file)
+        // Reject trailing slash (indicates directory, not file)
         if raw.ends_with('/') || raw.ends_with('\\') {
             return Err(SecurityError::PathTraversal {
                 attempted: PathBuf::from(raw),
@@ -205,7 +190,7 @@ impl SafeFilePath {
 
         let path = Path::new(raw);
 
-        // 5. Extract filename — reject if none (catches "." and "..")
+        // Extract filename — reject if none (catches "." and "..")
         let filename = path
             .file_name()
             .ok_or_else(|| SecurityError::PathTraversal {
@@ -213,7 +198,7 @@ impl SafeFilePath {
                 sandbox: sandbox.to_owned(),
             })?;
 
-        // 6. Canonicalize sandbox root
+        // Canonicalize sandbox root
         let root = sandbox
             .canonicalize()
             .map_err(|e| SecurityError::PathResolution {
@@ -221,17 +206,18 @@ impl SafeFilePath {
                 source: e,
             })?;
 
-        // 7. Canonicalize parent directory (must exist)
+        // Canonicalize parent directory (must exist)
         let parent = path.parent().unwrap_or_else(|| Path::new(""));
+        let parent_candidate = root.join(parent);
         let canonical_parent =
-            root.join(parent)
+            parent_candidate
                 .canonicalize()
                 .map_err(|e| SecurityError::PathResolution {
-                    path: root.join(parent),
+                    path: parent_candidate,
                     source: e,
                 })?;
 
-        // 8. Verify parent is within sandbox
+        // Verify parent is within sandbox
         if !canonical_parent.starts_with(&root) {
             return Err(SecurityError::PathTraversal {
                 attempted: canonical_parent,
@@ -239,12 +225,12 @@ impl SafeFilePath {
             });
         }
 
-        // 9. Construct resolved path
+        // Construct resolved path
         let resolved = canonical_parent.join(filename);
 
-        // 10. Overwrite-safe: if the path already exists (e.g., as a symlink),
-        //     canonicalize it to detect symlink escapes. A symlink to /etc/passwd
-        //     at this path would pass steps 6-9 but canonicalize reveals the escape.
+        // Overwrite-safe: if the path already exists (e.g., as a symlink),
+        // canonicalize it to detect symlink escapes. A symlink to /etc/passwd
+        // at this path would pass parent validation but canonicalize reveals the escape.
         if resolved.exists() {
             let actual = resolved
                 .canonicalize()
@@ -547,7 +533,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let t = Tainted::new("/etc/passwd");
         let result = SafeFilePath::from_tainted(&t, tmp.path());
-        // canonicalize will resolve /etc/passwd which is outside sandbox
+        // Early absolute-path check rejects before canonicalize is reached
         assert!(result.is_err());
     }
 
@@ -626,6 +612,18 @@ mod tests {
     }
 
     #[test]
+    fn test_from_tainted_rejects_backslash_absolute() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = Tainted::new("\\etc\\passwd");
+        let result = SafeFilePath::from_tainted(&t, tmp.path());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SecurityError::PathTraversal { .. } => {}
+            other => panic!("expected PathTraversal, got: {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_from_tainted_dotdot_within_sandbox_ok() {
         let tmp = tempfile::tempdir().unwrap();
         let subdir = tmp.path().join("subdir");
@@ -649,6 +647,11 @@ mod tests {
         let t = Tainted::new("subdir/../../etc/passwd");
         let result = SafeFilePath::from_tainted(&t, tmp.path());
         assert!(result.is_err());
+        // Must be PathTraversal (sandbox escape) or PathResolution (target doesn't exist)
+        match result.unwrap_err() {
+            SecurityError::PathTraversal { .. } | SecurityError::PathResolution { .. } => {}
+            other => panic!("expected PathTraversal or PathResolution, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -1032,6 +1035,31 @@ mod tests {
     fn test_creation_absolute_path_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let t = Tainted::new("/tmp/newfile.txt");
+        let result = SafeFilePath::from_tainted_for_creation(&t, tmp.path());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SecurityError::PathTraversal { .. } => {}
+            other => panic!("expected PathTraversal, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_creation_backslash_absolute_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = Tainted::new("\\tmp\\newfile.txt");
+        let result = SafeFilePath::from_tainted_for_creation(&t, tmp.path());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SecurityError::PathTraversal { .. } => {}
+            other => panic!("expected PathTraversal, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_creation_trailing_backslash_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("subdir")).unwrap();
+        let t = Tainted::new("subdir\\");
         let result = SafeFilePath::from_tainted_for_creation(&t, tmp.path());
         assert!(result.is_err());
         match result.unwrap_err() {
