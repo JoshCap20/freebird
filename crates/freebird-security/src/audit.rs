@@ -263,7 +263,7 @@ impl AuditLogger {
 
         let line = AuditLine {
             entry,
-            hmac: hmac_hex.clone(),
+            hmac: hmac_hex,
         };
 
         let json = serde_json::to_string(&line).map_err(|e| SecurityError::AuditWriteFailed {
@@ -282,7 +282,7 @@ impl AuditLogger {
             })?;
 
         inner.sequence += 1;
-        inner.last_hash = hmac_hex;
+        inner.last_hash = line.hmac;
 
         Ok(())
     }
@@ -375,9 +375,8 @@ impl AuditLogger {
         }
 
         let lines: Vec<&str> = content.lines().collect();
-        let mut expected_prev_hash = String::new();
-        let mut next_sequence: u64 = 0;
         let mut last_valid_hmac = String::new();
+        let mut next_sequence: u64 = 0;
 
         for (line_num, line) in lines.iter().enumerate() {
             if line.trim().is_empty() {
@@ -407,7 +406,7 @@ impl AuditLogger {
             };
 
             // Verify chain linkage.
-            if audit_line.entry.previous_hash != expected_prev_hash {
+            if audit_line.entry.previous_hash != last_valid_hmac {
                 return Err(SecurityError::AuditCorruption {
                     line: line_num,
                     reason: "hash chain broken — previous_hash does not match".into(),
@@ -429,7 +428,6 @@ impl AuditLogger {
                 });
             }
 
-            expected_prev_hash.clone_from(&audit_line.hmac);
             next_sequence = audit_line.entry.sequence + 1;
             last_valid_hmac = audit_line.hmac;
         }
@@ -992,6 +990,17 @@ mod tests {
         let path = dir.path().join("empty.jsonl");
         std::fs::write(&path, "").unwrap();
 
+        assert!(AuditLogger::verify_chain(&path, &test_key()).is_ok());
+    }
+
+    // ── 17b. test_verify_chain_nonexistent_file ────────────────────
+
+    #[test]
+    fn test_verify_chain_nonexistent_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.jsonl");
+
+        assert!(!path.exists());
         assert!(AuditLogger::verify_chain(&path, &test_key()).is_ok());
     }
 
