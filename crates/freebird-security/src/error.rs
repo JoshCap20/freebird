@@ -2,6 +2,9 @@
 
 use std::path::PathBuf;
 
+use chrono::{DateTime, Utc};
+use freebird_traits::tool::Capability;
+
 /// Severity classification for security events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Severity {
@@ -51,6 +54,19 @@ pub enum SecurityError {
     // ── Context poisoning ────────────────────────────────────────
     #[error("context poisoning attempt detected: pattern `{pattern}`")]
     ContextPoisoningAttempt { pattern: String },
+
+    // ── Capability grants ──────────────────────────────────────────
+    #[error("capability `{capability:?}` not granted")]
+    CapabilityDenied { capability: Capability },
+
+    #[error("capability grant expired at {expired_at}")]
+    GrantExpired { expired_at: DateTime<Utc> },
+
+    #[error("sub-grant exceeds parent: capabilities {denied:?} not in parent")]
+    SubGrantExceedsParent { denied: Vec<Capability> },
+
+    #[error("sub-grant sandbox `{}` escapes parent sandbox `{}`", child.display(), parent.display())]
+    SubGrantSandboxEscape { child: PathBuf, parent: PathBuf },
 }
 
 #[cfg(test)]
@@ -124,5 +140,44 @@ mod tests {
         let s2 = s.clone();
         assert_eq!(s, s2);
         assert_eq!(format!("{s:?}"), "High");
+    }
+
+    #[test]
+    fn test_security_error_capability_denied_display() {
+        let err = SecurityError::CapabilityDenied {
+            capability: Capability::ShellExecute,
+        };
+        assert_eq!(err.to_string(), "capability `ShellExecute` not granted");
+    }
+
+    #[test]
+    fn test_security_error_grant_expired_display() {
+        let expired = Utc::now();
+        let err = SecurityError::GrantExpired {
+            expired_at: expired,
+        };
+        let msg = err.to_string();
+        assert!(msg.starts_with("capability grant expired at "));
+    }
+
+    #[test]
+    fn test_security_error_sub_grant_exceeds_parent_display() {
+        let err = SecurityError::SubGrantExceedsParent {
+            denied: vec![Capability::ShellExecute, Capability::NetworkOutbound],
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("ShellExecute"));
+        assert!(msg.contains("NetworkOutbound"));
+    }
+
+    #[test]
+    fn test_security_error_sub_grant_sandbox_escape_display() {
+        let err = SecurityError::SubGrantSandboxEscape {
+            child: PathBuf::from("/tmp/x/b"),
+            parent: PathBuf::from("/tmp/x/a"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("/tmp/x/b"));
+        assert!(msg.contains("/tmp/x/a"));
     }
 }
