@@ -65,7 +65,7 @@ pub trait Memory: Send + Sync + 'static {
 #[derive(Debug, thiserror::Error)]
 pub enum MemoryError {
     #[error("session `{session_id}` not found")]
-    NotFound { session_id: String },
+    NotFound { session_id: SessionId },
 
     #[error("storage I/O error: {0}")]
     Io(#[from] std::io::Error),
