@@ -10,14 +10,14 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # Internal crates
-rc-traits = { path = "crates/rc-traits" }
-rc-types = { path = "crates/rc-types" }
-rc-security = { path = "crates/rc-security" }
-rc-runtime = { path = "crates/rc-runtime" }
-rc-providers = { path = "crates/rc-providers" }
-rc-channels = { path = "crates/rc-channels" }
-rc-tools = { path = "crates/rc-tools" }
-rc-memory = { path = "crates/rc-memory" }
+freebird-traits = { path = "crates/freebird-traits" }
+freebird-types = { path = "crates/freebird-types" }
+freebird-security = { path = "crates/freebird-security" }
+freebird-runtime = { path = "crates/freebird-runtime" }
+freebird-providers = { path = "crates/freebird-providers" }
+freebird-channels = { path = "crates/freebird-channels" }
+freebird-tools = { path = "crates/freebird-tools" }
+freebird-memory = { path = "crates/freebird-memory" }
 
 # Async
 tokio = { version = "1", features = ["full"] }
@@ -60,7 +60,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # IDs
 uuid = { version = "1", features = ["v4", "serde"] }
 
-# Testing
+# Testing — reference under [dev-dependencies] in each crate, NOT [dependencies]
 tempfile = "3"
 wiremock = "0.6"
 proptest = "1"

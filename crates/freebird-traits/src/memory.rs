@@ -1,0 +1,78 @@
+//! Memory trait — abstracts over conversation persistence backends.
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+use crate::id::SessionId;
+use crate::provider::Message;
+
+/// A complete conversation turn: user message + assistant response + tool calls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Turn {
+    pub user_message: Message,
+    pub assistant_response: Option<Message>,
+    pub tool_invocations: Vec<ToolInvocation>,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Record of a single tool invocation within a turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolInvocation {
+    pub tool_use_id: String,
+    pub tool_name: String,
+    pub input: serde_json::Value,
+    pub output: Option<String>,
+    pub is_error: bool,
+    pub duration_ms: Option<u64>,
+}
+
+/// A complete conversation (ordered list of turns + metadata).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Conversation {
+    pub session_id: SessionId,
+    pub system_prompt: Option<String>,
+    pub turns: Vec<Turn>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub model_id: String,
+    pub provider_id: String,
+}
+
+/// Summary of a stored session for listing/search results.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSummary {
+    pub session_id: SessionId,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub turn_count: usize,
+    pub model_id: String,
+    pub preview: String,
+}
+
+/// The core memory trait for persisting conversations.
+#[async_trait]
+pub trait Memory: Send + Sync + 'static {
+    async fn load(&self, session_id: &SessionId) -> Result<Option<Conversation>, MemoryError>;
+    async fn save(&self, conversation: &Conversation) -> Result<(), MemoryError>;
+    async fn list_sessions(&self, limit: usize) -> Result<Vec<SessionSummary>, MemoryError>;
+    async fn delete(&self, session_id: &SessionId) -> Result<(), MemoryError>;
+    async fn search(&self, query: &str, limit: usize) -> Result<Vec<SessionSummary>, MemoryError>;
+}
+
+/// Memory-specific errors.
+#[derive(Debug, thiserror::Error)]
+pub enum MemoryError {
+    #[error("session `{session_id}` not found")]
+    NotFound { session_id: String },
+
+    #[error("storage I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("serialization error: {0}")]
+    Serialization(String),
+
+    #[error("storage is read-only")]
+    ReadOnly,
+}

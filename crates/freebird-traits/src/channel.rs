@@ -1,42 +1,36 @@
 //! Channel trait — abstracts over transport layers (CLI, Signal, WebSocket, etc.).
 
+use std::fmt;
 use std::pin::Pin;
 
 use async_trait::async_trait;
-use tokio_stream::Stream;
+use futures::Stream;
+use serde::{Deserialize, Serialize};
 
 /// Metadata about a channel implementation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelInfo {
-    /// Unique identifier (e.g., "cli", "signal", "websocket").
     pub id: String,
-    /// Human-readable name (e.g., "Command Line Interface").
     pub display_name: String,
-    /// Whether this channel supports rich content (images, files).
     pub supports_media: bool,
-    /// Whether this channel supports real-time streaming of responses.
     pub supports_streaming: bool,
-    /// Whether this channel requires authentication/pairing before use.
     pub requires_auth: bool,
 }
 
 /// An inbound event from a channel.
 #[derive(Debug, Clone)]
 pub enum InboundEvent {
-    /// A new message from the user.
     Message {
-        /// Raw text from the user (will be wrapped in Tainted<Untrusted> by the router).
         raw_text: String,
-        /// Channel-specific sender identifier (e.g., phone number, username).
         sender_id: String,
-        /// Optional media attachments.
         attachments: Vec<Attachment>,
     },
-    /// The user has connected/started a session.
-    Connected { sender_id: String },
-    /// The user has disconnected.
-    Disconnected { sender_id: String },
-    /// A control command (e.g., /new, /status, /model).
+    Connected {
+        sender_id: String,
+    },
+    Disconnected {
+        sender_id: String,
+    },
     Command {
         name: String,
         args: Vec<String>,
@@ -47,17 +41,13 @@ pub enum InboundEvent {
 /// An outbound event to send to the user via the channel.
 #[derive(Debug, Clone)]
 pub enum OutboundEvent {
-    /// A complete text response.
     Message { text: String, recipient_id: String },
-    /// A streaming text chunk (for channels that support it).
     StreamChunk { text: String, recipient_id: String },
-    /// Signal that streaming is complete.
     StreamEnd { recipient_id: String },
-    /// An error message to display to the user.
     Error { text: String, recipient_id: String },
 }
 
-/// A media attachment (image, file, audio).
+/// A media attachment.
 #[derive(Debug, Clone)]
 pub struct Attachment {
     pub filename: String,
@@ -66,27 +56,29 @@ pub struct Attachment {
 }
 
 /// The handle returned by [`Channel::start`].
+///
+/// Ownership: `inbound` is a single-consumer stream (not Clone).
+/// `outbound` is a tokio `mpsc::Sender` (Clone). The runtime owns the
+/// stream and may clone the sender for concurrent use.
 pub struct ChannelHandle {
-    /// Stream of inbound events from the user.
     pub inbound: Pin<Box<dyn Stream<Item = InboundEvent> + Send>>,
-    /// Sender for outbound events to the user.
     pub outbound: tokio::sync::mpsc::Sender<OutboundEvent>,
 }
 
+impl fmt::Debug for ChannelHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ChannelHandle")
+            .field("inbound", &"<stream>")
+            .field("outbound", &self.outbound)
+            .finish()
+    }
+}
+
 /// The core channel trait.
-///
-/// Lifecycle: `start()` is called once. It returns a stream of inbound events
-/// and a sender for outbound events. The runtime consumes the stream and
-/// sends responses via the sender. `stop()` is called during shutdown.
 #[async_trait]
 pub trait Channel: Send + Sync + 'static {
-    /// Return metadata about this channel.
     fn info(&self) -> &ChannelInfo;
-
-    /// Start the channel, returning a handle with inbound stream and outbound sender.
     async fn start(&self) -> Result<ChannelHandle, ChannelError>;
-
-    /// Gracefully stop the channel, closing connections and flushing buffers.
     async fn stop(&self) -> Result<(), ChannelError>;
 }
 

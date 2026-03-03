@@ -6,38 +6,38 @@ use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 
+/// The role of a participant in a conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    User,
+    Assistant,
+    System,
+    Tool,
+}
+
 /// Metadata about a provider implementation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderInfo {
-    /// Unique identifier (e.g., "anthropic", "openai", "ollama").
     pub id: String,
-    /// Human-readable name (e.g., "Anthropic Claude").
     pub display_name: String,
-    /// Which models this provider supports.
     pub supported_models: Vec<ModelInfo>,
-    /// Whether this provider supports streaming responses.
     pub supports_streaming: bool,
-    /// Whether this provider supports tool use natively.
     pub supports_tool_use: bool,
-    /// Whether this provider supports image input.
     pub supports_vision: bool,
 }
 
 /// Metadata about a specific model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
-    /// Model identifier sent to the API (e.g., "claude-opus-4-6-20250929").
     pub id: String,
-    /// Human-readable name (e.g., "Claude Opus 4.6").
     pub display_name: String,
-    /// Maximum context window in tokens.
     pub max_context_tokens: u32,
-    /// Maximum output tokens.
     pub max_output_tokens: u32,
 }
 
 /// The input to a provider completion request.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionRequest {
     pub model: String,
     pub system_prompt: Option<String>,
@@ -48,10 +48,10 @@ pub struct CompletionRequest {
     pub stop_sequences: Vec<String>,
 }
 
-/// A message in a conversation (simplified for trait boundary).
+/// A message in a conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    pub role: String,
+    pub role: Role,
     pub content: Vec<ContentBlock>,
 }
 
@@ -59,9 +59,7 @@ pub struct Message {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    Text {
-        text: String,
-    },
+    Text { text: String },
     ToolUse {
         id: String,
         name: String,
@@ -79,7 +77,7 @@ pub enum ContentBlock {
 }
 
 /// A complete (non-streaming) response from the provider.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionResponse {
     pub message: Message,
     pub stop_reason: StopReason,
@@ -88,7 +86,8 @@ pub struct CompletionResponse {
 }
 
 /// Why the model stopped generating.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StopReason {
     EndTurn,
     ToolUse,
@@ -97,7 +96,7 @@ pub enum StopReason {
 }
 
 /// Token usage for cost tracking.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
@@ -132,20 +131,22 @@ pub struct ToolDefinition {
 /// The core provider trait. Every LLM backend implements this.
 #[async_trait]
 pub trait Provider: Send + Sync + 'static {
-    /// Return metadata about this provider.
     fn info(&self) -> &ProviderInfo;
 
-    /// Validate that the configured credentials are working.
     async fn validate_credentials(&self) -> Result<(), ProviderError>;
 
-    /// Send a completion request and get a full response.
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ProviderError>;
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError>;
 
-    /// Send a completion request and get a streaming response.
     async fn stream(
         &self,
         request: CompletionRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError>;
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>,
+        ProviderError,
+    >;
 }
 
 /// Provider-specific errors.
@@ -166,8 +167,12 @@ pub enum ProviderError {
     #[error("provider API error: {status} — {body}")]
     ApiError { status: u16, body: String },
 
-    #[error("network error: {0}")]
-    Network(String),
+    #[error("network error: {reason}")]
+    Network {
+        reason: String,
+        is_timeout: bool,
+        status_code: Option<u16>,
+    },
 
     #[error("deserialization error: {0}")]
     Deserialization(String),
