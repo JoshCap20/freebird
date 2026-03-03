@@ -87,25 +87,21 @@ impl SafeFilePath {
     /// - Null bytes (OS-level path separator confusion)
     /// - Absolute paths (`PathBuf::join` silently discards the root)
     fn reject_invalid_raw(raw: &str, sandbox: &Path) -> Result<(), SecurityError> {
+        let traversal = || SecurityError::PathTraversal {
+            attempted: PathBuf::from(raw),
+            sandbox: sandbox.to_owned(),
+        };
+
         if raw.trim().is_empty() {
-            return Err(SecurityError::PathTraversal {
-                attempted: PathBuf::from(raw),
-                sandbox: sandbox.to_owned(),
-            });
+            return Err(traversal());
         }
 
         if raw.contains('\0') {
-            return Err(SecurityError::PathTraversal {
-                attempted: PathBuf::from(raw),
-                sandbox: sandbox.to_owned(),
-            });
+            return Err(traversal());
         }
 
         if raw.starts_with('/') || raw.starts_with('\\') {
-            return Err(SecurityError::PathTraversal {
-                attempted: PathBuf::from(raw),
-                sandbox: sandbox.to_owned(),
-            });
+            return Err(traversal());
         }
 
         Ok(())
@@ -180,23 +176,20 @@ impl SafeFilePath {
         let raw = t.inner();
         Self::reject_invalid_raw(raw, sandbox)?;
 
+        let traversal = || SecurityError::PathTraversal {
+            attempted: PathBuf::from(raw),
+            sandbox: sandbox.to_owned(),
+        };
+
         // Reject trailing slash (indicates directory, not file)
         if raw.ends_with('/') || raw.ends_with('\\') {
-            return Err(SecurityError::PathTraversal {
-                attempted: PathBuf::from(raw),
-                sandbox: sandbox.to_owned(),
-            });
+            return Err(traversal());
         }
 
         let path = Path::new(raw);
 
         // Extract filename — reject if none (catches "." and "..")
-        let filename = path
-            .file_name()
-            .ok_or_else(|| SecurityError::PathTraversal {
-                attempted: PathBuf::from(raw),
-                sandbox: sandbox.to_owned(),
-            })?;
+        let filename = path.file_name().ok_or_else(traversal)?;
 
         // Canonicalize sandbox root
         let root = sandbox
@@ -206,7 +199,9 @@ impl SafeFilePath {
                 source: e,
             })?;
 
-        // Canonicalize parent directory (must exist)
+        // Canonicalize parent directory (must exist).
+        // SAFETY-ARGUMENT: parent() returns None only for root ("/") or empty (""),
+        // both rejected by reject_invalid_raw above.
         let parent = path.parent().unwrap_or_else(|| Path::new(""));
         let parent_candidate = root.join(parent);
         let canonical_parent =
@@ -1170,6 +1165,38 @@ mod tests {
         let safe = SafeFilePath::from_tainted_for_creation(&t, tmp.path()).unwrap();
         // Resolved should be the real file path
         assert_eq!(safe.as_path(), real_file.canonicalize().unwrap());
+    }
+
+    // ── Deep traversal / platform edge-case tests ──────────────
+
+    #[test]
+    fn test_creation_deeply_nested_dotdot_escape() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("a/b")).unwrap();
+
+        let t = Tainted::new("a/b/../../../../etc/passwd");
+        let result = SafeFilePath::from_tainted_for_creation(&t, tmp.path());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SecurityError::PathTraversal { .. } | SecurityError::PathResolution { .. } => {}
+            other => panic!("expected PathTraversal or PathResolution, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_creation_backslash_mid_path_treated_as_literal_on_unix() {
+        // On Unix, backslash is a literal filename character, not a separator.
+        // "subdir\..\..\etc\passwd" has no '/' so Path treats it as a single
+        // filename component — the resolved path stays within the sandbox.
+        let tmp = tempfile::tempdir().unwrap();
+
+        let t = Tainted::new("subdir\\..\\..\\etc\\passwd");
+        let safe = SafeFilePath::from_tainted_for_creation(&t, tmp.path()).unwrap();
+        let sandbox = tmp.path().canonicalize().unwrap();
+        assert!(
+            safe.as_path().starts_with(&sandbox),
+            "backslash path should stay within sandbox on Unix"
+        );
     }
 
     // ── Property-based test ──────────────────────────────────────
