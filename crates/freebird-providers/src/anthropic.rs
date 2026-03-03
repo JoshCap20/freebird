@@ -239,6 +239,7 @@ fn build_request_body(request: CompletionRequest) -> ApiRequest {
         .filter(|m| m.role != Role::System)
         .map(|m| ApiMessage {
             role: match m.role {
+                // System is filtered above; included for exhaustiveness safety
                 Role::User | Role::Tool | Role::System => "user".into(),
                 Role::Assistant => "assistant".into(),
             },
@@ -387,7 +388,10 @@ async fn map_error_response(resp: reqwest::Response) -> ProviderError {
         return ProviderError::RateLimited { retry_after_ms };
     }
 
-    let body = resp.text().await.unwrap_or_default();
+    let body = resp
+        .text()
+        .await
+        .unwrap_or_else(|e| format!("<failed to read response body: {e}>"));
     ProviderError::ApiError { status, body }
 }
 

@@ -8,6 +8,7 @@ description = "LLM provider implementations for Freebird — Anthropic, OpenAI, 
 
 [dependencies]
 freebird-traits = { workspace = true }
+# Used by daemon integration (#19) for ProviderConfig → AnthropicConfig conversion
 freebird-types = { workspace = true }
 reqwest = { workspace = true }
 secrecy = { workspace = true }
