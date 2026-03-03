@@ -4,9 +4,11 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use freebird_traits::tool::Capability;
+use serde::{Deserialize, Serialize};
 
 /// Severity classification for security events.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Severity {
     Low,
     Medium,
@@ -67,9 +69,17 @@ pub enum SecurityError {
 
     #[error("sub-grant sandbox `{}` escapes parent sandbox `{}`", child.display(), parent.display())]
     SubGrantSandboxEscape { child: PathBuf, parent: PathBuf },
+
+    // ── Audit logging ─────────────────────────────────────────────
+    #[error("audit log corrupted at line {line}: {reason}")]
+    AuditCorruption { line: usize, reason: String },
+
+    #[error("failed to write audit log: {reason}")]
+    AuditWriteFailed { reason: String },
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -179,5 +189,34 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("/tmp/x/b"));
         assert!(msg.contains("/tmp/x/a"));
+    }
+
+    #[test]
+    fn test_security_error_audit_corruption_display() {
+        let err = SecurityError::AuditCorruption {
+            line: 42,
+            reason: "hash chain broken".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "audit log corrupted at line 42: hash chain broken"
+        );
+    }
+
+    #[test]
+    fn test_security_error_audit_write_failed_display() {
+        let err = SecurityError::AuditWriteFailed {
+            reason: "disk full".into(),
+        };
+        assert_eq!(err.to_string(), "failed to write audit log: disk full");
+    }
+
+    #[test]
+    fn test_severity_serde_roundtrip() {
+        let severity = Severity::High;
+        let json = serde_json::to_string(&severity).unwrap();
+        assert_eq!(json, r#""high""#);
+        let deserialized: Severity = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, severity);
     }
 }
