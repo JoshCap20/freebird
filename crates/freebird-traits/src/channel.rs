@@ -18,7 +18,8 @@ pub struct ChannelInfo {
 }
 
 /// An inbound event from a channel.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum InboundEvent {
     Message {
         raw_text: String,
@@ -39,7 +40,8 @@ pub enum InboundEvent {
 }
 
 /// An outbound event to send to the user via the channel.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum OutboundEvent {
     Message { text: String, recipient_id: String },
     StreamChunk { text: String, recipient_id: String },
@@ -48,7 +50,7 @@ pub enum OutboundEvent {
 }
 
 /// A media attachment.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Attachment {
     pub filename: String,
     pub media_type: String,

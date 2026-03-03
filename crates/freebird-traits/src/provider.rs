@@ -109,7 +109,8 @@ pub struct TokenUsage {
 }
 
 /// A chunk of a streaming response.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
     TextDelta(String),
     ToolUse {
