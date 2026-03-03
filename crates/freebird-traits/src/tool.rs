@@ -18,6 +18,16 @@ pub enum Capability {
     NetworkAccess,
 }
 
+/// How dangerous a tool invocation is — drives consent prompts and audit depth.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskLevel {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
 /// Metadata describing a tool for both the runtime and the LLM.
 #[derive(Debug, Clone)]
 pub struct ToolInfo {
@@ -25,6 +35,7 @@ pub struct ToolInfo {
     pub description: String,
     pub input_schema: serde_json::Value,
     pub required_capability: Capability,
+    pub risk_level: RiskLevel,
     pub has_side_effects: bool,
 }
 
