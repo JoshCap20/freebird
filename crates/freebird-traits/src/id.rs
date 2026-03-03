@@ -26,6 +26,18 @@ macro_rules! define_id {
                 f.write_str(&self.0)
             }
         }
+
+        impl From<String> for $name {
+            fn from(s: String) -> Self {
+                Self(s)
+            }
+        }
+
+        impl From<&str> for $name {
+            fn from(s: &str) -> Self {
+                Self(s.to_owned())
+            }
+        }
     };
 }
 
