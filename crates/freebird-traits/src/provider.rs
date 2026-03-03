@@ -4,6 +4,7 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use futures::Stream;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// The role of a participant in a conversation.
@@ -53,6 +54,7 @@ pub struct CompletionRequest {
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
+    pub timestamp: DateTime<Utc>,
 }
 
 /// A single piece of content within a message.
