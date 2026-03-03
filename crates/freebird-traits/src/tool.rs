@@ -9,13 +9,21 @@ use crate::id::SessionId;
 use crate::provider::ToolDefinition;
 
 /// Capabilities that tools may require.
+///
+/// Finer-grained than a simple read/write/execute model — separating
+/// `FileDelete` from `FileWrite`, `ProcessSpawn` from `ShellExecute`,
+/// and inbound vs. outbound network access enables least-privilege grants.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
     FileRead,
     FileWrite,
+    FileDelete,
     ShellExecute,
-    NetworkAccess,
+    ProcessSpawn,
+    NetworkOutbound,
+    NetworkListen,
+    EnvRead,
 }
 
 /// How dangerous a tool invocation is — drives consent prompts and audit depth.
