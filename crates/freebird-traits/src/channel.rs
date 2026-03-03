@@ -1,4 +1,4 @@
-//! Channel trait — abstracts over transport layers (CLI, Signal, WebSocket, etc.).
+//! Channel trait — abstracts over transport layers (CLI, Signal, `WebSocket`, etc.).
 
 use std::fmt;
 use std::pin::Pin;

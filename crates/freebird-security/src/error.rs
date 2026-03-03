@@ -1,1 +1,1 @@
-//! SecurityError enum.
+//! `SecurityError` enum.

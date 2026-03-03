@@ -2,3 +2,5 @@
 .env
 *.pem
 *.key
+
+.serena/

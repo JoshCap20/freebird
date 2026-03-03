@@ -1,1 +1,1 @@
-//! SafePath validation — prevents path traversal attacks.
+//! `SafePath` validation — prevents path traversal attacks.

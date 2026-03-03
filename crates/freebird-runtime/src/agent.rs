@@ -1,1 +1,1 @@
-//! AgentRuntime — the core agentic loop.
+//! `AgentRuntime` — the core agentic loop.

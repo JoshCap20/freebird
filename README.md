@@ -76,6 +76,14 @@ Will likely eventually move crates to separate repos if project is ever big enou
 
 Freebird is in early development. The current focus is on the core agent loop, CLI channel, Anthropic provider, and the security layer described above.
 
+## Setup
+
+tba
+
+```bash
+cargo run -p freebird-daemon
+```
+
 ## License
 
 TBD

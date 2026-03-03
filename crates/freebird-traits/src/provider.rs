@@ -1,4 +1,4 @@
-//! Provider trait — abstracts over LLM backends (Anthropic, OpenAI, Ollama, etc.).
+//! Provider trait — abstracts over LLM backends (Anthropic, `OpenAI`, Ollama, etc.).
 
 use std::pin::Pin;
 

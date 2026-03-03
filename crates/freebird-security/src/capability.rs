@@ -1,1 +1,1 @@
-//! CapabilityGrant system for scoped permissions.
+//! `CapabilityGrant` system for scoped permissions.

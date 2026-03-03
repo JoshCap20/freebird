@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# FreeBird pre-commit hook
+# All Rust best-practice checks, ordered cheapest-first with fail-fast.
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+fail() { echo -e "  ${RED}FAIL${NC} $1"; exit 1; }
+pass() { echo -e "  ${GREEN}ok${NC}   $1"; }
+warn() { echo -e "  ${YELLOW}WARN${NC} $1"; }
+
+echo -e "${BOLD}pre-commit${NC}"
+
+# ── 1. Formatting (no compilation, ~instant) ─────────────────────
+fmt_output=$(cargo fmt --all -- --check 2>&1) || {
+    echo -e "  ${RED}FAIL${NC} cargo fmt"
+    echo "$fmt_output"
+    echo "    Run 'cargo fmt --all' to fix."
+    exit 1
+}
+pass "cargo fmt"
+
+# ── 2. Deny .env files ──────────────────────────────────────────
+env_files=$(git diff --cached --name-only -- '*.env' '.env*' || true)
+if [ -n "$env_files" ]; then
+    fail ".env files should not be committed: $env_files"
+fi
+pass "no .env files"
+
+# ── 3. Secrets in staged diffs ───────────────────────────────────
+secret_patterns='(PRIVATE.KEY|SECRET_KEY|BEGIN RSA|BEGIN EC|BEGIN OPENSSH|api_key\s*=\s*"[^"]+"|password\s*=\s*"[^"]+")'
+matches=$(git diff --cached -U0 -- '*.rs' '*.toml' '*.env' '*.json' '*.yaml' '*.yml' \
+    | grep -iE "$secret_patterns" | grep '^+' | grep -v '^+++' || true)
+if [ -n "$matches" ]; then
+    echo -e "  ${RED}FAIL${NC} potential secrets in staged changes"
+    echo "$matches" | head -5
+    exit 1
+fi
+pass "no secrets"
+
+# ── 4. Unsafe blocks without // SAFETY: comment ─────────────────
+staged_rs=$(git diff --cached --name-only --diff-filter=ACM -- '*.rs' || true)
+unsafe_issues=0
+if [ -n "$staged_rs" ]; then
+    while IFS= read -r file; do
+        [ -z "$file" ] && continue
+        git show ":$file" 2>/dev/null | awk -v file="$file" '
+            /unsafe\s*\{/ {
+                if (prev !~ /\/\/\s*SAFETY:/) {
+                    printf "    %s:%d — unsafe block without // SAFETY: comment\n", file, NR
+                    found = 1
+                }
+            }
+            { prev = $0 }
+            END { exit (found ? 1 : 0) }
+        ' || unsafe_issues=1
+    done <<< "$staged_rs"
+fi
+if [ "$unsafe_issues" -ne 0 ]; then
+    warn "unsafe blocks without // SAFETY: (see above)"
+else
+    pass "unsafe audit"
+fi
+
+# ── 5. Clippy (strict lints from CLAUDE.md) ──────────────────────
+# Shares build cache with step 6, so only compiles once.
+echo -en "  ...  cargo clippy\r"
+clippy_output=$(cargo clippy --workspace --all-targets --message-format=short -- \
+    -D clippy::all \
+    -D clippy::pedantic \
+    -D clippy::nursery \
+    -D clippy::unwrap_used \
+    -D clippy::expect_used \
+    -D clippy::panic \
+    -D clippy::indexing_slicing \
+    -A clippy::module_name_repetitions \
+    2>&1) || {
+    echo -e "  ${RED}FAIL${NC} cargo clippy"
+    echo "$clippy_output"
+    exit 1
+}
+pass "cargo clippy"
+
+# ── 6. Tests (reuses compilation from clippy) ────────────────────
+echo -en "  ...  cargo test\r"
+test_output=$(cargo test --workspace 2>&1) || {
+    echo -e "  ${RED}FAIL${NC} cargo test"
+    echo "$test_output"
+    exit 1
+}
+pass "cargo test"
+
+echo -e "${GREEN}All pre-commit checks passed.${NC}"
