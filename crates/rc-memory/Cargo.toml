@@ -1,0 +1,15 @@
+[package]
+name = "rc-memory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Memory backend implementations for RClaw — file-based, SQLite, etc."
+
+[dependencies]
+rc-traits = { workspace = true }
+rc-types = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }

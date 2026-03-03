@@ -1,6 +1,66 @@
-[package]
-name = "rclaw"
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
 
-[dependencies]
+[workspace.dependencies]
+# Internal crates
+rc-traits = { path = "crates/rc-traits" }
+rc-types = { path = "crates/rc-types" }
+rc-security = { path = "crates/rc-security" }
+rc-runtime = { path = "crates/rc-runtime" }
+rc-providers = { path = "crates/rc-providers" }
+rc-channels = { path = "crates/rc-channels" }
+rc-tools = { path = "crates/rc-tools" }
+rc-memory = { path = "crates/rc-memory" }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tokio-stream = "0.1"
+futures = "0.3"
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Errors
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# Crypto & secrets
+secrecy = { version = "0.10", features = ["serde"] }
+ring = "0.17"
+rustls = "0.23"
+
+# HTTP client (for providers)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+
+# Web framework (for WebSocket channel)
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors", "request-id"] }
+
+# Config
+figment = { version = "0.10", features = ["toml", "env"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# IDs
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Testing
+tempfile = "3"
+wiremock = "0.6"
+proptest = "1"

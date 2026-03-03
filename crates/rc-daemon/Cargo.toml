@@ -1,0 +1,26 @@
+[package]
+name = "rc-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "RClaw daemon binary — the composition root"
+
+[[bin]]
+name = "rclaw"
+path = "src/main.rs"
+
+[dependencies]
+rc-traits = { workspace = true }
+rc-types = { workspace = true }
+rc-security = { workspace = true }
+rc-runtime = { workspace = true }
+rc-providers = { workspace = true }
+rc-channels = { workspace = true }
+rc-tools = { workspace = true }
+rc-memory = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+figment = { workspace = true }
+anyhow = { workspace = true }
