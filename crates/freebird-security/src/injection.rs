@@ -10,6 +10,9 @@
 //! - `scan_input()` — user messages from channels
 //! - `scan_output()` — tool execution results
 //! - `scan_context()` — loaded conversation history from memory
+//!
+//! Each scan applies dual normalization to defeat Unicode-based evasion
+//! (see [`check_patterns`] for details).
 
 use crate::error::{SecurityError, Severity};
 
@@ -70,18 +73,14 @@ fn normalize_with_spaces(text: &str) -> String {
         }
     }
 
-    // Trim leading/trailing spaces without rescanning twice or reallocating unnecessarily
-    let trimmed = out.trim_matches(' ');
-    if trimmed.len() == out.len() {
-        out
-    } else {
-        trimmed.to_owned()
-    }
+    out
 }
 
-/// Patterns for user input — direct prompt injection attempts.
-/// Tuned to avoid false positives in normal conversation.
-const INPUT_PATTERNS: &[&str] = &[
+/// Patterns checked at I/O boundaries — shared by input and output scanning.
+///
+/// These detect direct prompt injection in user messages and indirect
+/// injection in tool output (e.g., a file containing injection payloads).
+const IO_PATTERNS: &[&str] = &[
     "ignore previous instructions",
     "ignore all previous",
     "disregard your instructions",
@@ -96,64 +95,57 @@ const INPUT_PATTERNS: &[&str] = &[
     "```system",
 ];
 
-/// Patterns for tool output — indirect injection via file contents,
-/// web scrapes, API responses. Same as input patterns for v1.
-const OUTPUT_PATTERNS: &[&str] = &[
-    "ignore previous instructions",
-    "ignore all previous",
-    "disregard your instructions",
-    "you are now",
-    "new instructions:",
-    "system prompt:",
-    "admin override",
-    "jailbreak",
-    "dan mode",
-    "<|im_start|>",
-    "<|im_end|>",
-    "```system",
-];
-
-/// Patterns for loaded conversation context — poisoned memory files.
-/// More aggressive than input patterns because conversation history
-/// should never contain model control tokens or instruction overrides.
-const CONTEXT_PATTERNS: &[&str] = &[
-    "you are now",
+/// Additional patterns checked only during context scanning.
+///
+/// These are model control tokens and instruction-override phrases that
+/// should never appear in persisted conversation history. They indicate
+/// either memory file tampering or a prior injection that was stored.
+const CONTEXT_EXTRA_PATTERNS: &[&str] = &[
     "new system prompt",
-    "ignore all previous",
     "your instructions are",
     "<|system|>",
-    "<|im_start|>",
-    "<|im_end|>",
     "[inst]",
     "<<sys>>",
-    "```system",
 ];
 
-/// Shared matching logic. Takes a pattern set and an error constructor.
+/// Check pre-normalized text against a set of patterns.
+///
+/// Both normalization forms are checked because they catch different
+/// evasion strategies:
+///
+/// - **Stripped** (`normalize`): removes zero-width chars entirely, catching
+///   insertion within words — e.g., `"ig\u{200B}nore"` → `"ignore"`.
+///
+/// - **Spaced** (`normalize_with_spaces`): replaces zero-width chars with
+///   spaces and collapses whitespace, catching space-replacement — e.g.,
+///   `"ignore\u{200B}previous"` → `"ignore previous"`.
+///
+/// Neither subsumes the other: stripping would turn the second example into
+/// `"ignoreprevious"` (no match), and spacing would turn the first into
+/// `"ig ore"` (no match).
+fn check_patterns(
+    stripped: &str,
+    spaced: &str,
+    patterns: &[&str],
+    make_error: &impl Fn(&str) -> SecurityError,
+) -> Result<(), SecurityError> {
+    for pattern in patterns {
+        if stripped.contains(pattern) || spaced.contains(pattern) {
+            return Err(make_error(pattern));
+        }
+    }
+    Ok(())
+}
+
+/// Shared entry point: normalize once, check against a single pattern set.
 fn scan(
     text: &str,
     patterns: &[&str],
     make_error: impl Fn(&str) -> SecurityError,
 ) -> Result<(), SecurityError> {
-    // First, check the stripped normalization which removes zero-width
-    // characters (catches injections inserted inside tokens).
     let stripped = normalize(text);
-    for pattern in patterns {
-        if stripped.contains(pattern) {
-            return Err(make_error(pattern));
-        }
-    }
-
-    // Second, check the space-normalized form which replaces zero-width
-    // characters with ASCII spaces and collapses whitespace. This catches
-    // cases where invisible characters replaced actual spaces.
     let spaced = normalize_with_spaces(text);
-    for pattern in patterns {
-        if spaced.contains(pattern) {
-            return Err(make_error(pattern));
-        }
-    }
-    Ok(())
+    check_patterns(&stripped, &spaced, patterns, &make_error)
 }
 
 /// Scan user input text for known prompt injection patterns.
@@ -168,7 +160,7 @@ fn scan(
 /// if any known injection pattern is detected (case-insensitive).
 #[must_use = "injection scan result must not be silently discarded"]
 pub fn scan_input(text: &str) -> Result<(), SecurityError> {
-    scan(text, INPUT_PATTERNS, |pattern| {
+    scan(text, IO_PATTERNS, |pattern| {
         SecurityError::PotentialInjection {
             pattern: pattern.to_string(),
             severity: Severity::High,
@@ -187,7 +179,7 @@ pub fn scan_input(text: &str) -> Result<(), SecurityError> {
 /// if any known injection pattern is detected (case-insensitive).
 #[must_use = "injection scan result must not be silently discarded"]
 pub fn scan_output(text: &str) -> Result<(), SecurityError> {
-    scan(text, OUTPUT_PATTERNS, |pattern| {
+    scan(text, IO_PATTERNS, |pattern| {
         SecurityError::PotentialInjection {
             pattern: pattern.to_string(),
             severity: Severity::High,
@@ -198,9 +190,13 @@ pub fn scan_output(text: &str) -> Result<(), SecurityError> {
 /// Scan content about to be injected into the context window.
 ///
 /// Catches indirect prompt injection via loaded conversation history
-/// or any content that resembles system prompt overrides. Uses a
-/// broader pattern set than `scan_input` because this content
-/// is inserted closer to the system prompt.
+/// or any content that resembles system prompt overrides. Checks all
+/// I/O patterns (defense-in-depth against memory tampering) plus
+/// context-specific model control tokens that should never appear
+/// in persisted history.
+///
+/// Normalizes text once and checks both pattern sets, avoiding
+/// redundant work.
 ///
 /// # Errors
 ///
@@ -208,11 +204,15 @@ pub fn scan_output(text: &str) -> Result<(), SecurityError> {
 /// poisoning pattern is detected (case-insensitive).
 #[must_use = "injection scan result must not be silently discarded"]
 pub fn scan_context(text: &str) -> Result<(), SecurityError> {
-    scan(text, CONTEXT_PATTERNS, |pattern| {
-        SecurityError::ContextPoisoningAttempt {
-            pattern: pattern.to_string(),
-        }
-    })
+    let stripped = normalize(text);
+    let spaced = normalize_with_spaces(text);
+
+    let make_error = |pattern: &str| SecurityError::ContextPoisoningAttempt {
+        pattern: pattern.to_string(),
+    };
+
+    check_patterns(&stripped, &spaced, IO_PATTERNS, &make_error)?;
+    check_patterns(&stripped, &spaced, CONTEXT_EXTRA_PATTERNS, &make_error)
 }
 
 #[cfg(test)]
@@ -333,8 +333,8 @@ mod tests {
     }
 
     #[test]
-    fn test_all_input_patterns_detected() {
-        for pattern in INPUT_PATTERNS {
+    fn test_all_io_patterns_detected_by_input() {
+        for pattern in IO_PATTERNS {
             let input = format!("prefix {pattern} suffix");
             assert!(
                 scan_input(&input).is_err(),
@@ -378,8 +378,8 @@ mod tests {
     }
 
     #[test]
-    fn test_all_output_patterns_detected() {
-        for pattern in OUTPUT_PATTERNS {
+    fn test_all_io_patterns_detected_by_output() {
+        for pattern in IO_PATTERNS {
             let output = format!("tool result: {pattern}");
             assert!(
                 scan_output(&output).is_err(),
@@ -438,12 +438,25 @@ mod tests {
     }
 
     #[test]
-    fn test_all_context_patterns_detected() {
-        for pattern in CONTEXT_PATTERNS {
+    fn test_context_detects_io_patterns() {
+        // Context scanning includes all IO patterns as defense-in-depth
+        // against memory tampering (e.g., attacker modifies conversation file).
+        for pattern in IO_PATTERNS {
             let input = format!("history: {pattern} more");
             assert!(
                 scan_context(&input).is_err(),
-                "scan_context should detect: {pattern}"
+                "scan_context should detect IO pattern: {pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_context_detects_extra_patterns() {
+        for pattern in CONTEXT_EXTRA_PATTERNS {
+            let input = format!("history: {pattern} more");
+            assert!(
+                scan_context(&input).is_err(),
+                "scan_context should detect context pattern: {pattern}"
             );
         }
     }
@@ -493,11 +506,7 @@ mod tests {
 
     #[test]
     fn test_all_patterns_are_lowercase() {
-        for p in INPUT_PATTERNS
-            .iter()
-            .chain(OUTPUT_PATTERNS.iter())
-            .chain(CONTEXT_PATTERNS.iter())
-        {
+        for p in IO_PATTERNS.iter().chain(CONTEXT_EXTRA_PATTERNS.iter()) {
             assert_eq!(p, &p.to_lowercase(), "pattern not lowercase: {p}");
             assert!(p.is_ascii(), "pattern must be ASCII: {p}");
         }
@@ -539,7 +548,7 @@ mod tests {
                 text in "[a-zA-Z0-9 ]{0,200}"
             ) {
                 let lower = text.to_lowercase();
-                let might_contain_pattern = INPUT_PATTERNS.iter().any(|p| lower.contains(p));
+                let might_contain_pattern = IO_PATTERNS.iter().any(|p| lower.contains(p));
                 if !might_contain_pattern {
                     prop_assert!(scan_input(&text).is_ok());
                 }
