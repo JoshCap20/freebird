@@ -10,6 +10,7 @@ description = "Memory backend implementations for Freebird — file-based, SQLit
 freebird-traits = { workspace = true }
 freebird-types = { workspace = true }
 tokio = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
