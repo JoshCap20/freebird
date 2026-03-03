@@ -93,6 +93,26 @@ impl SafeFilePath {
     pub fn from_tainted(t: &Tainted, sandbox: &Path) -> Result<Self, SecurityError> {
         let raw = t.inner();
 
+        // Reject empty/whitespace-only — likely a tool input bug, not a real path.
+        // Without this, root.join("").canonicalize() silently succeeds and returns
+        // the root — a surprising non-error that could mask tool implementation bugs.
+        if raw.trim().is_empty() {
+            return Err(SecurityError::PathTraversal {
+                attempted: PathBuf::from(raw),
+                sandbox: sandbox.to_owned(),
+            });
+        }
+
+        // Reject absolute paths before join() — PathBuf::join with an absolute
+        // path silently discards the root, which produces confusing errors downstream.
+        // Catching it here gives a clear PathTraversal error every time.
+        if raw.starts_with('/') || raw.starts_with('\\') {
+            return Err(SecurityError::PathTraversal {
+                attempted: PathBuf::from(raw),
+                sandbox: sandbox.to_owned(),
+            });
+        }
+
         if raw.contains('\0') {
             return Err(SecurityError::PathTraversal {
                 attempted: PathBuf::from(raw),
@@ -442,6 +462,108 @@ mod tests {
         let path_str = safe.as_path().to_string_lossy();
         assert!(!path_str.contains(".."));
         assert!(path_str.ends_with("subdir/file.txt"));
+    }
+
+    // ── SafeFilePath hardening tests (issue #2) ─────────────────
+
+    #[test]
+    fn test_from_tainted_rejects_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = Tainted::new("");
+        let result = SafeFilePath::from_tainted(&t, tmp.path());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SecurityError::PathTraversal { .. } => {}
+            other => panic!("expected PathTraversal, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_from_tainted_rejects_whitespace_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = Tainted::new("   ");
+        let result = SafeFilePath::from_tainted(&t, tmp.path());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SecurityError::PathTraversal { .. } => {}
+            other => panic!("expected PathTraversal, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_from_tainted_rejects_absolute_is_path_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = Tainted::new("/etc/passwd");
+        let result = SafeFilePath::from_tainted(&t, tmp.path());
+        assert!(result.is_err());
+        // Must be PathTraversal, NOT PathResolution
+        match result.unwrap_err() {
+            SecurityError::PathTraversal { .. } => {}
+            other => panic!("expected PathTraversal, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_from_tainted_dotdot_within_sandbox_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let subdir = tmp.path().join("subdir");
+        std::fs::create_dir(&subdir).unwrap();
+        let other = tmp.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        let file = other.join("file.txt");
+        std::fs::write(&file, "test").unwrap();
+
+        let t = Tainted::new("subdir/../other/file.txt");
+        let safe = SafeFilePath::from_tainted(&t, tmp.path()).unwrap();
+        assert!(safe.as_path().ends_with("other/file.txt"));
+    }
+
+    #[test]
+    fn test_from_tainted_dotdot_escape_middle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let subdir = tmp.path().join("subdir");
+        std::fs::create_dir(&subdir).unwrap();
+
+        let t = Tainted::new("subdir/../../etc/passwd");
+        let result = SafeFilePath::from_tainted(&t, tmp.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_tainted_symlink_within_sandbox_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real_dir = tmp.path().join("real");
+        std::fs::create_dir(&real_dir).unwrap();
+        std::fs::write(real_dir.join("file.txt"), "content").unwrap();
+
+        // Symlink inside sandbox pointing to another sandbox path
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+
+        let t = Tainted::new("link/file.txt");
+        let safe = SafeFilePath::from_tainted(&t, tmp.path()).unwrap();
+        // Resolved path should be the real path (symlink resolved)
+        assert!(safe.as_path().ends_with("real/file.txt"));
+    }
+
+    #[test]
+    fn test_from_tainted_dot_resolves_to_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = Tainted::new(".");
+        let safe = SafeFilePath::from_tainted(&t, tmp.path()).unwrap();
+        assert_eq!(safe.as_path(), tmp.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_from_tainted_nonexistent_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = Tainted::new("does_not_exist.txt");
+        let result = SafeFilePath::from_tainted(&t, tmp.path());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SecurityError::PathResolution { .. } => {}
+            other => panic!("expected PathResolution, got: {other:?}"),
+        }
     }
 
     // ── SafeShellArg tests ───────────────────────────────────────
