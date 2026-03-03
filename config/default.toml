@@ -10,3 +10,19 @@ kind = "anthropic"
 [[channels]]
 id = "cli"
 kind = "cli"
+
+[tools]
+sandbox_root = "~/.freebird/sandbox"
+default_timeout_secs = 30
+
+[memory]
+kind = "file"
+base_dir = "~/.freebird/conversations"
+
+[security]
+max_tool_calls_per_turn = 25
+require_consent_above = "high"
+
+[logging]
+level = "info"
+format = "pretty"
