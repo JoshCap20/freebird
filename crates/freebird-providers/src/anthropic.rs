@@ -103,8 +103,10 @@ struct ApiToolDefinition {
 /// Inbound response from POST /v1/messages.
 #[derive(Debug, Deserialize)]
 struct ApiResponse {
+    /// Deserialized for completeness; not currently used.
     #[allow(dead_code)]
     id: String,
+    /// Deserialized for completeness; always "assistant" for responses.
     #[allow(dead_code)]
     role: String,
     content: Vec<ApiContentBlock>,
@@ -128,6 +130,7 @@ struct ApiUsage {
 /// Anthropic API error response body.
 #[derive(Debug, Deserialize)]
 struct ApiErrorResponse {
+    /// Deserialized for completeness; not currently used.
     #[allow(dead_code)]
     #[serde(rename = "type")]
     error_type: String,
@@ -136,6 +139,7 @@ struct ApiErrorResponse {
 
 #[derive(Debug, Deserialize)]
 struct ApiErrorDetail {
+    /// Deserialized for completeness; not currently used.
     #[allow(dead_code)]
     #[serde(rename = "type")]
     error_type: String,
@@ -226,65 +230,65 @@ impl AnthropicProvider {
 // ---------------------------------------------------------------------------
 
 /// Convert internal `CompletionRequest` to Anthropic API request body.
-fn build_request_body(request: &CompletionRequest) -> ApiRequest {
+///
+/// Consumes the request to avoid cloning strings and values.
+fn build_request_body(request: CompletionRequest) -> ApiRequest {
     let messages: Vec<ApiMessage> = request
         .messages
-        .iter()
+        .into_iter()
         .filter(|m| m.role != Role::System)
         .map(|m| ApiMessage {
             role: match m.role {
                 Role::User | Role::Tool | Role::System => "user".into(),
                 Role::Assistant => "assistant".into(),
             },
-            content: m.content.iter().map(convert_content_block).collect(),
+            content: m.content.into_iter().map(convert_content_block).collect(),
         })
         .collect();
 
     let tools: Vec<ApiToolDefinition> = request
         .tools
-        .iter()
+        .into_iter()
         .map(|t| ApiToolDefinition {
-            name: t.name.clone(),
-            description: t.description.clone(),
-            input_schema: t.input_schema.clone(),
+            name: t.name,
+            description: t.description,
+            input_schema: t.input_schema,
         })
         .collect();
 
     ApiRequest {
-        model: request.model.clone(),
+        model: request.model,
         max_tokens: request.max_tokens,
         messages,
-        system: request.system_prompt.clone(),
+        system: request.system_prompt,
         temperature: request.temperature,
-        stop_sequences: request.stop_sequences.clone(),
+        stop_sequences: request.stop_sequences,
         tools,
         stream: None,
     }
 }
 
 /// Convert an internal `ContentBlock` to the Anthropic wire format.
-fn convert_content_block(block: &ContentBlock) -> ApiContentBlock {
+///
+/// Takes ownership to move strings rather than clone them.
+fn convert_content_block(block: ContentBlock) -> ApiContentBlock {
     match block {
-        ContentBlock::Text { text } => ApiContentBlock::Text { text: text.clone() },
-        ContentBlock::ToolUse { id, name, input } => ApiContentBlock::ToolUse {
-            id: id.clone(),
-            name: name.clone(),
-            input: input.clone(),
-        },
+        ContentBlock::Text { text } => ApiContentBlock::Text { text },
+        ContentBlock::ToolUse { id, name, input } => ApiContentBlock::ToolUse { id, name, input },
         ContentBlock::ToolResult {
             tool_use_id,
             content,
             is_error,
         } => ApiContentBlock::ToolResult {
-            tool_use_id: tool_use_id.clone(),
-            content: content.clone(),
-            is_error: *is_error,
+            tool_use_id,
+            content,
+            is_error,
         },
         ContentBlock::Image { media_type, data } => ApiContentBlock::Image {
             source: ApiImageSource {
                 source_type: "base64".into(),
-                media_type: media_type.clone(),
-                data: data.clone(),
+                media_type,
+                data,
             },
         },
     }
@@ -362,6 +366,31 @@ async fn extract_error_message(resp: reqwest::Response, fallback: &str) -> Strin
         .map_or_else(|_| fallback.to_string(), |e| e.error.message)
 }
 
+/// Map a non-success HTTP response to the appropriate `ProviderError`.
+///
+/// Handles 401, 429, and generic error responses with consistent classification.
+async fn map_error_response(resp: reqwest::Response) -> ProviderError {
+    let status = resp.status().as_u16();
+
+    if status == 401 {
+        let reason = extract_error_message(resp, "invalid API key").await;
+        return ProviderError::AuthenticationFailed { reason };
+    }
+
+    if status == 429 {
+        let retry_after_ms = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .map_or(DEFAULT_RETRY_AFTER_MS, |secs| secs * 1000);
+        return ProviderError::RateLimited { retry_after_ms };
+    }
+
+    let body = resp.text().await.unwrap_or_default();
+    ProviderError::ApiError { status, body }
+}
+
 /// Classify a reqwest error into `ProviderError` with `NetworkErrorKind`.
 fn classify_reqwest_error(e: &reqwest::Error) -> ProviderError {
     let message = e.to_string();
@@ -418,19 +447,8 @@ impl Provider for AnthropicProvider {
             .await
             .map_err(|ref e| classify_reqwest_error(e))?;
 
-        let status = resp.status().as_u16();
-
-        if status == 401 {
-            let reason = extract_error_message(resp, "invalid API key").await;
-            return Err(ProviderError::AuthenticationFailed { reason });
-        }
-
         if !resp.status().is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(ProviderError::ApiError {
-                status,
-                body: body_text,
-            });
+            return Err(map_error_response(resp).await);
         }
 
         Ok(())
@@ -440,7 +458,7 @@ impl Provider for AnthropicProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
-        let api_request = build_request_body(&request);
+        let api_request = build_request_body(request);
 
         let resp = self
             .client
@@ -453,29 +471,8 @@ impl Provider for AnthropicProvider {
             .await
             .map_err(|ref e| classify_reqwest_error(e))?;
 
-        let status = resp.status().as_u16();
-
-        if status == 401 {
-            let reason = extract_error_message(resp, "invalid API key").await;
-            return Err(ProviderError::AuthenticationFailed { reason });
-        }
-
-        if status == 429 {
-            let retry_after_ms = resp
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .map_or(DEFAULT_RETRY_AFTER_MS, |secs| secs * 1000);
-            return Err(ProviderError::RateLimited { retry_after_ms });
-        }
-
         if !resp.status().is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(ProviderError::ApiError {
-                status,
-                body: body_text,
-            });
+            return Err(map_error_response(resp).await);
         }
 
         let api_response: ApiResponse = resp
@@ -571,6 +568,16 @@ mod tests {
         })
     }
 
+    fn error_response_json(error_type: &str, message: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "error",
+            "error": {
+                "type": error_type,
+                "message": message
+            }
+        })
+    }
+
     // -----------------------------------------------------------------------
     // Unit tests: build_request_body
     // -----------------------------------------------------------------------
@@ -579,7 +586,7 @@ mod tests {
     fn test_build_request_body_basic() {
         let request = simple_completion_request();
 
-        let api_req = build_request_body(&request);
+        let api_req = build_request_body(request);
 
         assert_eq!(api_req.model, "claude-opus-4-6-20250929");
         assert_eq!(api_req.max_tokens, 1024);
@@ -596,7 +603,7 @@ mod tests {
             ..simple_completion_request()
         };
 
-        let api_req = build_request_body(&request);
+        let api_req = build_request_body(request);
 
         assert_eq!(api_req.system, Some("Be concise.".into()));
         for msg in &api_req.messages {
@@ -628,7 +635,7 @@ mod tests {
             ..simple_completion_request()
         };
 
-        let api_req = build_request_body(&request);
+        let api_req = build_request_body(request);
 
         assert_eq!(api_req.messages[1].role, "user");
     }
@@ -655,7 +662,7 @@ mod tests {
             ..simple_completion_request()
         };
 
-        let api_req = build_request_body(&request);
+        let api_req = build_request_body(request);
 
         assert_eq!(api_req.messages.len(), 1);
         assert_eq!(api_req.messages[0].role, "user");
@@ -672,7 +679,7 @@ mod tests {
             ..simple_completion_request()
         };
 
-        let api_req = build_request_body(&request);
+        let api_req = build_request_body(request);
 
         assert_eq!(api_req.tools.len(), 1);
         assert_eq!(api_req.tools[0].name, "read_file");
@@ -689,7 +696,7 @@ mod tests {
             ..simple_completion_request()
         };
 
-        let api_req = build_request_body(&request);
+        let api_req = build_request_body(request);
         let json = serde_json::to_value(&api_req).unwrap();
         let obj = json.as_object().unwrap();
 
@@ -714,7 +721,7 @@ mod tests {
             ..simple_completion_request()
         };
 
-        let api_req = build_request_body(&request);
+        let api_req = build_request_body(request);
         let json = serde_json::to_value(&api_req).unwrap();
 
         let content = &json["messages"][0]["content"][0];
@@ -849,13 +856,12 @@ mod tests {
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
-                "type": "error",
-                "error": {
-                    "type": "authentication_error",
-                    "message": "invalid x-api-key"
-                }
-            })))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_json(error_response_json(
+                    "authentication_error",
+                    "invalid x-api-key",
+                )),
+            )
             .mount(&mock_server)
             .await;
 
@@ -878,10 +884,7 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(429)
                     .append_header("retry-after", "30")
-                    .set_body_json(serde_json::json!({
-                        "type": "error",
-                        "error": {"type": "rate_limit_error", "message": "rate limited"}
-                    })),
+                    .set_body_json(error_response_json("rate_limit_error", "rate limited")),
             )
             .mount(&mock_server)
             .await;
@@ -902,10 +905,10 @@ mod tests {
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({
-                "type": "error",
-                "error": {"type": "rate_limit_error", "message": "rate limited"}
-            })))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .set_body_json(error_response_json("rate_limit_error", "rate limited")),
+            )
             .mount(&mock_server)
             .await;
 
@@ -981,13 +984,12 @@ mod tests {
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
-                "type": "error",
-                "error": {
-                    "type": "authentication_error",
-                    "message": "invalid x-api-key"
-                }
-            })))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_json(error_response_json(
+                    "authentication_error",
+                    "invalid x-api-key",
+                )),
+            )
             .mount(&mock_server)
             .await;
 
@@ -999,6 +1001,51 @@ mod tests {
                 assert_eq!(reason, "invalid x-api-key");
             }
             other => panic!("expected AuthenticationFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validate_credentials_server_error() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("server error"))
+            .mount(&mock_server)
+            .await;
+
+        let provider = make_provider(&mock_server.uri());
+        let result = provider.validate_credentials().await;
+
+        match result {
+            Err(ProviderError::ApiError { status, body }) => {
+                assert_eq!(status, 500);
+                assert_eq!(body, "server error");
+            }
+            other => panic!("expected ApiError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validate_credentials_rate_limited() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .append_header("retry-after", "5")
+                    .set_body_json(error_response_json("rate_limit_error", "rate limited")),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let provider = make_provider(&mock_server.uri());
+        let result = provider.validate_credentials().await;
+
+        match result {
+            Err(ProviderError::RateLimited { retry_after_ms }) => {
+                assert_eq!(retry_after_ms, 5_000);
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
         }
     }
 
