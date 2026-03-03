@@ -274,7 +274,10 @@ impl Redacted {
             .map(|c| if c.is_control() { '?' } else { c })
             .collect();
 
-        if raw.len() > MAX_REDACTED_LEN {
+        // Check whether we actually truncated — O(1) after take() consumed
+        // MAX_REDACTED_LEN chars: just check if there's at least one more.
+        let truncated = raw.chars().nth(MAX_REDACTED_LEN).is_some();
+        if truncated {
             s.push_str("...[REDACTED]");
         }
 
@@ -584,6 +587,38 @@ mod tests {
         let redacted = Redacted::from_tainted(&t);
         assert_eq!(redacted.as_str(), "short text");
         assert!(!redacted.as_str().contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_redacted_multibyte_not_falsely_marked() {
+        // 50 emoji = 200 bytes but only 50 chars — should NOT be marked as redacted
+        let emoji_input = "🎉".repeat(50);
+        assert!(
+            emoji_input.len() > MAX_REDACTED_LEN,
+            "precondition: byte len > 80"
+        );
+        assert!(
+            emoji_input.chars().count() <= MAX_REDACTED_LEN,
+            "precondition: char count <= 80"
+        );
+        let t = Tainted::new(emoji_input);
+        let redacted = Redacted::from_tainted(&t);
+        assert!(
+            !redacted.as_str().contains("[REDACTED]"),
+            "50 chars should not be marked as redacted even though byte len > 80"
+        );
+    }
+
+    #[test]
+    fn test_redacted_multibyte_truncates_at_char_boundary() {
+        // 100 emoji = 400 bytes AND 100 chars — should be truncated to 80 chars
+        let emoji_input = "🎉".repeat(100);
+        let t = Tainted::new(emoji_input);
+        let redacted = Redacted::from_tainted(&t);
+        assert!(redacted.as_str().ends_with("...[REDACTED]"));
+        // 80 emoji (4 bytes each) + "...[REDACTED]" (13 bytes)
+        let redacted_no_suffix = redacted.as_str().strip_suffix("...[REDACTED]").unwrap();
+        assert_eq!(redacted_no_suffix.chars().count(), MAX_REDACTED_LEN);
     }
 
     #[test]
