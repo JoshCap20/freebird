@@ -8,7 +8,8 @@ use crate::id::SessionId;
 use crate::provider::Message;
 
 /// A complete conversation turn: user message + assistant response + tool calls.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::derive_partial_eq_without_eq)] // serde_json::Value does not impl Eq
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Turn {
     pub user_message: Message,
     pub assistant_response: Option<Message>,
@@ -18,7 +19,8 @@ pub struct Turn {
 }
 
 /// Record of a single tool invocation within a turn.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::derive_partial_eq_without_eq)] // serde_json::Value does not impl Eq
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolInvocation {
     pub tool_use_id: String,
     pub tool_name: String,
@@ -29,7 +31,8 @@ pub struct ToolInvocation {
 }
 
 /// A complete conversation (ordered list of turns + metadata).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::derive_partial_eq_without_eq)] // serde_json::Value does not impl Eq
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Conversation {
     pub session_id: SessionId,
     pub system_prompt: Option<String>,
@@ -41,7 +44,7 @@ pub struct Conversation {
 }
 
 /// Summary of a stored session for listing/search results.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub session_id: SessionId,
     pub created_at: DateTime<Utc>,
