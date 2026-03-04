@@ -118,7 +118,7 @@ impl ProviderRegistry {
             return Err(ProviderError::NotConfigured);
         }
 
-        let mut last_error: Option<ProviderError> = None;
+        let mut last_error = ProviderError::NotConfigured;
 
         for provider_id in &self.failover_chain {
             let Some(provider) = self.providers.get(provider_id) else {
@@ -137,13 +137,13 @@ impl ProviderRegistry {
                         error = %e,
                         "provider failed with retriable error, trying next"
                     );
-                    last_error = Some(e);
+                    last_error = e;
                 }
                 Err(e) => return Err(e),
             }
         }
 
-        Err(last_error.unwrap_or(ProviderError::NotConfigured))
+        Err(last_error)
     }
 
     /// Stream from a specific provider (no failover — reconnecting mid-stream
@@ -197,6 +197,7 @@ const fn is_retriable(error: &ProviderError) -> bool {
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
+    clippy::unwrap_used,
     clippy::panic,
     clippy::similar_names,
     clippy::items_after_statements
@@ -523,8 +524,12 @@ mod tests {
         assert_eq!(returned_id, second);
     }
 
-    #[tokio::test]
-    async fn test_no_failover_on_client_error_4xx() {
+    /// Helper: assert that the given error factory short-circuits failover
+    /// (the second provider is never called) and the returned error matches
+    /// the `$pattern`.
+    async fn assert_short_circuits(
+        error_factory: impl Fn() -> ProviderError + Send + Sync + 'static,
+    ) -> ProviderError {
         let mut registry = ProviderRegistry::new();
         let first = id("first");
         let second = id("second");
@@ -534,122 +539,63 @@ mod tests {
 
         registry.register(
             first.clone(),
-            Box::new(MockProvider::new_err(|| ProviderError::ApiError {
-                status: 400,
-                body: "bad request".into(),
-            })),
+            Box::new(MockProvider::new_err(error_factory)),
         );
         registry.register(second.clone(), Box::new(ArcProvider(p2)));
         registry.set_failover_chain(vec![first, second]);
 
         let result = registry.complete_with_failover(make_request()).await;
-        match result {
-            Err(ProviderError::ApiError { status, .. }) => assert_eq!(status, 400),
-            other => panic!("expected ApiError(400), got {other:?}"),
-        }
+        assert!(result.is_err(), "expected error, got {result:?}");
         assert_eq!(
             p2_ref.call_count(),
             0,
             "second provider should not be called"
         );
+        result.unwrap_err()
+    }
+
+    #[tokio::test]
+    async fn test_no_failover_on_client_error_4xx() {
+        let err = assert_short_circuits(|| ProviderError::ApiError {
+            status: 400,
+            body: "bad request".into(),
+        })
+        .await;
+        assert!(matches!(err, ProviderError::ApiError { status: 400, .. }));
     }
 
     #[tokio::test]
     async fn test_auth_failure_short_circuits() {
-        let mut registry = ProviderRegistry::new();
-        let first = id("first");
-        let second = id("second");
-
-        let p2 = std::sync::Arc::new(MockProvider::new_ok("should-not-reach"));
-        let p2_ref = p2.clone();
-
-        registry.register(
-            first.clone(),
-            Box::new(MockProvider::new_err(|| {
-                ProviderError::AuthenticationFailed {
-                    reason: "invalid key".into(),
-                }
-            })),
-        );
-        registry.register(second.clone(), Box::new(ArcProvider(p2)));
-        registry.set_failover_chain(vec![first, second]);
-
-        let result = registry.complete_with_failover(make_request()).await;
-        assert!(matches!(
-            result,
-            Err(ProviderError::AuthenticationFailed { .. })
-        ));
-        assert_eq!(p2_ref.call_count(), 0);
+        let err = assert_short_circuits(|| ProviderError::AuthenticationFailed {
+            reason: "invalid key".into(),
+        })
+        .await;
+        assert!(matches!(err, ProviderError::AuthenticationFailed { .. }));
     }
 
     #[tokio::test]
     async fn test_model_not_found_short_circuits() {
-        let mut registry = ProviderRegistry::new();
-        let first = id("first");
-        let second = id("second");
-
-        let p2 = std::sync::Arc::new(MockProvider::new_ok("should-not-reach"));
-        let p2_ref = p2.clone();
-
-        registry.register(
-            first.clone(),
-            Box::new(MockProvider::new_err(|| ProviderError::ModelNotFound {
-                model: "nonexistent".into(),
-            })),
-        );
-        registry.register(second.clone(), Box::new(ArcProvider(p2)));
-        registry.set_failover_chain(vec![first, second]);
-
-        let result = registry.complete_with_failover(make_request()).await;
-        assert!(matches!(result, Err(ProviderError::ModelNotFound { .. })));
-        assert_eq!(p2_ref.call_count(), 0);
+        let err = assert_short_circuits(|| ProviderError::ModelNotFound {
+            model: "nonexistent".into(),
+        })
+        .await;
+        assert!(matches!(err, ProviderError::ModelNotFound { .. }));
     }
 
     #[tokio::test]
     async fn test_context_overflow_short_circuits() {
-        let mut registry = ProviderRegistry::new();
-        let first = id("first");
-        let second = id("second");
-
-        let p2 = std::sync::Arc::new(MockProvider::new_ok("should-not-reach"));
-        let p2_ref = p2.clone();
-
-        registry.register(
-            first.clone(),
-            Box::new(MockProvider::new_err(|| ProviderError::ContextOverflow {
-                used: 200_000,
-                max: 100_000,
-            })),
-        );
-        registry.register(second.clone(), Box::new(ArcProvider(p2)));
-        registry.set_failover_chain(vec![first, second]);
-
-        let result = registry.complete_with_failover(make_request()).await;
-        assert!(matches!(result, Err(ProviderError::ContextOverflow { .. })));
-        assert_eq!(p2_ref.call_count(), 0);
+        let err = assert_short_circuits(|| ProviderError::ContextOverflow {
+            used: 200_000,
+            max: 100_000,
+        })
+        .await;
+        assert!(matches!(err, ProviderError::ContextOverflow { .. }));
     }
 
     #[tokio::test]
     async fn test_deserialization_short_circuits() {
-        let mut registry = ProviderRegistry::new();
-        let first = id("first");
-        let second = id("second");
-
-        let p2 = std::sync::Arc::new(MockProvider::new_ok("should-not-reach"));
-        let p2_ref = p2.clone();
-
-        registry.register(
-            first.clone(),
-            Box::new(MockProvider::new_err(|| {
-                ProviderError::Deserialization("bad json".into())
-            })),
-        );
-        registry.register(second.clone(), Box::new(ArcProvider(p2)));
-        registry.set_failover_chain(vec![first, second]);
-
-        let result = registry.complete_with_failover(make_request()).await;
-        assert!(matches!(result, Err(ProviderError::Deserialization(_))));
-        assert_eq!(p2_ref.call_count(), 0);
+        let err = assert_short_circuits(|| ProviderError::Deserialization("bad json".into())).await;
+        assert!(matches!(err, ProviderError::Deserialization(_)));
     }
 
     #[tokio::test]
