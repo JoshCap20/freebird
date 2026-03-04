@@ -1914,6 +1914,56 @@ impl SafePath {
 }
 ```
 
+### 10.3 Output Taint Types
+
+Tool output and model responses flow through safe types that enforce injection scanning at construction time. Unlike `SafeMessage` (which validates user input), these types enforce output-side taint boundaries — preventing indirect prompt injection from poisoning the LLM context or user-facing responses.
+
+```rust
+// freebird-security/src/safe_types.rs
+
+/// Scanned tool output — blocks injection before content enters the LLM context.
+/// Prevents indirect prompt injection via tool results (e.g., a file containing
+/// "ignore previous instructions").
+#[derive(Debug)]
+pub struct ScannedToolOutput(String);
+
+impl ScannedToolOutput {
+    pub fn from_raw(content: &str) -> Result<Self, SecurityError> {
+        injection::scan_output(content)?;
+        Ok(Self(content.to_owned()))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Scanned model response — blocks injection before delivery to the user.
+/// Prevents compromised model output from reaching the channel. When blocked,
+/// the tainted response is NOT persisted to memory (prevents memory poisoning).
+#[derive(Debug)]
+pub struct ScannedModelResponse(String);
+
+impl ScannedModelResponse {
+    pub fn from_raw(content: &str) -> Result<Self, SecurityError> {
+        injection::scan_output(content)?;
+        Ok(Self(content.to_owned()))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+```
+
+**Enforcement boundary**: Because `freebird-traits` cannot depend on `freebird-security`, these types are enforced in `freebird-runtime` (the agentic loop), not at the trait level. The `Tool` trait returns raw `ToolOutput`; the runtime wraps it in `ScannedToolOutput::from_raw()` before passing content to the LLM.
+
+**Behavior on detection**:
+- **Tool output injection**: Blocked. A synthetic error `ToolResult { is_error: true }` replaces the raw content. The agentic loop continues — the LLM sees the error and can retry or respond without the tainted content.
+- **Model output injection**: Blocked. `OutboundEvent::Error` sent to the user. The tainted response is NOT saved as `assistant_response` in the turn, preventing memory poisoning.
+
 ---
 
 ## 11. Agentic Security Model
@@ -1999,8 +2049,8 @@ pub fn scan_output(text: &str) -> Result<(), SecurityError> {
 | Input injection scan | Known prompt injection patterns | Router (before agent) |
 | Capability system | Unauthorized tool access | ToolExecutor (before tool) |
 | SafePath | Path traversal in tool args | Tool implementation |
-| Tool output scan | Indirect injection via tool results | ToolExecutor (after tool, before LLM) |
-| Model output scan | Compromised model responses | Agent loop (before channel) |
+| Tool output scan (`ScannedToolOutput`) | Indirect injection via tool results — **blocks** with synthetic error | Agent loop (after tool, before LLM) |
+| Model output scan (`ScannedModelResponse`) | Compromised model responses — **blocks** delivery + prevents memory poisoning | Agent loop (before channel) |
 | Audit logging | Post-incident forensics | Every layer |
 
 ### 12.3 Reader Agent Pattern (Future)
@@ -3350,8 +3400,8 @@ Run `cargo fmt` on save. Treat clippy warnings as errors.
 ### Prompt Injection Defense
 
 - [ ] Input scanning on all user messages
-- [ ] Output scanning on all tool results before returning to LLM
-- [ ] Output scanning on model responses before delivering to user
+- [ ] Output scanning on all tool results via `ScannedToolOutput` — blocks with synthetic error on detection
+- [ ] Output scanning on model responses via `ScannedModelResponse` — blocks delivery and prevents memory poisoning on detection
 - [ ] Reader agent pattern for untrusted external content (future)
 
 ### Auth & Sessions

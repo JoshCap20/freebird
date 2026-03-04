@@ -12,8 +12,7 @@ use freebird_security::audit::{
     AuditEventType, AuditLogger, CapabilityCheckResult, InjectionSource,
 };
 use freebird_security::error::Severity;
-use freebird_security::injection;
-use freebird_security::safe_types::SafeMessage;
+use freebird_security::safe_types::{SafeMessage, ScannedModelResponse, ScannedToolOutput};
 use freebird_security::taint::Tainted;
 use freebird_traits::channel::{Channel, ChannelError, InboundEvent, OutboundEvent};
 use freebird_traits::id::{ModelId, SessionId};
@@ -29,6 +28,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::registry::ProviderRegistry;
+
+/// Error message sent to the user when model output injection is detected.
+const MODEL_OUTPUT_INJECTION_BLOCKED: &str =
+    "Response blocked: potential prompt injection detected in model output.";
 use crate::session::SessionManager;
 
 /// Controls the event loop after handling an event.
@@ -403,15 +406,7 @@ impl AgentRuntime {
         };
 
         for _round in 0..self.config.max_tool_rounds {
-            let request = CompletionRequest {
-                model: ModelId::from(conversation.model_id.as_str()),
-                system_prompt: conversation.system_prompt.clone(),
-                messages: messages.clone(),
-                tools: tool_definitions.clone(),
-                max_tokens: self.config.max_output_tokens,
-                temperature: self.config.temperature,
-                stop_sequences: Vec::new(),
-            };
+            let request = self.build_completion_request(conversation, &messages, &tool_definitions);
 
             let (_provider_id, response) =
                 match self.provider_registry.complete_with_failover(request).await {
@@ -453,6 +448,7 @@ impl AgentRuntime {
                     self.deliver_truncated_response(
                         &response,
                         sender_id,
+                        session_id,
                         &mut current_turn,
                         outbound,
                     )
@@ -489,6 +485,24 @@ impl AgentRuntime {
         current_turn
     }
 
+    /// Build a `CompletionRequest` from the current conversation state.
+    fn build_completion_request(
+        &self,
+        conversation: &Conversation,
+        messages: &[Message],
+        tool_definitions: &[ToolDefinition],
+    ) -> CompletionRequest {
+        CompletionRequest {
+            model: ModelId::from(conversation.model_id.as_str()),
+            system_prompt: conversation.system_prompt.clone(),
+            messages: messages.to_vec(),
+            tools: tool_definitions.to_vec(),
+            max_tokens: self.config.max_output_tokens,
+            temperature: self.config.temperature,
+            stop_sequences: Vec::new(),
+        }
+    }
+
     /// Execute tool calls from a `ToolUse` response and append results to the message list.
     async fn handle_tool_use_round(
         &self,
@@ -514,7 +528,7 @@ impl AgentRuntime {
         messages.push(response.message.clone());
 
         // Execute each tool and collect results
-        let mut tool_results = Vec::new();
+        let mut tool_results = Vec::with_capacity(tool_uses.len());
         for (tool_use_id, tool_name, input) in tool_uses {
             let start = std::time::Instant::now();
 
@@ -522,36 +536,43 @@ impl AgentRuntime {
 
             let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-            // Scan tool output for injection (log and continue)
-            if let Err(e) = injection::scan_output(&output.content) {
-                tracing::warn!(tool = %tool_name, "potential injection in tool output");
-                if let Some(audit) = &self.audit {
-                    let _ = audit
-                        .record(
-                            session_id.as_str(),
-                            AuditEventType::InjectionDetected {
-                                pattern: format!("{e}"),
-                                source: InjectionSource::ToolOutput,
-                                severity: Severity::High,
-                            },
-                        )
-                        .await;
+            // Scan tool output for injection — BLOCK if detected
+            let (final_content, is_error) = match ScannedToolOutput::from_raw(&output.content) {
+                Ok(scanned) => (scanned.into_inner(), output.is_error),
+                Err(e) => {
+                    tracing::warn!(tool = %tool_name, "injection detected in tool output, blocking");
+                    if let Some(audit) = &self.audit {
+                        let _ = audit
+                            .record(
+                                session_id.as_str(),
+                                AuditEventType::InjectionDetected {
+                                    pattern: format!("{e}"),
+                                    source: InjectionSource::ToolOutput,
+                                    severity: Severity::High,
+                                },
+                            )
+                            .await;
+                    }
+                    (
+                        "Tool output blocked: potential prompt injection detected".to_owned(),
+                        true,
+                    )
                 }
-            }
+            };
 
             current_turn.tool_invocations.push(ToolInvocation {
                 tool_use_id: tool_use_id.clone(),
                 tool_name,
                 input,
-                output: Some(output.content.clone()),
-                is_error: output.is_error,
+                output: Some(final_content.clone()),
+                is_error,
                 duration_ms: Some(duration_ms),
             });
 
             tool_results.push(ContentBlock::ToolResult {
                 tool_use_id,
-                content: output.content,
-                is_error: output.is_error,
+                content: final_content,
+                is_error,
             });
         }
 
@@ -564,6 +585,10 @@ impl AgentRuntime {
     }
 
     /// Deliver a final (non-truncated) response to the user.
+    ///
+    /// Scans model output for injection via `ScannedModelResponse`. On detection:
+    /// - Sends `OutboundEvent::Error` instead of the response
+    /// - Does NOT persist the tainted response to memory (prevents poisoning)
     async fn deliver_final_response(
         &self,
         response: &CompletionResponse,
@@ -583,53 +608,98 @@ impl AgentRuntime {
             return;
         }
 
-        // Scan model output for injection (log and continue)
-        if let Err(e) = injection::scan_output(&response_text) {
-            tracing::warn!("potential injection in model output");
-            if let Some(audit) = &self.audit {
-                let _ = audit
-                    .record(
-                        session_id.as_str(),
-                        AuditEventType::InjectionDetected {
-                            pattern: format!("{e}"),
-                            source: InjectionSource::ModelResponse,
-                            severity: Severity::High,
-                        },
-                    )
+        // Scan model output for injection — BLOCK if detected
+        match ScannedModelResponse::from_raw(&response_text) {
+            Ok(scanned) => {
+                let _ = outbound
+                    .send(OutboundEvent::Message {
+                        text: scanned.into_inner(),
+                        recipient_id: sender_id.into(),
+                    })
                     .await;
+
+                current_turn.assistant_response = Some(response.message.clone());
+                current_turn.completed_at = Some(Utc::now());
+            }
+            Err(e) => {
+                self.log_model_output_injection(session_id, &e).await;
+
+                let _ = outbound
+                    .send(OutboundEvent::Error {
+                        text: MODEL_OUTPUT_INJECTION_BLOCKED.into(),
+                        recipient_id: sender_id.into(),
+                    })
+                    .await;
+
+                // Do NOT persist the tainted response — prevents memory poisoning
+                current_turn.completed_at = Some(Utc::now());
             }
         }
-
-        let _ = outbound
-            .send(OutboundEvent::Message {
-                text: response_text,
-                recipient_id: sender_id.into(),
-            })
-            .await;
-
-        current_turn.assistant_response = Some(response.message.clone());
-        current_turn.completed_at = Some(Utc::now());
     }
 
     /// Deliver a truncated response (max tokens reached).
+    ///
+    /// Scans the partial output for injection before delivery.
     async fn deliver_truncated_response(
         &self,
         response: &CompletionResponse,
         sender_id: &str,
+        session_id: &SessionId,
         current_turn: &mut Turn,
         outbound: &mpsc::Sender<OutboundEvent>,
     ) {
         let partial_text = extract_text(&response.message);
 
-        let _ = outbound
-            .send(OutboundEvent::Message {
-                text: format!("{partial_text}\n\n[response truncated — max tokens reached]"),
-                recipient_id: sender_id.into(),
-            })
-            .await;
+        // Scan truncated output for injection — BLOCK if detected
+        match ScannedModelResponse::from_raw(&partial_text) {
+            Ok(scanned) => {
+                let _ = outbound
+                    .send(OutboundEvent::Message {
+                        text: format!(
+                            "{}\n\n[response truncated — max tokens reached]",
+                            scanned.into_inner()
+                        ),
+                        recipient_id: sender_id.into(),
+                    })
+                    .await;
 
-        current_turn.assistant_response = Some(response.message.clone());
-        current_turn.completed_at = Some(Utc::now());
+                current_turn.assistant_response = Some(response.message.clone());
+                current_turn.completed_at = Some(Utc::now());
+            }
+            Err(e) => {
+                self.log_model_output_injection(session_id, &e).await;
+
+                let _ = outbound
+                    .send(OutboundEvent::Error {
+                        text: MODEL_OUTPUT_INJECTION_BLOCKED.into(),
+                        recipient_id: sender_id.into(),
+                    })
+                    .await;
+
+                current_turn.completed_at = Some(Utc::now());
+            }
+        }
+    }
+
+    /// Log a model output injection detection to audit.
+    async fn log_model_output_injection(
+        &self,
+        session_id: &SessionId,
+        error: &freebird_security::error::SecurityError,
+    ) {
+        tracing::warn!("injection detected in model output, blocking delivery");
+        if let Some(audit) = &self.audit {
+            let _ = audit
+                .record(
+                    session_id.as_str(),
+                    AuditEventType::InjectionDetected {
+                        pattern: format!("{error}"),
+                        source: InjectionSource::ModelResponse,
+                        severity: Severity::High,
+                    },
+                )
+                .await;
+        }
     }
 
     /// Execute a tool by name, with timeout. Returns `ToolOutput` unconditionally.
