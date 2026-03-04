@@ -6,3 +6,4 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod file;
+pub mod in_memory;
