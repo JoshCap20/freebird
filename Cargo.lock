@@ -299,7 +299,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "freebird-traits",
- "freebird-types",
  "futures",
  "reqwest",
  "secrecy",
