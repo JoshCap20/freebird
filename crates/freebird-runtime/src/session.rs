@@ -207,11 +207,8 @@ mod tests {
 
         let mut ids = Vec::with_capacity(10);
         for handle in handles {
-            ids.push(
-                handle
-                    .await
-                    .unwrap_or_else(|_| SessionId::from_string("panic")),
-            );
+            #[allow(clippy::expect_used)] // Test: JoinError means a task panicked — surface it
+            ids.push(handle.await.expect("task should not panic"));
         }
 
         // All 10 tasks must return the same SessionId
