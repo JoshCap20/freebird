@@ -167,15 +167,6 @@ struct ApiStreamMessage {
     usage: ApiUsage,
 }
 
-/// Delta payload from the `message_delta` SSE event.
-/// Deserialized in `process_event_data` via direct `Value` access (two-stage parsing).
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct ApiMessageDelta {
-    stop_reason: Option<String>,
-    stop_sequence: Option<String>,
-}
-
 /// Cumulative usage from the `message_delta` SSE event.
 #[derive(Debug, Deserialize)]
 #[allow(clippy::struct_field_names)]
