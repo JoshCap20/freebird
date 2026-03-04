@@ -380,67 +380,69 @@ impl SafeUrl {
     }
 }
 
-// ── ScannedToolOutput ────────────────────────────────────────────
+// ── Scanned output types (generated via macro) ──────────────────
 
-/// Tool output that has been injection-scanned.
-///
-/// Wraps raw tool output after verifying it does not contain prompt
-/// injection patterns. This prevents indirect injection where a tool
-/// reads a file or URL containing payloads that could hijack the LLM.
-///
-/// Produced by: tool executor (after tool execution, before returning to LLM).
-/// Consumed by: agent runtime (appended to conversation context as tool result).
-#[derive(Debug)]
-pub struct ScannedToolOutput(String);
+/// Defines a scanned output safe type with `from_raw`, `as_str`, and
+/// `into_inner` methods. Both `ScannedToolOutput` and `ScannedModelResponse`
+/// use the same validation logic (`injection::scan_output`) but are distinct
+/// types to prevent accidental interchange.
+macro_rules! define_scanned_output {
+    (
+        $(#[$meta:meta])*
+        $name:ident
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug)]
+        pub struct $name(String);
 
-impl ScannedToolOutput {
-    /// Validate raw tool output for injection patterns.
-    ///
-    /// - Scans for known prompt injection patterns (with Unicode evasion defense)
-    ///
-    /// # Errors
-    ///
-    /// Returns `SecurityError::PotentialInjection` if injection patterns are detected.
-    pub fn from_raw(content: &str) -> Result<Self, SecurityError> {
-        injection::scan_output(content)?;
-        Ok(Self(content.to_owned()))
-    }
+        impl $name {
+            /// Scan raw content for injection patterns.
+            ///
+            /// # Errors
+            ///
+            /// Returns `SecurityError::PotentialInjection` if injection patterns are detected.
+            pub fn from_raw(content: &str) -> Result<Self, SecurityError> {
+                injection::scan_output(content)?;
+                Ok(Self(content.to_owned()))
+            }
 
-    /// Access the validated tool output.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+            /// Access the scanned content as a string slice.
+            #[must_use]
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            /// Consume self and return the inner `String`, avoiding a re-allocation.
+            #[must_use]
+            pub fn into_inner(self) -> String {
+                self.0
+            }
+        }
+    };
 }
 
-// ── ScannedModelResponse ──────────────────────────────────────────
-/// Model response text that has been injection-scanned.
-///
-/// Wraps model-generated text after verifying it does not contain prompt
-/// injection patterns. This prevents a compromised or manipulated model
-/// from injecting instructions into the response delivered to the user.
-///
-/// Produced by: agent runtime (after provider response, before channel delivery).
-/// Consumed by: channel outbound (delivered to the user as safe text).
-#[derive(Debug)]
-pub struct ScannedModelResponse(String);
-
-impl ScannedModelResponse {
-    /// Scan model response text for injection patterns.
+define_scanned_output! {
+    /// Tool output that has been injection-scanned.
     ///
-    /// # Errors
+    /// Wraps raw tool output after verifying it does not contain prompt
+    /// injection patterns. This prevents indirect injection where a tool
+    /// reads a file or URL containing payloads that could hijack the LLM.
     ///
-    /// Returns `SecurityError::PotentialInjection` if injection patterns are detected.
-    pub fn from_raw(content: &str) -> Result<Self, SecurityError> {
-        injection::scan_output(content)?;
-        Ok(Self(content.to_owned()))
-    }
+    /// Produced by: tool executor (after tool execution, before returning to LLM).
+    /// Consumed by: agent runtime (appended to conversation context as tool result).
+    ScannedToolOutput
+}
 
-    /// Access the scanned response text.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+define_scanned_output! {
+    /// Model response text that has been injection-scanned.
+    ///
+    /// Wraps model-generated text after verifying it does not contain prompt
+    /// injection patterns. This prevents a compromised or manipulated model
+    /// from injecting instructions into the response delivered to the user.
+    ///
+    /// Produced by: agent runtime (after provider response, before channel delivery).
+    /// Consumed by: channel outbound (delivered to the user as safe text).
+    ScannedModelResponse
 }
 
 // ── Redacted ─────────────────────────────────────────────────────

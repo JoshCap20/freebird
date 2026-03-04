@@ -1008,7 +1008,7 @@ async fn test_clean_input_passes_validation() {
 #[tokio::test]
 async fn test_tool_output_injection_replaced_with_error() {
     let (channel, inbound_tx, outbound_rx, _) = MockChannel::new();
-    let provider = Arc::new(QueuedProvider::new(vec![
+    let provider = Arc::new(RequestCapturingProvider::new(vec![
         tool_use_response("read_file", serde_json::json!({})),
         text_response("I read the file"),
     ]));
@@ -1023,20 +1023,40 @@ async fn test_tool_output_injection_replaced_with_error() {
         })],
     );
 
-    let runtime = make_test_runtime(
-        channel,
-        provider.clone(),
+    let runtime = AgentRuntime::new(
+        make_capturing_registry(Arc::clone(&provider)),
+        Box::new(channel),
         vec![Box::new(mock_tool)],
         Box::new(InMemoryMemory::new()),
+        default_config(),
+        default_tools_config(),
+        None,
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Read file").await;
 
     // Tool output injection is blocked but the agentic loop continues with a
     // synthetic error result, so the provider is still called a second time.
-    assert_eq!(provider.call_count(), 2);
+    assert_eq!(provider.inner.call_count(), 2);
     let msg = events.first().expect("should have response");
     assert_eq!(message_text(msg), Some("I read the file"));
+
+    // Verify the synthetic error content was sent to the provider
+    let requests = provider.captured_requests().await;
+    assert_eq!(requests.len(), 2, "should have two provider calls");
+    let second_request = &requests[1];
+    let last_msg = second_request
+        .messages
+        .last()
+        .expect("should have messages");
+    let has_blocked_tool_result = last_msg.content.iter().any(|block| {
+        matches!(block, ContentBlock::ToolResult { content, is_error, .. }
+            if content.contains("Tool output blocked") && *is_error)
+    });
+    assert!(
+        has_blocked_tool_result,
+        "second provider call should contain synthetic error tool result with 'Tool output blocked'"
+    );
 }
 
 #[tokio::test]
@@ -1070,14 +1090,16 @@ async fn test_model_output_injection_blocks_delivery() {
 
     // Verify tainted response is NOT persisted to memory (prevents memory poisoning)
     let sessions = memory.list_sessions(10).await.unwrap();
-    if !sessions.is_empty() {
-        let conv = memory.load(&sessions[0].session_id).await.unwrap().unwrap();
-        let last_turn = conv.turns.last().expect("should have a turn");
-        assert!(
-            last_turn.assistant_response.is_none(),
-            "tainted model response should NOT be saved to memory"
-        );
-    }
+    assert!(
+        !sessions.is_empty(),
+        "conversation should be saved even when response is blocked"
+    );
+    let conv = memory.load(&sessions[0].session_id).await.unwrap().unwrap();
+    let last_turn = conv.turns.last().expect("should have a turn");
+    assert!(
+        last_turn.assistant_response.is_none(),
+        "tainted model response should NOT be saved to memory"
+    );
 }
 
 // ===========================================================================

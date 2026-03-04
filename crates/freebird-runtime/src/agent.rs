@@ -534,7 +534,7 @@ impl AgentRuntime {
 
             // Scan tool output for injection — BLOCK if detected
             let (final_content, is_error) = match ScannedToolOutput::from_raw(&output.content) {
-                Ok(scanned) => (scanned.as_str().to_owned(), output.is_error),
+                Ok(scanned) => (scanned.into_inner(), output.is_error),
                 Err(e) => {
                     tracing::warn!(tool = %tool_name, "injection detected in tool output, blocking");
                     if let Some(audit) = &self.audit {
@@ -609,7 +609,7 @@ impl AgentRuntime {
             Ok(scanned) => {
                 let _ = outbound
                     .send(OutboundEvent::Message {
-                        text: scanned.as_str().to_owned(),
+                        text: scanned.into_inner(),
                         recipient_id: sender_id.into(),
                     })
                     .await;
@@ -618,19 +618,7 @@ impl AgentRuntime {
                 current_turn.completed_at = Some(Utc::now());
             }
             Err(e) => {
-                tracing::warn!("injection detected in model output, blocking delivery");
-                if let Some(audit) = &self.audit {
-                    let _ = audit
-                        .record(
-                            session_id.as_str(),
-                            AuditEventType::InjectionDetected {
-                                pattern: format!("{e}"),
-                                source: InjectionSource::ModelResponse,
-                                severity: Severity::High,
-                            },
-                        )
-                        .await;
-                }
+                self.log_model_output_injection(session_id, &e).await;
 
                 let _ = outbound
                     .send(OutboundEvent::Error {
@@ -667,7 +655,7 @@ impl AgentRuntime {
                     .send(OutboundEvent::Message {
                         text: format!(
                             "{}\n\n[response truncated — max tokens reached]",
-                            scanned.as_str()
+                            scanned.into_inner()
                         ),
                         recipient_id: sender_id.into(),
                     })
@@ -677,19 +665,7 @@ impl AgentRuntime {
                 current_turn.completed_at = Some(Utc::now());
             }
             Err(e) => {
-                tracing::warn!("injection detected in truncated model output, blocking delivery");
-                if let Some(audit) = &self.audit {
-                    let _ = audit
-                        .record(
-                            session_id.as_str(),
-                            AuditEventType::InjectionDetected {
-                                pattern: format!("{e}"),
-                                source: InjectionSource::ModelResponse,
-                                severity: Severity::High,
-                            },
-                        )
-                        .await;
-                }
+                self.log_model_output_injection(session_id, &e).await;
 
                 let _ = outbound
                     .send(OutboundEvent::Error {
@@ -702,6 +678,27 @@ impl AgentRuntime {
 
                 current_turn.completed_at = Some(Utc::now());
             }
+        }
+    }
+
+    /// Log a model output injection detection to audit.
+    async fn log_model_output_injection(
+        &self,
+        session_id: &SessionId,
+        error: &freebird_security::error::SecurityError,
+    ) {
+        tracing::warn!("injection detected in model output, blocking delivery");
+        if let Some(audit) = &self.audit {
+            let _ = audit
+                .record(
+                    session_id.as_str(),
+                    AuditEventType::InjectionDetected {
+                        pattern: format!("{error}"),
+                        source: InjectionSource::ModelResponse,
+                        severity: Severity::High,
+                    },
+                )
+                .await;
         }
     }
 
