@@ -59,6 +59,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # URL parsing
 url = "2"
 
+# Filesystem
+home = "0.5"
+
 # Testing — reference under [dev-dependencies] in each crate, NOT [dependencies]
 tempfile = "3"
 wiremock = "0.6"
