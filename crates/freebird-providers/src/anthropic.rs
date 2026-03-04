@@ -888,8 +888,10 @@ impl Provider for AnthropicProvider {
             loop {
                 // Check if buffer contains a complete SSE event (\n\n boundary)
                 if let Some(boundary) = state.buffer.find("\n\n") {
-                    let chunk = state.buffer[..boundary].to_string();
-                    state.buffer = state.buffer[boundary + 2..].to_string();
+                    // Split buffer in-place: drain the chunk + \n\n delimiter,
+                    // leaving the remainder in `state.buffer` without re-allocating.
+                    let chunk: String = state.buffer.drain(..boundary).collect();
+                    state.buffer.drain(..2); // skip \n\n delimiter
 
                     if let Some(data) = parse_sse_chunk(&chunk) {
                         if let Some(result) = state.process_event_data(&data) {
