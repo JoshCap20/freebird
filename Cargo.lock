@@ -286,10 +286,13 @@ name = "freebird-memory"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "freebird-traits",
  "freebird-types",
+ "proptest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]
