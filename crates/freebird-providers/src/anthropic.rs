@@ -508,7 +508,7 @@ fn classify_reqwest_error(e: &reqwest::Error) -> ProviderError {
 ///
 /// Returns `None` if the chunk has no `data:` lines.
 fn parse_sse_chunk(chunk: &str) -> Option<String> {
-    let mut data_parts: Vec<&str> = Vec::new();
+    let mut data_parts: Vec<&str> = Vec::with_capacity(1);
 
     for line in chunk.lines() {
         if line.starts_with(':') {
@@ -688,24 +688,20 @@ impl SseStreamState {
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0) as usize;
 
-        // Check if this stop matches our active tool accumulator
-        if self.active_tool.as_ref().is_some_and(|t| t.index == index) {
-            let tool = self.active_tool.take();
-            if let Some(tool) = tool {
-                // Parse accumulated JSON
-                match serde_json::from_str::<serde_json::Value>(&tool.json_parts) {
-                    Ok(input) => {
-                        return Some(Ok(StreamEvent::ToolUse {
-                            id: tool.id,
-                            name: tool.name,
-                            input,
-                        }));
-                    }
-                    Err(e) => {
-                        return Some(Ok(StreamEvent::Error(format!(
-                            "failed to parse tool input JSON: {e}"
-                        ))));
-                    }
+        // Finalize the active tool accumulator if this stop matches its index
+        if let Some(tool) = self.active_tool.take().filter(|t| t.index == index) {
+            match serde_json::from_str::<serde_json::Value>(&tool.json_parts) {
+                Ok(input) => {
+                    return Some(Ok(StreamEvent::ToolUse {
+                        id: tool.id,
+                        name: tool.name,
+                        input,
+                    }));
+                }
+                Err(e) => {
+                    return Some(Ok(StreamEvent::Error(format!(
+                        "failed to parse tool input JSON: {e}"
+                    ))));
                 }
             }
         }
