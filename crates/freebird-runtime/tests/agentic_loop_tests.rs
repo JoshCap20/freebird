@@ -9,11 +9,13 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
+mod helpers;
+
 use std::collections::{BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -21,17 +23,14 @@ use chrono::Utc;
 use futures::Stream;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
 use freebird_memory::in_memory::InMemoryMemory;
 use freebird_runtime::agent::AgentRuntime;
 use freebird_runtime::registry::ProviderRegistry;
-use freebird_traits::channel::{
-    AuthRequirement, Channel, ChannelError, ChannelHandle, ChannelInfo, InboundEvent, OutboundEvent,
-};
-use freebird_traits::id::{ChannelId, ModelId, ProviderId, SessionId};
-use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary};
+use freebird_traits::channel::{InboundEvent, OutboundEvent};
+use freebird_traits::id::{ModelId, ProviderId, SessionId};
+use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary, Turn};
 use freebird_traits::provider::{
     CompletionRequest, CompletionResponse, ContentBlock, Message, NetworkErrorKind, Provider,
     ProviderError, ProviderFeature, ProviderInfo, Role, StopReason, StreamEvent, TokenUsage,
@@ -41,67 +40,7 @@ use freebird_traits::tool::{
 };
 use freebird_types::config::{RuntimeConfig, ToolsConfig};
 
-// ---------------------------------------------------------------------------
-// Test infrastructure — MockChannel (same pattern as agent_tests.rs)
-// ---------------------------------------------------------------------------
-
-struct MockChannel {
-    info: ChannelInfo,
-    handle: TokioMutex<Option<ChannelHandle>>,
-    stopped: Arc<AtomicBool>,
-}
-
-impl MockChannel {
-    fn new() -> (
-        Self,
-        mpsc::Sender<InboundEvent>,
-        mpsc::Receiver<OutboundEvent>,
-        Arc<AtomicBool>,
-    ) {
-        let (inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>(32);
-        let (outbound_tx, outbound_rx) = mpsc::channel::<OutboundEvent>(32);
-        let stopped = Arc::new(AtomicBool::new(false));
-
-        let channel = Self {
-            info: ChannelInfo {
-                id: ChannelId::from("mock"),
-                display_name: "Mock Channel".into(),
-                features: BTreeSet::new(),
-                auth: AuthRequirement::None,
-            },
-            handle: TokioMutex::new(Some(ChannelHandle {
-                inbound: Box::pin(ReceiverStream::new(inbound_rx)),
-                outbound: outbound_tx,
-            })),
-            stopped: Arc::clone(&stopped),
-        };
-
-        (channel, inbound_tx, outbound_rx, stopped)
-    }
-}
-
-#[async_trait]
-impl Channel for MockChannel {
-    fn info(&self) -> &ChannelInfo {
-        &self.info
-    }
-
-    async fn start(&self) -> Result<ChannelHandle, ChannelError> {
-        self.handle
-            .lock()
-            .await
-            .take()
-            .ok_or_else(|| ChannelError::StartupFailed {
-                channel: "mock".into(),
-                reason: "already started".into(),
-            })
-    }
-
-    async fn stop(&self) -> Result<(), ChannelError> {
-        self.stopped.store(true, Ordering::SeqCst);
-        Ok(())
-    }
-}
+use helpers::{MockChannel, error_text, message_text};
 
 // ---------------------------------------------------------------------------
 // QueuedProvider — returns queued responses in order
@@ -132,6 +71,74 @@ impl QueuedProvider {
     fn call_count(&self) -> usize {
         self.call_count.load(Ordering::SeqCst)
     }
+}
+
+// ---------------------------------------------------------------------------
+// RequestCapturingProvider — captures requests for inspection
+// ---------------------------------------------------------------------------
+
+struct RequestCapturingProvider {
+    inner: QueuedProvider,
+    captured_requests: TokioMutex<Vec<CompletionRequest>>,
+}
+
+impl RequestCapturingProvider {
+    fn new(responses: Vec<ResponseFactory>) -> Self {
+        Self {
+            inner: QueuedProvider::new(responses),
+            captured_requests: TokioMutex::new(Vec::new()),
+        }
+    }
+
+    async fn captured_requests(&self) -> Vec<CompletionRequest> {
+        self.captured_requests.lock().await.clone()
+    }
+}
+
+struct ArcCapturingProvider(Arc<RequestCapturingProvider>);
+
+#[async_trait]
+impl Provider for ArcCapturingProvider {
+    fn info(&self) -> &ProviderInfo {
+        &self.0.inner.info
+    }
+
+    async fn validate_credentials(&self) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        self.0.captured_requests.lock().await.push(request.clone());
+        self.0.inner.call_count.fetch_add(1, Ordering::SeqCst);
+        let factory = self
+            .0
+            .inner
+            .responses
+            .lock()
+            .await
+            .pop_front()
+            .expect("RequestCapturingProvider: no more queued responses");
+        factory()
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError>
+    {
+        Err(ProviderError::NotConfigured)
+    }
+}
+
+fn make_capturing_registry(provider: Arc<RequestCapturingProvider>) -> ProviderRegistry {
+    let mut registry = ProviderRegistry::new();
+    let id = ProviderId::from("test-provider");
+    registry.register(id.clone(), Box::new(ArcCapturingProvider(provider)));
+    registry.set_failover_chain(vec![id]);
+    registry
 }
 
 /// Wrapper to allow shared access after moving into registry.
@@ -460,22 +467,6 @@ fn make_test_runtime(
     )
 }
 
-/// Helper: extract text from an `OutboundEvent::Message`.
-fn message_text(event: &OutboundEvent) -> Option<&str> {
-    match event {
-        OutboundEvent::Message { text, .. } => Some(text.as_str()),
-        _ => None,
-    }
-}
-
-/// Helper: extract text from an `OutboundEvent::Error`.
-fn error_text(event: &OutboundEvent) -> Option<&str> {
-    match event {
-        OutboundEvent::Error { text, .. } => Some(text.as_str()),
-        _ => None,
-    }
-}
-
 /// Send a message then quit, run the runtime, and collect all outbound events.
 async fn send_message_and_collect(
     inbound_tx: &mpsc::Sender<InboundEvent>,
@@ -572,15 +563,20 @@ async fn test_single_turn_stop_sequence_delivers_response() {
 }
 
 #[tokio::test]
-async fn test_single_turn_empty_response() {
+async fn test_single_turn_empty_response_skipped() {
     let (channel, inbound_tx, outbound_rx, _) = MockChannel::new();
     let provider = Arc::new(QueuedProvider::new(vec![text_response("")]));
     let runtime = make_test_runtime(channel, provider, vec![], Box::new(InMemoryMemory::new()));
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
 
-    let msg = events.first().expect("should have response");
-    assert_eq!(message_text(msg), Some(""));
+    // Empty responses are silently skipped — only the Goodbye from /quit should appear
+    assert!(
+        events.iter().all(|e| message_text(e) != Some("")),
+        "empty response should not be delivered"
+    );
+    let goodbye = events.first().expect("should have goodbye");
+    assert_eq!(message_text(goodbye), Some("Goodbye!"));
 }
 
 // ===========================================================================
@@ -1139,4 +1135,189 @@ async fn test_memory_save_error_does_not_crash() {
     // Response should still be delivered even though save failed
     let msg = events.first().expect("should have response");
     assert_eq!(message_text(msg), Some("Response"));
+}
+
+// ===========================================================================
+// Tests — Continuing session (history in provider request)
+// ===========================================================================
+
+/// Memory backend that returns a pre-loaded conversation.
+struct PreloadedMemory {
+    conversation: TokioMutex<Option<Conversation>>,
+    saved: TokioMutex<Vec<Conversation>>,
+}
+
+impl PreloadedMemory {
+    fn new(conv: Conversation) -> Self {
+        Self {
+            conversation: TokioMutex::new(Some(conv)),
+            saved: TokioMutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl Memory for PreloadedMemory {
+    async fn load(&self, _session_id: &SessionId) -> Result<Option<Conversation>, MemoryError> {
+        Ok(self.conversation.lock().await.clone())
+    }
+    async fn save(&self, conversation: &Conversation) -> Result<(), MemoryError> {
+        self.saved.lock().await.push(conversation.clone());
+        Ok(())
+    }
+    async fn list_sessions(&self, _: usize) -> Result<Vec<SessionSummary>, MemoryError> {
+        Ok(vec![])
+    }
+    async fn delete(&self, _: &SessionId) -> Result<(), MemoryError> {
+        Ok(())
+    }
+    async fn search(&self, _: &str, _: usize) -> Result<Vec<SessionSummary>, MemoryError> {
+        Ok(vec![])
+    }
+}
+
+#[tokio::test]
+async fn test_continuing_session_includes_history_in_request() {
+    let (channel, inbound_tx, outbound_rx, _) = MockChannel::new();
+
+    // Create an existing conversation with one completed turn
+    let existing_conv = Conversation {
+        session_id: SessionId::from("test-existing-session"),
+        system_prompt: Some("You are a test bot.".into()),
+        turns: vec![Turn {
+            user_message: Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "Previous question".into(),
+                }],
+                timestamp: Utc::now(),
+            },
+            assistant_response: Some(Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "Previous answer".into(),
+                }],
+                timestamp: Utc::now(),
+            }),
+            tool_invocations: vec![],
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+        }],
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        model_id: "test-model".into(),
+        provider_id: "test-provider".into(),
+    };
+
+    let provider = Arc::new(RequestCapturingProvider::new(vec![text_response(
+        "Follow-up answer",
+    )]));
+
+    let runtime = AgentRuntime::new(
+        make_capturing_registry(provider.clone()),
+        Box::new(channel),
+        vec![],
+        Box::new(PreloadedMemory::new(existing_conv)),
+        default_config(),
+        default_tools_config(),
+        None,
+    );
+
+    let events =
+        send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Follow-up question").await;
+
+    // Should get the response
+    let msg = events.first().expect("should have response");
+    assert_eq!(message_text(msg), Some("Follow-up answer"));
+
+    // Verify the provider received history in its request
+    let requests = provider.captured_requests().await;
+    assert_eq!(requests.len(), 1, "should have one provider call");
+
+    let messages = &requests[0].messages;
+    // Should have: previous user + previous assistant + new user = 3 messages
+    assert!(
+        messages.len() >= 3,
+        "should have at least 3 messages (history + new), got {}",
+        messages.len()
+    );
+
+    // First message should be from previous turn
+    assert_eq!(messages[0].role, Role::User);
+    let first_text = messages[0]
+        .content
+        .iter()
+        .find_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(first_text, "Previous question");
+
+    // Second message should be the previous assistant response
+    assert_eq!(messages[1].role, Role::Assistant);
+
+    // Last message should be the new user input
+    let last = messages.last().unwrap();
+    assert_eq!(last.role, Role::User);
+    let last_text = last
+        .content
+        .iter()
+        .find_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(last_text, "Follow-up question");
+}
+
+#[tokio::test]
+async fn test_new_conversation_uses_config_values() {
+    let (channel, inbound_tx, outbound_rx, _) = MockChannel::new();
+
+    let provider = Arc::new(RequestCapturingProvider::new(vec![text_response("Hello")]));
+    let memory = Arc::new(InMemoryMemory::new());
+
+    let config = RuntimeConfig {
+        default_model: "custom-model-v2".into(),
+        default_provider: "test-provider".into(),
+        system_prompt: Some("You are a custom bot.".into()),
+        max_output_tokens: 2048,
+        max_tool_rounds: 5,
+        temperature: Some(0.5),
+        max_turns_per_session: 10,
+        drain_timeout_secs: 1,
+    };
+
+    let runtime = AgentRuntime::new(
+        make_capturing_registry(provider.clone()),
+        Box::new(channel),
+        vec![],
+        Box::new(ArcMemory(Arc::clone(&memory))),
+        config,
+        default_tools_config(),
+        None,
+    );
+
+    let _events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+
+    // Verify the provider request used our config values
+    let requests = provider.captured_requests().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].model.as_str(), "custom-model-v2");
+    assert_eq!(
+        requests[0].system_prompt.as_deref(),
+        Some("You are a custom bot.")
+    );
+    assert_eq!(requests[0].max_tokens, 2048);
+    assert_eq!(requests[0].temperature, Some(0.5));
+
+    // Verify the saved conversation also has the right metadata
+    let sessions = memory.list_sessions(10).await.unwrap();
+    assert_eq!(sessions.len(), 1);
+
+    let conv = memory.load(&sessions[0].session_id).await.unwrap().unwrap();
+    assert_eq!(conv.model_id, "custom-model-v2");
+    assert_eq!(conv.provider_id, "test-provider");
+    assert_eq!(conv.system_prompt.as_deref(), Some("You are a custom bot."));
 }

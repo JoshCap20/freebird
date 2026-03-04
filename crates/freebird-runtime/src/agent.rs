@@ -462,7 +462,22 @@ impl AgentRuntime {
             }
         }
 
-        // Max rounds exceeded
+        // Max rounds exceeded — this is a policy-relevant event
+        if let Some(audit) = &self.audit {
+            let _ = audit
+                .record(
+                    session_id.as_str(),
+                    AuditEventType::PolicyViolation {
+                        rule: "max_tool_rounds".into(),
+                        context: format!(
+                            "agentic loop exhausted {} rounds without completing",
+                            self.config.max_tool_rounds
+                        ),
+                        severity: Severity::Medium,
+                    },
+                )
+                .await;
+        }
         current_turn.completed_at = Some(Utc::now());
         let _ = outbound
             .send(OutboundEvent::Error {
@@ -559,6 +574,15 @@ impl AgentRuntime {
     ) {
         let response_text = extract_text(&response.message);
 
+        // Skip sending empty responses — the model may have returned
+        // only tool-use blocks with no text, or genuinely empty content.
+        if response_text.is_empty() {
+            tracing::warn!(%session_id, "model returned empty text response, skipping delivery");
+            current_turn.assistant_response = Some(response.message.clone());
+            current_turn.completed_at = Some(Utc::now());
+            return;
+        }
+
         // Scan model output for injection (log and continue)
         if let Err(e) = injection::scan_output(&response_text) {
             tracing::warn!("potential injection in model output");
@@ -651,6 +675,7 @@ impl AgentRuntime {
         let context = ToolContext {
             session_id,
             sandbox_root: &self.tools_config.sandbox_root,
+            // TODO(#27): Use per-session capability grants instead of empty slice
             granted_capabilities: &[],
         };
 
@@ -682,22 +707,21 @@ impl AgentRuntime {
 
 /// Join all `ContentBlock::Text` blocks in a message.
 fn extract_text(message: &Message) -> String {
-    message
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("")
+    let mut result = String::new();
+    for block in &message.content {
+        if let ContentBlock::Text { text } = block {
+            result.push_str(text);
+        }
+    }
+    result
 }
 
 /// Reconstruct a flat message list from conversation turns.
 ///
 /// Inline helper — will be replaced by a proper abstraction in #18.
 fn conversation_to_messages(conversation: &Conversation) -> Vec<Message> {
-    let mut messages = Vec::new();
+    // Each turn produces at least 2 messages (user + assistant), possibly 3 (+ tool results)
+    let mut messages = Vec::with_capacity(conversation.turns.len() * 2);
 
     for turn in &conversation.turns {
         messages.push(turn.user_message.clone());
