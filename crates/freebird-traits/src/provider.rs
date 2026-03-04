@@ -72,7 +72,8 @@ pub struct CompletionRequest {
 }
 
 /// A message in a conversation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::derive_partial_eq_without_eq)] // serde_json::Value does not impl Eq
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
@@ -80,7 +81,8 @@ pub struct Message {
 }
 
 /// A single piece of content within a message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::derive_partial_eq_without_eq)] // serde_json::Value does not impl Eq
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text {
@@ -103,7 +105,8 @@ pub enum ContentBlock {
 }
 
 /// A complete (non-streaming) response from the provider.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::derive_partial_eq_without_eq)] // serde_json::Value does not impl Eq
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompletionResponse {
     pub message: Message,
     pub stop_reason: StopReason,
@@ -122,7 +125,7 @@ pub enum StopReason {
 }
 
 /// Token usage for cost tracking.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
