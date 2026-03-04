@@ -56,15 +56,19 @@ async fn main() -> Result<()> {
             |prompt| Box::new(CliChannel::with_prompt(prompt)),
         );
 
-    // 6. MEMORY
+    // 6. MEMORY — FileMemory::new performs blocking I/O (mkdir, canonicalize),
+    //    so run it off the async runtime.
     let memory_dir = expand_tilde(
         &config
             .memory
             .base_dir
             .clone()
             .unwrap_or_else(|| PathBuf::from("~/.freebird/conversations")),
-    );
-    let memory = FileMemory::new(memory_dir).context("failed to initialize file memory backend")?;
+    )?;
+    let memory = tokio::task::spawn_blocking(move || FileMemory::new(memory_dir))
+        .await
+        .context("file memory init task panicked")?
+        .context("failed to initialize file memory backend")?;
 
     // 7. TOOLS (none initially — added per-issue later)
     let tools: Vec<Box<dyn freebird_traits::tool::Tool>> = vec![];
@@ -74,7 +78,7 @@ async fn main() -> Result<()> {
     let token = shutdown.token();
     let drain_timeout = shutdown.drain_timeout();
 
-    tokio::spawn(async move {
+    let signal_handle = tokio::spawn(async move {
         match shutdown.wait_for_signal().await {
             Ok(signal) => tracing::info!(%signal, "shutdown initiated"),
             Err(e) => {
@@ -103,10 +107,13 @@ async fn main() -> Result<()> {
         Err(e) => tracing::error!(%e, "runtime error"),
     }
 
-    // 11. DRAIN — give in-flight work time to complete.
+    // 11. DRAIN — give in-flight work time to complete, then clean up the
+    //     signal handler task. If it finishes early, we're done sooner.
     if drain_timeout > Duration::ZERO {
         tracing::info!(?drain_timeout, "draining in-flight work");
-        tokio::time::sleep(drain_timeout).await;
+        let _ = tokio::time::timeout(drain_timeout, signal_handle).await;
+    } else {
+        signal_handle.abort();
     }
 
     tracing::info!("freebird stopped");
@@ -122,7 +129,7 @@ fn load_config() -> Result<AppConfig> {
         .merge(Toml::file(&config_path))
         .merge(Env::prefixed("FREEBIRD_").split("__"))
         .extract()
-        .context(format!("failed to load configuration from `{config_path}`"))
+        .with_context(|| format!("failed to load configuration from `{config_path}`"))
 }
 
 /// Validate configuration invariants that cannot be expressed in types.
@@ -150,17 +157,20 @@ fn validate_config(config: &AppConfig) -> Result<()> {
 /// Expand `~` prefix to the user's home directory.
 ///
 /// Only expands a leading `~` or `~/` — does not expand `~user`.
-/// Returns the path unchanged if `~` cannot be resolved.
-fn expand_tilde(path: &Path) -> PathBuf {
+///
+/// # Errors
+///
+/// Returns an error if the path starts with `~` but the home directory
+/// cannot be determined (CLAUDE.md §3.4: fail loudly at boundaries).
+fn expand_tilde(path: &Path) -> Result<PathBuf> {
     let s = path.to_string_lossy();
     if s == "~" {
-        home::home_dir().unwrap_or_else(|| PathBuf::from("."))
+        home::home_dir().context("cannot resolve home directory for `~` expansion")
     } else if let Some(rest) = s.strip_prefix("~/") {
-        home::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(rest)
+        let home = home::home_dir().context("cannot resolve home directory for `~/` expansion")?;
+        Ok(home.join(rest))
     } else {
-        path.to_owned()
+        Ok(path.to_owned())
     }
 }
 
@@ -171,46 +181,43 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_home() {
-        let result = expand_tilde(Path::new("~"));
-        // Should resolve to home dir (or "." if no home found)
+        let result = expand_tilde(Path::new("~")).unwrap();
+        // In CI or containers, home may not exist — but on a dev machine it will.
         if let Some(home) = home::home_dir() {
             assert_eq!(result, home);
-        } else {
-            assert_eq!(result, PathBuf::from("."));
         }
     }
 
     #[test]
     fn test_expand_tilde_home_subpath() {
-        let result = expand_tilde(Path::new("~/foo/bar"));
+        let result = expand_tilde(Path::new("~/foo/bar")).unwrap();
         if let Some(home) = home::home_dir() {
             assert_eq!(result, home.join("foo/bar"));
-        } else {
-            assert_eq!(result, PathBuf::from("./foo/bar"));
         }
     }
 
     #[test]
     fn test_expand_tilde_absolute_passthrough() {
-        let result = expand_tilde(Path::new("/tmp/test"));
+        let result = expand_tilde(Path::new("/tmp/test")).unwrap();
         assert_eq!(result, PathBuf::from("/tmp/test"));
     }
 
     #[test]
     fn test_expand_tilde_relative_passthrough() {
-        let result = expand_tilde(Path::new("data/sessions"));
+        let result = expand_tilde(Path::new("data/sessions")).unwrap();
         assert_eq!(result, PathBuf::from("data/sessions"));
     }
 
     #[test]
     fn test_expand_tilde_tilde_user_not_expanded() {
-        let result = expand_tilde(Path::new("~otheruser/path"));
+        // ~otheruser doesn't start with "~/" so it passes through unchanged.
+        let result = expand_tilde(Path::new("~otheruser/path")).unwrap();
         assert_eq!(result, PathBuf::from("~otheruser/path"));
     }
 
     #[test]
     fn test_expand_tilde_empty_path() {
-        let result = expand_tilde(Path::new(""));
+        let result = expand_tilde(Path::new("")).unwrap();
         assert_eq!(result, PathBuf::from(""));
     }
 
