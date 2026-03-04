@@ -13,7 +13,7 @@ use freebird_security::audit::{
 };
 use freebird_security::error::Severity;
 use freebird_security::injection;
-use freebird_security::safe_types::SafeMessage;
+use freebird_security::safe_types::{SafeMessage, ScannedToolOutput};
 use freebird_security::taint::Tainted;
 use freebird_traits::channel::{Channel, ChannelError, InboundEvent, OutboundEvent};
 use freebird_traits::id::{ModelId, SessionId};
@@ -522,36 +522,43 @@ impl AgentRuntime {
 
             let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-            // Scan tool output for injection (log and continue)
-            if let Err(e) = injection::scan_output(&output.content) {
-                tracing::warn!(tool = %tool_name, "potential injection in tool output");
-                if let Some(audit) = &self.audit {
-                    let _ = audit
-                        .record(
-                            session_id.as_str(),
-                            AuditEventType::InjectionDetected {
-                                pattern: format!("{e}"),
-                                source: InjectionSource::ToolOutput,
-                                severity: Severity::High,
-                            },
-                        )
-                        .await;
+            // Scan tool output for injection — BLOCK if detected
+            let (final_content, is_error) = match ScannedToolOutput::from_raw(&output.content) {
+                Ok(scanned) => (scanned.as_str().to_owned(), output.is_error),
+                Err(e) => {
+                    tracing::warn!(tool = %tool_name, "injection detected in tool output, blocking");
+                    if let Some(audit) = &self.audit {
+                        let _ = audit
+                            .record(
+                                session_id.as_str(),
+                                AuditEventType::InjectionDetected {
+                                    pattern: format!("{e}"),
+                                    source: InjectionSource::ToolOutput,
+                                    severity: Severity::High,
+                                },
+                            )
+                            .await;
+                    }
+                    (
+                        "Tool output blocked: potential prompt injection detected".to_owned(),
+                        true,
+                    )
                 }
-            }
+            };
 
             current_turn.tool_invocations.push(ToolInvocation {
                 tool_use_id: tool_use_id.clone(),
                 tool_name,
                 input,
-                output: Some(output.content.clone()),
-                is_error: output.is_error,
+                output: Some(final_content.clone()),
+                is_error,
                 duration_ms: Some(duration_ms),
             });
 
             tool_results.push(ContentBlock::ToolResult {
                 tool_use_id,
-                content: output.content,
-                is_error: output.is_error,
+                content: final_content,
+                is_error,
             });
         }
 
