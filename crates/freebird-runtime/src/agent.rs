@@ -28,6 +28,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::registry::ProviderRegistry;
+
+/// Error message sent to the user when model output injection is detected.
+const MODEL_OUTPUT_INJECTION_BLOCKED: &str =
+    "Response blocked: potential prompt injection detected in model output.";
 use crate::session::SessionManager;
 
 /// Controls the event loop after handling an event.
@@ -524,7 +528,7 @@ impl AgentRuntime {
         messages.push(response.message.clone());
 
         // Execute each tool and collect results
-        let mut tool_results = Vec::new();
+        let mut tool_results = Vec::with_capacity(tool_uses.len());
         for (tool_use_id, tool_name, input) in tool_uses {
             let start = std::time::Instant::now();
 
@@ -622,9 +626,7 @@ impl AgentRuntime {
 
                 let _ = outbound
                     .send(OutboundEvent::Error {
-                        text:
-                            "Response blocked: potential prompt injection detected in model output."
-                                .into(),
+                        text: MODEL_OUTPUT_INJECTION_BLOCKED.into(),
                         recipient_id: sender_id.into(),
                     })
                     .await;
@@ -669,9 +671,7 @@ impl AgentRuntime {
 
                 let _ = outbound
                     .send(OutboundEvent::Error {
-                        text:
-                            "Response blocked: potential prompt injection detected in model output."
-                                .into(),
+                        text: MODEL_OUTPUT_INJECTION_BLOCKED.into(),
                         recipient_id: sender_id.into(),
                     })
                     .await;
