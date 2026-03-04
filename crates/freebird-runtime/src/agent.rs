@@ -5,12 +5,25 @@
 //! routes them to handlers, and shuts down gracefully when the
 //! cancellation token fires or the inbound stream closes.
 
+use std::time::Duration;
+
+use chrono::Utc;
+use freebird_security::audit::{
+    AuditEventType, AuditLogger, CapabilityCheckResult, InjectionSource,
+};
+use freebird_security::error::Severity;
+use freebird_security::injection;
+use freebird_security::safe_types::SafeMessage;
+use freebird_security::taint::Tainted;
 use freebird_traits::channel::{Channel, ChannelError, InboundEvent, OutboundEvent};
-use freebird_traits::id::SessionId;
-use freebird_traits::memory::{Memory, MemoryError};
-use freebird_traits::provider::ProviderError;
-use freebird_traits::tool::Tool;
-use freebird_types::config::RuntimeConfig;
+use freebird_traits::id::{ModelId, SessionId};
+use freebird_traits::memory::{Conversation, Memory, MemoryError, ToolInvocation, Turn};
+use freebird_traits::provider::{
+    CompletionRequest, CompletionResponse, ContentBlock, Message, ProviderError, Role, StopReason,
+    ToolDefinition,
+};
+use freebird_traits::tool::{Tool, ToolContext, ToolOutput};
+use freebird_types::config::{RuntimeConfig, ToolsConfig};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -47,19 +60,16 @@ pub enum RuntimeError {
 /// The central orchestrator that wires together all subsystems.
 ///
 /// Accepts inbound events from a channel, routes messages through
-/// session management, and (in the future) dispatches to providers
-/// and tools. Currently echoes messages as a stub.
+/// session management, dispatches to providers and tools via the
+/// agentic loop, and persists conversations to memory.
 pub struct AgentRuntime {
-    // Used by #17 (agentic loop with provider calls and tool execution).
-    #[allow(dead_code)]
     provider_registry: ProviderRegistry,
     channel: Box<dyn Channel>,
-    #[allow(dead_code)]
     tools: Vec<Box<dyn Tool>>,
-    #[allow(dead_code)]
     memory: Box<dyn Memory>,
-    #[allow(dead_code)]
     config: RuntimeConfig,
+    tools_config: ToolsConfig,
+    audit: Option<AuditLogger>,
     sessions: SessionManager,
 }
 
@@ -75,6 +85,8 @@ impl AgentRuntime {
         tools: Vec<Box<dyn Tool>>,
         memory: Box<dyn Memory>,
         config: RuntimeConfig,
+        tools_config: ToolsConfig,
+        audit: Option<AuditLogger>,
     ) -> Self {
         Self {
             provider_registry,
@@ -82,6 +94,8 @@ impl AgentRuntime {
             tools,
             memory,
             config,
+            tools_config,
+            audit,
             sessions: SessionManager::new(),
         }
     }
@@ -237,10 +251,17 @@ impl AgentRuntime {
         }
     }
 
-    /// Handle an inbound user message.
+    /// Handle an inbound user message — the agentic loop.
     ///
-    /// STUB: echoes the message back with session ID. The full agentic
-    /// loop (provider calls, tool execution, taint tracking) is #17.
+    /// 1. Wraps input in `Tainted`, validates via `SafeMessage::from_tainted()`
+    /// 2. Loads/creates conversation from memory
+    /// 3. Builds `CompletionRequest` with tool definitions and history
+    /// 4. Calls provider via `ProviderRegistry::complete_with_failover()`
+    /// 5. Handles tool-use responses (execute tools, collect results, loop)
+    /// 6. Sends final response to user
+    /// 7. Persists conversation to memory
+    ///
+    /// Infallible — all errors are caught and sent as `OutboundEvent::Error`.
     async fn handle_message(
         &self,
         raw_text: String,
@@ -248,11 +269,793 @@ impl AgentRuntime {
         session_id: SessionId,
         outbound: &mpsc::Sender<OutboundEvent>,
     ) {
+        // 1. Taint input and validate
+        let Some(safe_message) = self
+            .validate_input(&raw_text, &sender_id, &session_id, outbound)
+            .await
+        else {
+            return;
+        };
+
+        // 2. Load or create conversation
+        let Some(mut conversation) = self
+            .load_or_create_conversation(&session_id, &sender_id, outbound)
+            .await
+        else {
+            return;
+        };
+
+        // 3. Build user message and start the agentic loop
+        let current_turn = self
+            .run_agentic_loop(
+                &safe_message,
+                &sender_id,
+                &session_id,
+                &conversation,
+                outbound,
+            )
+            .await;
+
+        // 4. Persist conversation
+        conversation.turns.push(current_turn);
+        conversation.updated_at = Utc::now();
+
+        if let Err(e) = self.memory.save(&conversation).await {
+            tracing::error!(error = %e, "failed to persist conversation");
+        }
+    }
+
+    /// Validate raw input through taint tracking. Returns `None` if rejected.
+    async fn validate_input(
+        &self,
+        raw_text: &str,
+        sender_id: &str,
+        session_id: &SessionId,
+        outbound: &mpsc::Sender<OutboundEvent>,
+    ) -> Option<SafeMessage> {
+        let tainted = Tainted::new(raw_text);
+        match SafeMessage::from_tainted(&tainted) {
+            Ok(msg) => Some(msg),
+            Err(e) => {
+                if let Some(audit) = &self.audit {
+                    let _ = audit
+                        .record(
+                            session_id.as_str(),
+                            AuditEventType::InjectionDetected {
+                                pattern: format!("{e}"),
+                                source: InjectionSource::UserInput,
+                                severity: Severity::High,
+                            },
+                        )
+                        .await;
+                }
+                let _ = outbound
+                    .send(OutboundEvent::Error {
+                        text: "Message rejected by input validation.".into(),
+                        recipient_id: sender_id.into(),
+                    })
+                    .await;
+                None
+            }
+        }
+    }
+
+    /// Load conversation from memory, or create a new one. Returns `None` on error.
+    async fn load_or_create_conversation(
+        &self,
+        session_id: &SessionId,
+        sender_id: &str,
+        outbound: &mpsc::Sender<OutboundEvent>,
+    ) -> Option<Conversation> {
+        match self.memory.load(session_id).await {
+            Ok(Some(conv)) => Some(conv),
+            Ok(None) => Some(Conversation {
+                session_id: session_id.clone(),
+                system_prompt: self.config.system_prompt.clone(),
+                turns: Vec::new(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                model_id: self.config.default_model.clone(),
+                provider_id: self.config.default_provider.clone(),
+            }),
+            Err(e) => {
+                tracing::error!(error = %e, "failed to load conversation from memory");
+                let _ = outbound
+                    .send(OutboundEvent::Error {
+                        text: format!("Failed to load conversation: {e}"),
+                        recipient_id: sender_id.into(),
+                    })
+                    .await;
+                None
+            }
+        }
+    }
+
+    /// Run the agentic loop: call provider, handle tool use, deliver response.
+    async fn run_agentic_loop(
+        &self,
+        safe_message: &SafeMessage,
+        sender_id: &str,
+        session_id: &SessionId,
+        conversation: &Conversation,
+        outbound: &mpsc::Sender<OutboundEvent>,
+    ) -> Turn {
+        let user_message = Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: safe_message.as_str().to_owned(),
+            }],
+            timestamp: Utc::now(),
+        };
+
+        let tool_definitions: Vec<ToolDefinition> =
+            self.tools.iter().map(|t| t.to_definition()).collect();
+
+        let mut messages = conversation_to_messages(conversation);
+        messages.push(user_message.clone());
+
+        let mut current_turn = Turn {
+            user_message,
+            assistant_response: None,
+            tool_invocations: Vec::new(),
+            started_at: Utc::now(),
+            completed_at: None,
+        };
+
+        for _round in 0..self.config.max_tool_rounds {
+            let request = CompletionRequest {
+                model: ModelId::from(conversation.model_id.as_str()),
+                system_prompt: conversation.system_prompt.clone(),
+                messages: messages.clone(),
+                tools: tool_definitions.clone(),
+                max_tokens: self.config.max_output_tokens,
+                temperature: self.config.temperature,
+                stop_sequences: Vec::new(),
+            };
+
+            let (_provider_id, response) =
+                match self.provider_registry.complete_with_failover(request).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::error!(error = %e, "all providers failed");
+                        let _ = outbound
+                            .send(OutboundEvent::Error {
+                                text: format!("Provider error: {e}"),
+                                recipient_id: sender_id.into(),
+                            })
+                            .await;
+                        return current_turn;
+                    }
+                };
+
+            match response.stop_reason {
+                StopReason::ToolUse => {
+                    self.handle_tool_use_round(
+                        &response,
+                        &mut messages,
+                        &mut current_turn,
+                        session_id,
+                    )
+                    .await;
+                }
+                StopReason::EndTurn | StopReason::StopSequence => {
+                    self.deliver_final_response(
+                        &response,
+                        sender_id,
+                        session_id,
+                        &mut current_turn,
+                        outbound,
+                    )
+                    .await;
+                    return current_turn;
+                }
+                StopReason::MaxTokens => {
+                    self.deliver_truncated_response(
+                        &response,
+                        sender_id,
+                        &mut current_turn,
+                        outbound,
+                    )
+                    .await;
+                    return current_turn;
+                }
+            }
+        }
+
+        // Max rounds exceeded
+        current_turn.completed_at = Some(Utc::now());
         let _ = outbound
-            .send(OutboundEvent::Message {
-                text: format!("[session {session_id}] Echo: {raw_text}"),
-                recipient_id: sender_id,
+            .send(OutboundEvent::Error {
+                text: "Maximum tool rounds exceeded. Stopping.".into(),
+                recipient_id: sender_id.into(),
             })
             .await;
+
+        current_turn
+    }
+
+    /// Execute tool calls from a `ToolUse` response and append results to the message list.
+    async fn handle_tool_use_round(
+        &self,
+        response: &CompletionResponse,
+        messages: &mut Vec<Message>,
+        current_turn: &mut Turn,
+        session_id: &SessionId,
+    ) {
+        // Extract tool_use blocks from the response
+        let tool_uses: Vec<(String, String, serde_json::Value)> = response
+            .message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::ToolUse { id, name, input } => {
+                    Some((id.clone(), name.clone(), input.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+
+        // Add assistant message with tool_use blocks to conversation
+        messages.push(response.message.clone());
+
+        // Execute each tool and collect results
+        let mut tool_results = Vec::new();
+        for (tool_use_id, tool_name, input) in tool_uses {
+            let start = std::time::Instant::now();
+
+            let output = self.execute_tool(&tool_name, &input, session_id).await;
+
+            let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+            // Scan tool output for injection (log and continue)
+            if let Err(e) = injection::scan_output(&output.content) {
+                tracing::warn!(tool = %tool_name, "potential injection in tool output");
+                if let Some(audit) = &self.audit {
+                    let _ = audit
+                        .record(
+                            session_id.as_str(),
+                            AuditEventType::InjectionDetected {
+                                pattern: format!("{e}"),
+                                source: InjectionSource::ToolOutput,
+                                severity: Severity::High,
+                            },
+                        )
+                        .await;
+                }
+            }
+
+            current_turn.tool_invocations.push(ToolInvocation {
+                tool_use_id: tool_use_id.clone(),
+                tool_name,
+                input,
+                output: Some(output.content.clone()),
+                is_error: output.is_error,
+                duration_ms: Some(duration_ms),
+            });
+
+            tool_results.push(ContentBlock::ToolResult {
+                tool_use_id,
+                content: output.content,
+                is_error: output.is_error,
+            });
+        }
+
+        // Add tool results as a user-role message (Anthropic API format)
+        messages.push(Message {
+            role: Role::User,
+            content: tool_results,
+            timestamp: Utc::now(),
+        });
+    }
+
+    /// Deliver a final (non-truncated) response to the user.
+    async fn deliver_final_response(
+        &self,
+        response: &CompletionResponse,
+        sender_id: &str,
+        session_id: &SessionId,
+        current_turn: &mut Turn,
+        outbound: &mpsc::Sender<OutboundEvent>,
+    ) {
+        let response_text = extract_text(&response.message);
+
+        // Scan model output for injection (log and continue)
+        if let Err(e) = injection::scan_output(&response_text) {
+            tracing::warn!("potential injection in model output");
+            if let Some(audit) = &self.audit {
+                let _ = audit
+                    .record(
+                        session_id.as_str(),
+                        AuditEventType::InjectionDetected {
+                            pattern: format!("{e}"),
+                            source: InjectionSource::ModelResponse,
+                            severity: Severity::High,
+                        },
+                    )
+                    .await;
+            }
+        }
+
+        let _ = outbound
+            .send(OutboundEvent::Message {
+                text: response_text,
+                recipient_id: sender_id.into(),
+            })
+            .await;
+
+        current_turn.assistant_response = Some(response.message.clone());
+        current_turn.completed_at = Some(Utc::now());
+    }
+
+    /// Deliver a truncated response (max tokens reached).
+    async fn deliver_truncated_response(
+        &self,
+        response: &CompletionResponse,
+        sender_id: &str,
+        current_turn: &mut Turn,
+        outbound: &mpsc::Sender<OutboundEvent>,
+    ) {
+        let partial_text = extract_text(&response.message);
+
+        let _ = outbound
+            .send(OutboundEvent::Message {
+                text: format!("{partial_text}\n\n[response truncated — max tokens reached]"),
+                recipient_id: sender_id.into(),
+            })
+            .await;
+
+        current_turn.assistant_response = Some(response.message.clone());
+        current_turn.completed_at = Some(Utc::now());
+    }
+
+    /// Execute a tool by name, with timeout. Returns `ToolOutput` unconditionally.
+    async fn execute_tool(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        session_id: &SessionId,
+    ) -> ToolOutput {
+        let Some(tool) = self.find_tool(tool_name) else {
+            if let Some(audit) = &self.audit {
+                let _ = audit
+                    .record(
+                        session_id.as_str(),
+                        AuditEventType::ToolInvocation {
+                            tool_name: tool_name.into(),
+                            capability_check: CapabilityCheckResult::Denied {
+                                reason: "tool not found".into(),
+                            },
+                        },
+                    )
+                    .await;
+            }
+            return ToolOutput {
+                content: format!("Error: tool `{tool_name}` not found"),
+                is_error: true,
+                metadata: None,
+            };
+        };
+
+        if let Some(audit) = &self.audit {
+            let _ = audit
+                .record(
+                    session_id.as_str(),
+                    AuditEventType::ToolInvocation {
+                        tool_name: tool_name.into(),
+                        capability_check: CapabilityCheckResult::Granted,
+                    },
+                )
+                .await;
+        }
+
+        let context = ToolContext {
+            session_id,
+            sandbox_root: &self.tools_config.sandbox_root,
+            granted_capabilities: &[],
+        };
+
+        let timeout = Duration::from_secs(self.tools_config.default_timeout_secs);
+
+        match tokio::time::timeout(timeout, tool.execute(input.clone(), &context)).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => ToolOutput {
+                content: format!("Error: {e}"),
+                is_error: true,
+                metadata: None,
+            },
+            Err(_) => ToolOutput {
+                content: format!("Error: tool `{tool_name}` timed out"),
+                is_error: true,
+                metadata: None,
+            },
+        }
+    }
+
+    /// Look up a tool by name.
+    fn find_tool(&self, name: &str) -> Option<&dyn Tool> {
+        self.tools
+            .iter()
+            .find(|t| t.info().name == name)
+            .map(AsRef::as_ref)
+    }
+}
+
+/// Join all `ContentBlock::Text` blocks in a message.
+fn extract_text(message: &Message) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// Reconstruct a flat message list from conversation turns.
+///
+/// Inline helper — will be replaced by a proper abstraction in #18.
+fn conversation_to_messages(conversation: &Conversation) -> Vec<Message> {
+    let mut messages = Vec::new();
+
+    for turn in &conversation.turns {
+        messages.push(turn.user_message.clone());
+
+        if let Some(ref response) = turn.assistant_response {
+            messages.push(response.clone());
+
+            // If the response contained tool_use blocks, also add tool results
+            let has_tool_use = response
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolUse { .. }));
+
+            if has_tool_use {
+                let tool_results: Vec<ContentBlock> = turn
+                    .tool_invocations
+                    .iter()
+                    .map(|inv| ContentBlock::ToolResult {
+                        tool_use_id: inv.tool_use_id.clone(),
+                        content: inv.output.clone().unwrap_or_default(),
+                        is_error: inv.is_error,
+                    })
+                    .collect();
+
+                if !tool_results.is_empty() {
+                    messages.push(Message {
+                        role: Role::User,
+                        content: tool_results,
+                        timestamp: turn.started_at,
+                    });
+                }
+            }
+        }
+    }
+
+    messages
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+    use freebird_traits::memory::ToolInvocation;
+
+    // -- extract_text --
+
+    #[test]
+    fn test_extract_text_single_text_block() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "hello".into(),
+            }],
+            timestamp: Utc::now(),
+        };
+        assert_eq!(extract_text(&msg), "hello");
+    }
+
+    #[test]
+    fn test_extract_text_multiple_text_blocks() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "part1".into(),
+                },
+                ContentBlock::Text {
+                    text: "part2".into(),
+                },
+            ],
+            timestamp: Utc::now(),
+        };
+        assert_eq!(extract_text(&msg), "part1part2");
+    }
+
+    #[test]
+    fn test_extract_text_skips_non_text_blocks() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "before".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "1".into(),
+                    name: "tool".into(),
+                    input: serde_json::json!({}),
+                },
+                ContentBlock::Text {
+                    text: "after".into(),
+                },
+            ],
+            timestamp: Utc::now(),
+        };
+        assert_eq!(extract_text(&msg), "beforeafter");
+    }
+
+    #[test]
+    fn test_extract_text_empty_content() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![],
+            timestamp: Utc::now(),
+        };
+        assert_eq!(extract_text(&msg), "");
+    }
+
+    #[test]
+    fn test_extract_text_no_text_blocks() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "1".into(),
+                name: "tool".into(),
+                input: serde_json::json!({}),
+            }],
+            timestamp: Utc::now(),
+        };
+        assert_eq!(extract_text(&msg), "");
+    }
+
+    // -- conversation_to_messages --
+
+    #[test]
+    fn test_conversation_to_messages_empty() {
+        let conv = Conversation {
+            session_id: SessionId::from("s1"),
+            system_prompt: None,
+            turns: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            model_id: "m".into(),
+            provider_id: "p".into(),
+        };
+        let msgs = conversation_to_messages(&conv);
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn test_conversation_to_messages_simple_turn() {
+        let conv = Conversation {
+            session_id: SessionId::from("s1"),
+            system_prompt: None,
+            turns: vec![Turn {
+                user_message: Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text { text: "hi".into() }],
+                    timestamp: Utc::now(),
+                },
+                assistant_response: Some(Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "hello".into(),
+                    }],
+                    timestamp: Utc::now(),
+                }),
+                tool_invocations: vec![],
+                started_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+            }],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            model_id: "m".into(),
+            provider_id: "p".into(),
+        };
+        let msgs = conversation_to_messages(&conv);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, Role::User);
+        assert_eq!(msgs[1].role, Role::Assistant);
+    }
+
+    #[test]
+    fn test_conversation_to_messages_tool_turn() {
+        let conv = Conversation {
+            session_id: SessionId::from("s1"),
+            system_prompt: None,
+            turns: vec![Turn {
+                user_message: Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "read file".into(),
+                    }],
+                    timestamp: Utc::now(),
+                },
+                assistant_response: Some(Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: "call-1".into(),
+                        name: "read_file".into(),
+                        input: serde_json::json!({}),
+                    }],
+                    timestamp: Utc::now(),
+                }),
+                tool_invocations: vec![ToolInvocation {
+                    tool_use_id: "call-1".into(),
+                    tool_name: "read_file".into(),
+                    input: serde_json::json!({}),
+                    output: Some("file content".into()),
+                    is_error: false,
+                    duration_ms: Some(10),
+                }],
+                started_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+            }],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            model_id: "m".into(),
+            provider_id: "p".into(),
+        };
+        let msgs = conversation_to_messages(&conv);
+        // User message + assistant tool_use + user tool_result
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0].role, Role::User);
+        assert_eq!(msgs[1].role, Role::Assistant);
+        assert_eq!(msgs[2].role, Role::User);
+        // Verify the tool result content
+        assert!(matches!(
+            &msgs[2].content[0],
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } if tool_use_id == "call-1" && content == "file content" && !is_error
+        ));
+    }
+
+    #[test]
+    fn test_conversation_to_messages_incomplete_turn() {
+        let conv = Conversation {
+            session_id: SessionId::from("s1"),
+            system_prompt: None,
+            turns: vec![Turn {
+                user_message: Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text { text: "hi".into() }],
+                    timestamp: Utc::now(),
+                },
+                assistant_response: None, // no response yet
+                tool_invocations: vec![],
+                started_at: Utc::now(),
+                completed_at: None,
+            }],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            model_id: "m".into(),
+            provider_id: "p".into(),
+        };
+        let msgs = conversation_to_messages(&conv);
+        // Only the user message
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, Role::User);
+    }
+
+    #[test]
+    fn test_conversation_to_messages_multi_turn() {
+        let conv = Conversation {
+            session_id: SessionId::from("s1"),
+            system_prompt: None,
+            turns: vec![
+                Turn {
+                    user_message: Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::Text {
+                            text: "first".into(),
+                        }],
+                        timestamp: Utc::now(),
+                    },
+                    assistant_response: Some(Message {
+                        role: Role::Assistant,
+                        content: vec![ContentBlock::Text {
+                            text: "response1".into(),
+                        }],
+                        timestamp: Utc::now(),
+                    }),
+                    tool_invocations: vec![],
+                    started_at: Utc::now(),
+                    completed_at: Some(Utc::now()),
+                },
+                Turn {
+                    user_message: Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::Text {
+                            text: "second".into(),
+                        }],
+                        timestamp: Utc::now(),
+                    },
+                    assistant_response: Some(Message {
+                        role: Role::Assistant,
+                        content: vec![ContentBlock::Text {
+                            text: "response2".into(),
+                        }],
+                        timestamp: Utc::now(),
+                    }),
+                    tool_invocations: vec![],
+                    started_at: Utc::now(),
+                    completed_at: Some(Utc::now()),
+                },
+            ],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            model_id: "m".into(),
+            provider_id: "p".into(),
+        };
+        let msgs = conversation_to_messages(&conv);
+        assert_eq!(msgs.len(), 4);
+        assert_eq!(msgs[0].role, Role::User);
+        assert_eq!(msgs[1].role, Role::Assistant);
+        assert_eq!(msgs[2].role, Role::User);
+        assert_eq!(msgs[3].role, Role::Assistant);
+    }
+
+    #[test]
+    fn test_conversation_to_messages_tool_with_no_output() {
+        let conv = Conversation {
+            session_id: SessionId::from("s1"),
+            system_prompt: None,
+            turns: vec![Turn {
+                user_message: Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "read file".into(),
+                    }],
+                    timestamp: Utc::now(),
+                },
+                assistant_response: Some(Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: "call-1".into(),
+                        name: "read_file".into(),
+                        input: serde_json::json!({}),
+                    }],
+                    timestamp: Utc::now(),
+                }),
+                tool_invocations: vec![ToolInvocation {
+                    tool_use_id: "call-1".into(),
+                    tool_name: "read_file".into(),
+                    input: serde_json::json!({}),
+                    output: None, // no output recorded
+                    is_error: false,
+                    duration_ms: None,
+                }],
+                started_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+            }],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            model_id: "m".into(),
+            provider_id: "p".into(),
+        };
+        let msgs = conversation_to_messages(&conv);
+        assert_eq!(msgs.len(), 3);
+        // Tool result should have empty string content (from unwrap_or_default)
+        assert!(matches!(
+            &msgs[2].content[0],
+            ContentBlock::ToolResult {
+                content,
+                ..
+            } if content.is_empty()
+        ));
     }
 }

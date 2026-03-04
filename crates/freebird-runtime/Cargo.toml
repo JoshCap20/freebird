@@ -21,3 +21,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio-util = { workspace = true }
+
+[dev-dependencies]
+freebird-memory = { path = "../freebird-memory" }
