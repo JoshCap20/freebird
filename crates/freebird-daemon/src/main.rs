@@ -15,18 +15,15 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use figment::Figment;
 use figment::providers::{Env, Format, Toml};
-use secrecy::SecretString;
 use tracing_subscriber::EnvFilter;
 
 use freebird_channels::cli::CliChannel;
 use freebird_memory::file::FileMemory;
-use freebird_providers::anthropic::{AnthropicConfig, AnthropicProvider};
 use freebird_runtime::agent::AgentRuntime;
-use freebird_runtime::registry::ProviderRegistry;
 use freebird_runtime::shutdown::ShutdownCoordinator;
-use freebird_traits::id::ProviderId;
-use freebird_traits::provider::Provider;
-use freebird_types::config::{AppConfig, ChannelKind, ProviderKind};
+use freebird_types::config::{AppConfig, ChannelKind};
+
+mod providers;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -45,7 +42,7 @@ async fn main() -> Result<()> {
     validate_config(&config)?;
 
     // 4. PROVIDER REGISTRY
-    let registry = build_provider_registry(&config).await?;
+    let registry = providers::build_provider_registry(&config).await?;
 
     // 5. CHANNEL — construct with configured prompt (or default).
     let cli_config = config
@@ -55,7 +52,7 @@ async fn main() -> Result<()> {
         .context("cli channel config missing")?;
     let channel: Box<dyn freebird_traits::channel::Channel> =
         cli_config.prompt.as_ref().map_or_else(
-            || Box::new(CliChannel::new()) as Box<dyn freebird_traits::channel::Channel>,
+            || Box::new(CliChannel::new()),
             |prompt| Box::new(CliChannel::with_prompt(prompt)),
         );
 
@@ -148,68 +145,6 @@ fn validate_config(config: &AppConfig) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Build and populate the provider registry from configuration.
-async fn build_provider_registry(config: &AppConfig) -> Result<ProviderRegistry> {
-    let mut registry = ProviderRegistry::new();
-
-    for provider_config in &config.providers {
-        match provider_config.kind {
-            ProviderKind::Anthropic => {
-                let api_key = std::env::var("ANTHROPIC_API_KEY")
-                    .map(SecretString::from)
-                    .map_err(|_| {
-                        anyhow::anyhow!(
-                            "ANTHROPIC_API_KEY environment variable not set \
-                             (required for provider `{}`)",
-                            provider_config.id,
-                        )
-                    })?;
-
-                let anthropic_config = AnthropicConfig {
-                    base_url: provider_config.base_url.clone(),
-                    default_model: provider_config.default_model.clone(),
-                };
-
-                let provider = AnthropicProvider::new(api_key, anthropic_config).context(
-                    format!("failed to create provider `{}`", provider_config.id),
-                )?;
-
-                provider.validate_credentials().await.context(format!(
-                    "credential validation failed for provider `{}`",
-                    provider_config.id,
-                ))?;
-
-                tracing::info!(provider = %provider_config.id, "credentials validated");
-
-                registry.register(
-                    ProviderId::from_string(provider_config.id.clone()),
-                    Box::new(provider),
-                );
-            }
-            ProviderKind::OpenAi => {
-                tracing::warn!(
-                    provider = %provider_config.id,
-                    "OpenAI provider not yet implemented, skipping"
-                );
-            }
-            ProviderKind::Ollama => {
-                tracing::warn!(
-                    provider = %provider_config.id,
-                    "Ollama provider not yet implemented, skipping"
-                );
-            }
-        }
-    }
-
-    let mut failover_chain = Vec::with_capacity(config.providers.len());
-    for p in &config.providers {
-        failover_chain.push(ProviderId::from_string(p.id.clone()));
-    }
-    registry.set_failover_chain(failover_chain);
-
-    Ok(registry)
 }
 
 /// Expand `~` prefix to the user's home directory.
