@@ -83,10 +83,11 @@ impl FileMemory {
 impl Memory for FileMemory {
     async fn load(&self, session_id: &SessionId) -> Result<Option<Conversation>, MemoryError> {
         let path = self.session_path(session_id)?;
-        if !path.exists() {
-            return Ok(None);
-        }
-        let data = tokio::fs::read_to_string(&path).await?;
+        let data = match tokio::fs::read_to_string(&path).await {
+            Ok(data) => data,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(MemoryError::Io(e)),
+        };
         let conversation: Conversation =
             serde_json::from_str(&data).map_err(|e| MemoryError::Serialization(e.to_string()))?;
         Ok(Some(conversation))
@@ -97,9 +98,13 @@ impl Memory for FileMemory {
         let tmp_path = path.with_extension("json.tmp");
         let data = serde_json::to_string_pretty(conversation)
             .map_err(|e| MemoryError::Serialization(e.to_string()))?;
-        // Atomic write: tmp then rename (atomic on same filesystem)
+        // Atomic write: tmp then rename (atomic on same filesystem).
+        // If rename fails, clean up the tmp file to avoid accumulating orphans.
         tokio::fs::write(&tmp_path, data).await?;
-        tokio::fs::rename(&tmp_path, &path).await?;
+        if let Err(e) = tokio::fs::rename(&tmp_path, &path).await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(MemoryError::Io(e));
+        }
         Ok(())
     }
 
@@ -132,13 +137,13 @@ impl Memory for FileMemory {
 
     async fn delete(&self, session_id: &SessionId) -> Result<(), MemoryError> {
         let path = self.session_path(session_id)?;
-        if !path.exists() {
-            return Err(MemoryError::NotFound {
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(MemoryError::NotFound {
                 session_id: session_id.clone(),
-            });
+            }),
+            Err(e) => Err(MemoryError::Io(e)),
         }
-        tokio::fs::remove_file(&path).await?;
-        Ok(())
     }
 
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SessionSummary>, MemoryError> {
