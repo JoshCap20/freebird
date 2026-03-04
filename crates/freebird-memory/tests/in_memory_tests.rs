@@ -337,6 +337,31 @@ async fn test_summary_turn_count() {
     assert_eq!(sessions[0].turn_count, 3);
 }
 
+#[tokio::test]
+async fn test_summary_preview_multibyte_unicode() {
+    let mem = InMemoryMemory::new();
+    // 150 CJK characters (each 3 bytes in UTF-8), preview truncates to 100
+    let cjk = "漢".repeat(150);
+    mem.save(&make_conversation("s1", &cjk, Utc::now()))
+        .await
+        .unwrap();
+
+    let sessions = mem.list_sessions(10).await.unwrap();
+    assert_eq!(sessions[0].preview.chars().count(), 100);
+    assert!(sessions[0].preview.chars().all(|c| c == '漢'));
+}
+
+#[tokio::test]
+async fn test_search_limit_zero() {
+    let mem = InMemoryMemory::new();
+    mem.save(&make_conversation("s1", "findme", Utc::now()))
+        .await
+        .unwrap();
+
+    let results = mem.search("findme", 0).await.unwrap();
+    assert!(results.is_empty());
+}
+
 // ─── Concurrency ────────────────────────────────────────────────────────
 
 #[tokio::test]
