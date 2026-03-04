@@ -12,8 +12,7 @@ use freebird_security::audit::{
     AuditEventType, AuditLogger, CapabilityCheckResult, InjectionSource,
 };
 use freebird_security::error::Severity;
-use freebird_security::injection;
-use freebird_security::safe_types::{SafeMessage, ScannedToolOutput};
+use freebird_security::safe_types::{SafeMessage, ScannedModelResponse, ScannedToolOutput};
 use freebird_security::taint::Tainted;
 use freebird_traits::channel::{Channel, ChannelError, InboundEvent, OutboundEvent};
 use freebird_traits::id::{ModelId, SessionId};
@@ -453,6 +452,7 @@ impl AgentRuntime {
                     self.deliver_truncated_response(
                         &response,
                         sender_id,
+                        session_id,
                         &mut current_turn,
                         outbound,
                     )
@@ -571,6 +571,10 @@ impl AgentRuntime {
     }
 
     /// Deliver a final (non-truncated) response to the user.
+    ///
+    /// Scans model output for injection via `ScannedModelResponse`. On detection:
+    /// - Sends `OutboundEvent::Error` instead of the response
+    /// - Does NOT persist the tainted response to memory (prevents poisoning)
     async fn deliver_final_response(
         &self,
         response: &CompletionResponse,
@@ -590,53 +594,105 @@ impl AgentRuntime {
             return;
         }
 
-        // Scan model output for injection (log and continue)
-        if let Err(e) = injection::scan_output(&response_text) {
-            tracing::warn!("potential injection in model output");
-            if let Some(audit) = &self.audit {
-                let _ = audit
-                    .record(
-                        session_id.as_str(),
-                        AuditEventType::InjectionDetected {
-                            pattern: format!("{e}"),
-                            source: InjectionSource::ModelResponse,
-                            severity: Severity::High,
-                        },
-                    )
+        // Scan model output for injection — BLOCK if detected
+        match ScannedModelResponse::from_raw(&response_text) {
+            Ok(scanned) => {
+                let _ = outbound
+                    .send(OutboundEvent::Message {
+                        text: scanned.as_str().to_owned(),
+                        recipient_id: sender_id.into(),
+                    })
                     .await;
+
+                current_turn.assistant_response = Some(response.message.clone());
+                current_turn.completed_at = Some(Utc::now());
+            }
+            Err(e) => {
+                tracing::warn!("injection detected in model output, blocking delivery");
+                if let Some(audit) = &self.audit {
+                    let _ = audit
+                        .record(
+                            session_id.as_str(),
+                            AuditEventType::InjectionDetected {
+                                pattern: format!("{e}"),
+                                source: InjectionSource::ModelResponse,
+                                severity: Severity::High,
+                            },
+                        )
+                        .await;
+                }
+
+                let _ = outbound
+                    .send(OutboundEvent::Error {
+                        text:
+                            "Response blocked: potential prompt injection detected in model output."
+                                .into(),
+                        recipient_id: sender_id.into(),
+                    })
+                    .await;
+
+                // Do NOT persist the tainted response — prevents memory poisoning
+                current_turn.completed_at = Some(Utc::now());
             }
         }
-
-        let _ = outbound
-            .send(OutboundEvent::Message {
-                text: response_text,
-                recipient_id: sender_id.into(),
-            })
-            .await;
-
-        current_turn.assistant_response = Some(response.message.clone());
-        current_turn.completed_at = Some(Utc::now());
     }
 
     /// Deliver a truncated response (max tokens reached).
+    ///
+    /// Scans the partial output for injection before delivery.
     async fn deliver_truncated_response(
         &self,
         response: &CompletionResponse,
         sender_id: &str,
+        session_id: &SessionId,
         current_turn: &mut Turn,
         outbound: &mpsc::Sender<OutboundEvent>,
     ) {
         let partial_text = extract_text(&response.message);
 
-        let _ = outbound
-            .send(OutboundEvent::Message {
-                text: format!("{partial_text}\n\n[response truncated — max tokens reached]"),
-                recipient_id: sender_id.into(),
-            })
-            .await;
+        // Scan truncated output for injection — BLOCK if detected
+        match ScannedModelResponse::from_raw(&partial_text) {
+            Ok(scanned) => {
+                let _ = outbound
+                    .send(OutboundEvent::Message {
+                        text: format!(
+                            "{}\n\n[response truncated — max tokens reached]",
+                            scanned.as_str()
+                        ),
+                        recipient_id: sender_id.into(),
+                    })
+                    .await;
 
-        current_turn.assistant_response = Some(response.message.clone());
-        current_turn.completed_at = Some(Utc::now());
+                current_turn.assistant_response = Some(response.message.clone());
+                current_turn.completed_at = Some(Utc::now());
+            }
+            Err(e) => {
+                tracing::warn!("injection detected in truncated model output, blocking delivery");
+                if let Some(audit) = &self.audit {
+                    let _ = audit
+                        .record(
+                            session_id.as_str(),
+                            AuditEventType::InjectionDetected {
+                                pattern: format!("{e}"),
+                                source: InjectionSource::ModelResponse,
+                                severity: Severity::High,
+                            },
+                        )
+                        .await;
+                }
+
+                let _ = outbound
+                    .send(OutboundEvent::Error {
+                        text:
+                            "Response blocked: potential prompt injection detected in model output."
+                                .into(),
+                        recipient_id: sender_id.into(),
+                    })
+                    .await;
+
+                current_turn.completed_at = Some(Utc::now());
+            }
+        }
     }
 
     /// Execute a tool by name, with timeout. Returns `ToolOutput` unconditionally.
