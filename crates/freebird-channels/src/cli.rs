@@ -228,12 +228,13 @@ fn parse_input_line(line: &str) -> Option<InboundEvent> {
             })
         },
         |rest| {
-            let mut parts = rest.splitn(2, ' ');
-            let name = parts.next().unwrap_or_default().to_string();
-            let args = parts
-                .next()
-                .map(|a| a.split_whitespace().map(String::from).collect())
-                .unwrap_or_default();
+            let (name, args) = match rest.split_once(' ') {
+                Some((n, a)) => (
+                    n.to_string(),
+                    a.split_whitespace().map(String::from).collect(),
+                ),
+                None => (rest.to_string(), vec![]),
+            };
             Some(InboundEvent::Command {
                 name,
                 args,
