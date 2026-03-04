@@ -321,6 +321,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "freebird-memory",
  "freebird-security",
  "freebird-traits",
  "freebird-types",

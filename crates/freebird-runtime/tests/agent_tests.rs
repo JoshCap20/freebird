@@ -5,96 +5,25 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::BTreeSet;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+mod helpers;
+
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use freebird_runtime::agent::AgentRuntime;
 use freebird_runtime::registry::ProviderRegistry;
-use freebird_traits::channel::{
-    AuthRequirement, Channel, ChannelError, ChannelHandle, ChannelInfo, InboundEvent, OutboundEvent,
-};
-use freebird_traits::id::{ChannelId, SessionId};
+use freebird_traits::channel::InboundEvent;
+use freebird_traits::id::SessionId;
 use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary};
-use freebird_types::config::RuntimeConfig;
-use tokio::sync::Mutex as TokioMutex;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
+use freebird_types::config::{RuntimeConfig, ToolsConfig};
 use tokio_util::sync::CancellationToken;
+
+use helpers::{MockChannel, error_text, message_text};
 
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
-
-/// A test-only channel that:
-/// - Receives inbound events from test code via `inbound_tx`
-/// - Exposes outbound events to test code via `outbound_rx`
-/// - Tracks whether `stop()` was called
-struct MockChannel {
-    info: ChannelInfo,
-    handle: TokioMutex<Option<ChannelHandle>>,
-    stopped: Arc<AtomicBool>,
-}
-
-impl MockChannel {
-    /// Create a mock channel and the sender/receiver for test interaction.
-    ///
-    /// Returns:
-    /// - `MockChannel` to pass to `AgentRuntime::new()`
-    /// - `mpsc::Sender<InboundEvent>` for test code to inject events
-    /// - `mpsc::Receiver<OutboundEvent>` for test code to read responses
-    /// - `Arc<AtomicBool>` to check if `stop()` was called
-    fn new() -> (
-        Self,
-        mpsc::Sender<InboundEvent>,
-        mpsc::Receiver<OutboundEvent>,
-        Arc<AtomicBool>,
-    ) {
-        let (inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>(32);
-        let (outbound_tx, outbound_rx) = mpsc::channel::<OutboundEvent>(32);
-        let stopped = Arc::new(AtomicBool::new(false));
-
-        let channel = Self {
-            info: ChannelInfo {
-                id: ChannelId::from("mock"),
-                display_name: "Mock Channel".into(),
-                features: BTreeSet::new(),
-                auth: AuthRequirement::None,
-            },
-            handle: TokioMutex::new(Some(ChannelHandle {
-                inbound: Box::pin(ReceiverStream::new(inbound_rx)),
-                outbound: outbound_tx,
-            })),
-            stopped: Arc::clone(&stopped),
-        };
-
-        (channel, inbound_tx, outbound_rx, stopped)
-    }
-}
-
-#[async_trait::async_trait]
-impl Channel for MockChannel {
-    fn info(&self) -> &ChannelInfo {
-        &self.info
-    }
-
-    async fn start(&self) -> Result<ChannelHandle, ChannelError> {
-        self.handle
-            .lock()
-            .await
-            .take()
-            .ok_or_else(|| ChannelError::StartupFailed {
-                channel: "mock".into(),
-                reason: "already started".into(),
-            })
-    }
-
-    async fn stop(&self) -> Result<(), ChannelError> {
-        self.stopped.store(true, Ordering::SeqCst);
-        Ok(())
-    }
-}
 
 struct NoopMemory;
 
@@ -133,23 +62,12 @@ fn make_runtime(channel: MockChannel) -> AgentRuntime {
             max_turns_per_session: 10,
             drain_timeout_secs: 1,
         },
+        ToolsConfig {
+            sandbox_root: PathBuf::from("/tmp/test-sandbox"),
+            default_timeout_secs: 30,
+        },
+        None,
     )
-}
-
-/// Helper: extract text from an `OutboundEvent::Message`.
-fn message_text(event: &OutboundEvent) -> Option<&str> {
-    match event {
-        OutboundEvent::Message { text, .. } => Some(text.as_str()),
-        _ => None,
-    }
-}
-
-/// Helper: extract text from an `OutboundEvent::Error`.
-fn error_text(event: &OutboundEvent) -> Option<&str> {
-    match event {
-        OutboundEvent::Error { text, .. } => Some(text.as_str()),
-        _ => None,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -284,133 +202,6 @@ async fn test_command_unknown_sends_error() {
 }
 
 #[tokio::test]
-async fn test_message_echo() {
-    let (channel, inbound_tx, mut outbound_rx, _stopped) = MockChannel::new();
-    let runtime = make_runtime(channel);
-    let cancel = CancellationToken::new();
-
-    inbound_tx
-        .send(InboundEvent::Message {
-            raw_text: "hello world".into(),
-            sender_id: "alice".into(),
-            attachments: vec![],
-        })
-        .await
-        .unwrap();
-    inbound_tx
-        .send(InboundEvent::Command {
-            name: "quit".into(),
-            args: vec![],
-            sender_id: "alice".into(),
-        })
-        .await
-        .unwrap();
-
-    let result = tokio::time::timeout(Duration::from_secs(2), runtime.run(cancel)).await;
-    result.expect("runtime should exit").unwrap();
-
-    let event = outbound_rx.recv().await.expect("should receive echo");
-    let text = message_text(&event).expect("should be Message");
-    assert!(
-        text.contains("Echo: hello world"),
-        "expected echo text, got: {text}"
-    );
-    assert!(
-        text.contains("session"),
-        "expected session ID in text, got: {text}"
-    );
-}
-
-#[tokio::test]
-async fn test_session_resolved_same_sender() {
-    let (channel, inbound_tx, mut outbound_rx, _stopped) = MockChannel::new();
-    let runtime = make_runtime(channel);
-    let cancel = CancellationToken::new();
-
-    // Send two messages from alice
-    for _ in 0..2 {
-        inbound_tx
-            .send(InboundEvent::Message {
-                raw_text: "ping".into(),
-                sender_id: "alice".into(),
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-    }
-    inbound_tx
-        .send(InboundEvent::Command {
-            name: "quit".into(),
-            args: vec![],
-            sender_id: "alice".into(),
-        })
-        .await
-        .unwrap();
-
-    let result = tokio::time::timeout(Duration::from_secs(2), runtime.run(cancel)).await;
-    result.expect("runtime should exit").unwrap();
-
-    let event1 = outbound_rx.recv().await.expect("first response");
-    let event2 = outbound_rx.recv().await.expect("second response");
-
-    let text1 = message_text(&event1).expect("should be Message");
-    let text2 = message_text(&event2).expect("should be Message");
-
-    // Extract session IDs: format is "[session <uuid>] Echo: ..."
-    let id1 = extract_session_id(text1);
-    let id2 = extract_session_id(text2);
-    assert_eq!(id1, id2, "same sender should get same session ID");
-}
-
-#[tokio::test]
-async fn test_different_senders_different_sessions() {
-    let (channel, inbound_tx, mut outbound_rx, _stopped) = MockChannel::new();
-    let runtime = make_runtime(channel);
-    let cancel = CancellationToken::new();
-
-    inbound_tx
-        .send(InboundEvent::Message {
-            raw_text: "hi".into(),
-            sender_id: "alice".into(),
-            attachments: vec![],
-        })
-        .await
-        .unwrap();
-    inbound_tx
-        .send(InboundEvent::Message {
-            raw_text: "hi".into(),
-            sender_id: "bob".into(),
-            attachments: vec![],
-        })
-        .await
-        .unwrap();
-    inbound_tx
-        .send(InboundEvent::Command {
-            name: "quit".into(),
-            args: vec![],
-            sender_id: "alice".into(),
-        })
-        .await
-        .unwrap();
-
-    let result = tokio::time::timeout(Duration::from_secs(2), runtime.run(cancel)).await;
-    result.expect("runtime should exit").unwrap();
-
-    let event1 = outbound_rx.recv().await.expect("alice response");
-    let event2 = outbound_rx.recv().await.expect("bob response");
-
-    let text1 = message_text(&event1).expect("should be Message");
-    let text2 = message_text(&event2).expect("should be Message");
-
-    let id1 = extract_session_id(text1);
-    let id2 = extract_session_id(text2);
-    assert_ne!(
-        id1, id2,
-        "different senders should get different session IDs"
-    );
-}
-
-#[tokio::test]
 async fn test_shutdown_on_cancel() {
     let (channel, _inbound_tx, _outbound_rx, _stopped) = MockChannel::new();
     let runtime = make_runtime(channel);
@@ -514,15 +305,4 @@ async fn test_disconnected_event_no_crash() {
 
     let event = outbound_rx.recv().await.expect("should receive goodbye");
     assert_eq!(message_text(&event), Some("Goodbye!"));
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Extract the session ID from a response like `[session <uuid>] Echo: ...`
-fn extract_session_id(text: &str) -> &str {
-    let start = text.find("[session ").expect("should contain '[session '") + 9;
-    let end = text[start..].find(']').expect("should contain closing ']'") + start;
-    &text[start..end]
 }
