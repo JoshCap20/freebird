@@ -100,7 +100,8 @@ async fn main() -> Result<()> {
 
     // 10. RUN — awaited directly (NOT raced via tokio::select! against
     //     wait_for_signal) so run() calls channel.stop() before returning.
-    match runtime.run(token).await {
+    let run_result = runtime.run(token).await;
+    match &run_result {
         Ok(()) => tracing::info!("runtime exited cleanly"),
         Err(e) => tracing::error!(%e, "runtime error"),
     }
@@ -112,7 +113,7 @@ async fn main() -> Result<()> {
     }
 
     tracing::info!("freebird stopped");
-    Ok(())
+    run_result.map_err(Into::into)
 }
 
 /// Load configuration from TOML file with environment variable overrides.
@@ -202,11 +203,10 @@ async fn build_provider_registry(config: &AppConfig) -> Result<ProviderRegistry>
         }
     }
 
-    let failover_chain: Vec<ProviderId> = config
-        .providers
-        .iter()
-        .map(|p| ProviderId::from_string(p.id.clone()))
-        .collect();
+    let mut failover_chain = Vec::with_capacity(config.providers.len());
+    for p in &config.providers {
+        failover_chain.push(ProviderId::from_string(p.id.clone()));
+    }
     registry.set_failover_chain(failover_chain);
 
     Ok(registry)
@@ -230,6 +230,7 @@ fn expand_tilde(path: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::indexing_slicing, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -276,5 +277,89 @@ mod tests {
     fn test_expand_tilde_empty_path() {
         let result = expand_tilde(Path::new(""));
         assert_eq!(result, PathBuf::from(""));
+    }
+
+    // --- validate_config tests ---
+
+    /// Build a valid `AppConfig` from TOML for test mutation.
+    fn valid_config() -> AppConfig {
+        use figment::providers::{Format, Toml};
+
+        let toml = r#"
+[runtime]
+default_model = "test"
+default_provider = "test"
+max_output_tokens = 1024
+max_tool_rounds = 5
+max_turns_per_session = 10
+drain_timeout_secs = 5
+
+[[providers]]
+id = "test"
+kind = "anthropic"
+
+[[channels]]
+id = "cli"
+kind = "cli"
+
+[tools]
+sandbox_root = "/tmp"
+default_timeout_secs = 10
+
+[memory]
+kind = "file"
+
+[security]
+max_tool_calls_per_turn = 10
+require_consent_above = "high"
+
+[logging]
+level = "info"
+format = "pretty"
+"#;
+        Figment::new()
+            .merge(Toml::string(toml))
+            .extract()
+            .expect("test config should deserialize")
+    }
+
+    #[test]
+    fn test_validate_config_valid() {
+        let config = valid_config();
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_config_empty_providers_errors() {
+        let mut config = valid_config();
+        config.providers.clear();
+        let err = validate_config(&config).unwrap_err();
+        assert!(
+            err.to_string().contains("at least one provider"),
+            "expected provider error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_config_no_cli_channel_errors() {
+        let mut config = valid_config();
+        config.channels.clear();
+        let err = validate_config(&config).unwrap_err();
+        assert!(
+            err.to_string().contains("at least one CLI channel"),
+            "expected CLI channel error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_config_multiple_cli_channels_errors() {
+        let mut config = valid_config();
+        let second_cli = config.channels[0].clone();
+        config.channels.push(second_cli);
+        let err = validate_config(&config).unwrap_err();
+        assert!(
+            err.to_string().contains("only one CLI channel"),
+            "expected multi-CLI error, got: {err}"
+        );
     }
 }
