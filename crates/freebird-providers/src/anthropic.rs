@@ -2119,13 +2119,21 @@ mod tests {
             events.push(item);
         }
 
-        // Should get at least the text delta; stream ends without Done
+        // Should get the text delta that was sent before the connection drop
         assert!(!events.is_empty());
         let ok_events: Vec<_> = events.iter().filter_map(|e| e.as_ref().ok()).collect();
         assert!(
             ok_events
                 .iter()
-                .any(|e| matches!(e, StreamEvent::TextDelta(t) if t == "partial"))
+                .any(|e| matches!(e, StreamEvent::TextDelta(t) if t == "partial")),
+            "expected TextDelta(\"partial\") in events: {ok_events:?}"
+        );
+        // Connection dropped before message_delta — stream must NOT contain a Done event
+        assert!(
+            !ok_events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::Done { .. })),
+            "stream should not contain Done after connection drop: {ok_events:?}"
         );
     }
 
