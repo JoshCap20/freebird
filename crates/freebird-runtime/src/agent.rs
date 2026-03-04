@@ -402,15 +402,7 @@ impl AgentRuntime {
         };
 
         for _round in 0..self.config.max_tool_rounds {
-            let request = CompletionRequest {
-                model: ModelId::from(conversation.model_id.as_str()),
-                system_prompt: conversation.system_prompt.clone(),
-                messages: messages.clone(),
-                tools: tool_definitions.clone(),
-                max_tokens: self.config.max_output_tokens,
-                temperature: self.config.temperature,
-                stop_sequences: Vec::new(),
-            };
+            let request = self.build_completion_request(conversation, &messages, &tool_definitions);
 
             let (_provider_id, response) =
                 match self.provider_registry.complete_with_failover(request).await {
@@ -487,6 +479,24 @@ impl AgentRuntime {
             .await;
 
         current_turn
+    }
+
+    /// Build a `CompletionRequest` from the current conversation state.
+    fn build_completion_request(
+        &self,
+        conversation: &Conversation,
+        messages: &[Message],
+        tool_definitions: &[ToolDefinition],
+    ) -> CompletionRequest {
+        CompletionRequest {
+            model: ModelId::from(conversation.model_id.as_str()),
+            system_prompt: conversation.system_prompt.clone(),
+            messages: messages.to_vec(),
+            tools: tool_definitions.to_vec(),
+            max_tokens: self.config.max_output_tokens,
+            temperature: self.config.temperature,
+            stop_sequences: Vec::new(),
+        }
     }
 
     /// Execute tool calls from a `ToolUse` response and append results to the message list.
