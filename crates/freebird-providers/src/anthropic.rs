@@ -1,12 +1,15 @@
 //! Anthropic (Claude) provider implementation.
 
+use std::collections::BTreeSet;
 use std::pin::Pin;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use freebird_traits::id::{ModelId, ProviderId};
 use freebird_traits::provider::{
     CompletionRequest, CompletionResponse, ContentBlock, Message, ModelInfo, NetworkErrorKind,
-    Provider, ProviderError, ProviderInfo, Role, StopReason, StreamEvent, TokenUsage,
+    Provider, ProviderError, ProviderFeature, ProviderInfo, Role, StopReason, StreamEvent,
+    TokenUsage,
 };
 use futures::Stream;
 use reqwest::Client;
@@ -194,25 +197,27 @@ impl AnthropicProvider {
             .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
         let info = ProviderInfo {
-            id: "anthropic".into(),
+            id: ProviderId::from("anthropic"),
             display_name: "Anthropic Claude".into(),
             supported_models: vec![
                 ModelInfo {
-                    id: "claude-opus-4-6-20250929".into(),
+                    id: ModelId::from("claude-opus-4-6-20250929"),
                     display_name: "Claude Opus 4.6".into(),
                     max_context_tokens: 200_000,
                     max_output_tokens: 32_768,
                 },
                 ModelInfo {
-                    id: "claude-sonnet-4-5-20250929".into(),
+                    id: ModelId::from("claude-sonnet-4-5-20250929"),
                     display_name: "Claude Sonnet 4.5".into(),
                     max_context_tokens: 200_000,
                     max_output_tokens: 16_384,
                 },
             ],
-            supports_streaming: true,
-            supports_tool_use: true,
-            supports_vision: true,
+            features: BTreeSet::from([
+                ProviderFeature::Streaming,
+                ProviderFeature::ToolUse,
+                ProviderFeature::Vision,
+            ]),
         };
 
         Ok(Self {
@@ -258,7 +263,7 @@ fn build_request_body(request: CompletionRequest) -> ApiRequest {
         .collect();
 
     ApiRequest {
-        model: request.model,
+        model: request.model.to_string(),
         max_tokens: request.max_tokens,
         messages,
         system: request.system_prompt,
@@ -335,7 +340,7 @@ impl ApiResponse {
                 cache_read_tokens: self.usage.cache_read_input_tokens,
                 cache_creation_tokens: self.usage.cache_creation_input_tokens,
             },
-            model: self.model,
+            model: ModelId::from(self.model),
         }
     }
 }
@@ -504,6 +509,7 @@ impl Provider for AnthropicProvider {
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use freebird_traits::id::ModelId;
     use freebird_traits::provider::ToolDefinition;
     use secrecy::SecretString;
     use wiremock::matchers::{method, path};
@@ -530,7 +536,7 @@ mod tests {
 
     fn simple_completion_request() -> CompletionRequest {
         CompletionRequest {
-            model: "claude-opus-4-6-20250929".into(),
+            model: ModelId::from("claude-opus-4-6-20250929"),
             system_prompt: Some("You are helpful.".into()),
             messages: vec![
                 Message {
@@ -788,7 +794,7 @@ mod tests {
         let api_resp: ApiResponse = serde_json::from_str(json).unwrap();
         let resp = api_resp.into_completion_response();
 
-        assert_eq!(resp.model, "claude-opus-4-6-20250929");
+        assert_eq!(resp.model, ModelId::from("claude-opus-4-6-20250929"));
         assert_eq!(resp.stop_reason, StopReason::EndTurn);
         assert_eq!(resp.usage.input_tokens, 25);
         assert_eq!(resp.usage.output_tokens, 10);
@@ -845,7 +851,7 @@ mod tests {
         let result = provider.complete(simple_completion_request()).await;
 
         let resp = result.unwrap();
-        assert_eq!(resp.model, "claude-opus-4-6-20250929");
+        assert_eq!(resp.model, ModelId::from("claude-opus-4-6-20250929"));
         assert_eq!(resp.stop_reason, StopReason::EndTurn);
         assert_eq!(resp.usage.input_tokens, 25);
         assert_eq!(resp.usage.output_tokens, 10);
