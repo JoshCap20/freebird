@@ -492,6 +492,29 @@ mod tests {
     }
 
     #[test]
+    fn test_interrupted_turn_drops_orphaned_invocations() {
+        // When assistant_response is None (interrupted/crashed turn) but
+        // tool_invocations is non-empty, the invocations are silently dropped.
+        // This is correct: without an assistant message containing ToolUse blocks,
+        // there's nothing to pair the ToolResult blocks against, and emitting
+        // orphaned ToolResults would violate the Anthropic API contract.
+        let conv = make_conversation(vec![Turn {
+            user_message: user_msg("do something"),
+            assistant_response: None,
+            tool_invocations: vec![
+                tool_invocation("orphan-1", "shell", Some("partial output")),
+                tool_invocation("orphan-2", "read_file", Some("data")),
+            ],
+            started_at: Utc::now(),
+            completed_at: None,
+        }]);
+        let msgs = conversation_to_messages(&conv);
+        // Only the user message — no assistant, no tool results
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, Role::User);
+    }
+
+    #[test]
     fn test_pre_allocation_estimate() {
         // Empty
         let empty = make_conversation(vec![]);
