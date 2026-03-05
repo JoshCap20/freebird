@@ -21,7 +21,7 @@ use freebird_traits::id::{ModelId, SessionId};
 use freebird_traits::memory::{Conversation, Memory, MemoryError, ToolInvocation, Turn};
 use freebird_traits::provider::{
     CompletionRequest, CompletionResponse, ContentBlock, Message, ProviderError, ProviderFeature,
-    Role, StopReason, StreamEvent, ToolDefinition,
+    Role, StopReason, StreamEvent, TokenUsage, ToolDefinition,
 };
 use freebird_traits::tool::{Tool, ToolContext, ToolOutput};
 use freebird_types::config::{RuntimeConfig, ToolsConfig};
@@ -315,6 +315,7 @@ impl AgentRuntime {
                 &session_id,
                 &conversation,
                 outbound,
+                None,
             )
             .await
         };
@@ -460,6 +461,10 @@ impl AgentRuntime {
     }
 
     /// Run the agentic loop: call provider, handle tool use, deliver response.
+    ///
+    /// When `initial_request` is `Some`, the first loop iteration uses it directly
+    /// instead of building a fresh `CompletionRequest`. This supports the streaming
+    /// fallback path where the request has already been constructed.
     async fn run_agentic_loop(
         &self,
         safe_message: &SafeMessage,
@@ -467,12 +472,17 @@ impl AgentRuntime {
         session_id: &SessionId,
         conversation: &Conversation,
         outbound: &mpsc::Sender<OutboundEvent>,
+        initial_request: Option<CompletionRequest>,
     ) -> Turn {
         let (mut messages, mut current_turn, tool_definitions) =
             self.prepare_agentic_loop(safe_message, conversation);
 
+        let mut pending_request = initial_request;
+
         for _round in 0..self.config.max_tool_rounds {
-            let request = self.build_completion_request(conversation, &messages, &tool_definitions);
+            let request = pending_request.take().unwrap_or_else(|| {
+                self.build_completion_request(conversation, &messages, &tool_definitions)
+            });
 
             let (_provider_id, response) =
                 match self.provider_registry.complete_with_failover(request).await {
@@ -877,21 +887,19 @@ impl AgentRuntime {
                 Err(e) => {
                     tracing::warn!(error = %e, "stream setup failed, falling back to non-streaming");
                     return self
-                        .fallback_to_non_streaming(
-                            request,
-                            messages,
-                            current_turn,
+                        .run_agentic_loop(
+                            safe_message,
                             sender_id,
                             session_id,
                             conversation,
-                            &tool_definitions,
                             outbound,
+                            Some(request),
                         )
                         .await;
                 }
             };
 
-            let Some((accumulator, stop_reason)) =
+            let Some((accumulator, stop_reason, _usage)) =
                 Self::consume_stream(event_stream, sender_id, outbound).await
             else {
                 return current_turn;
@@ -949,7 +957,7 @@ impl AgentRuntime {
 
     /// Consume a provider stream, forwarding text deltas as `StreamChunk` events.
     ///
-    /// Returns `Some((accumulator, stop_reason))` on success, `None` if a
+    /// Returns `Some((accumulator, stop_reason, usage))` on success, `None` if a
     /// mid-stream error occurred (error events are sent to the user).
     async fn consume_stream(
         mut event_stream: std::pin::Pin<
@@ -957,30 +965,27 @@ impl AgentRuntime {
         >,
         sender_id: &str,
         outbound: &mpsc::Sender<OutboundEvent>,
-    ) -> Option<(StreamAccumulator, StopReason)> {
+    ) -> Option<(StreamAccumulator, StopReason, TokenUsage)> {
         let mut accumulator = StreamAccumulator::new();
 
         while let Some(event_result) = event_stream.next().await {
             match event_result {
                 Ok(StreamEvent::TextDelta(text)) => {
+                    accumulator.push_text_delta(&text);
                     send_outbound(
                         outbound,
                         OutboundEvent::StreamChunk {
-                            text: text.clone(),
+                            text,
                             recipient_id: sender_id.into(),
                         },
                     )
                     .await;
-                    accumulator.push_text_delta(&text);
                 }
                 Ok(StreamEvent::ToolUse { id, name, input }) => {
                     accumulator.push_tool_use(id, name, input);
                 }
-                Ok(StreamEvent::Done {
-                    stop_reason,
-                    usage: _,
-                }) => {
-                    return Some((accumulator, stop_reason));
+                Ok(StreamEvent::Done { stop_reason, usage }) => {
+                    return Some((accumulator, stop_reason, usage));
                 }
                 Ok(StreamEvent::Error(e)) => {
                     tracing::error!(error = %e, "stream error mid-response");
@@ -1051,92 +1056,6 @@ impl AgentRuntime {
         if let Err(e) = ScannedModelResponse::from_raw(&response_text) {
             self.log_model_output_injection(session_id, &e).await;
         }
-    }
-
-    /// Fallback path when stream setup fails: resume with non-streaming
-    /// `complete_with_failover()` for the remaining rounds.
-    #[allow(clippy::too_many_arguments)]
-    async fn fallback_to_non_streaming(
-        &self,
-        initial_request: CompletionRequest,
-        mut messages: Vec<Message>,
-        mut current_turn: Turn,
-        sender_id: &str,
-        session_id: &SessionId,
-        conversation: &Conversation,
-        tool_definitions: &[ToolDefinition],
-        outbound: &mpsc::Sender<OutboundEvent>,
-    ) -> Turn {
-        // First round uses the already-built request
-        let mut first_round = true;
-
-        for _round in 0..self.config.max_tool_rounds {
-            let request = if first_round {
-                first_round = false;
-                initial_request.clone()
-            } else {
-                self.build_completion_request(conversation, &messages, tool_definitions)
-            };
-
-            let (_provider_id, response) =
-                match self.provider_registry.complete_with_failover(request).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::error!(error = %e, "all providers failed in fallback");
-                        let _ = outbound
-                            .send(OutboundEvent::Error {
-                                text: format!("Provider error: {e}"),
-                                recipient_id: sender_id.into(),
-                            })
-                            .await;
-                        return current_turn;
-                    }
-                };
-
-            match response.stop_reason {
-                StopReason::ToolUse => {
-                    self.handle_tool_use_round(
-                        &response,
-                        &mut messages,
-                        &mut current_turn,
-                        session_id,
-                    )
-                    .await;
-                }
-                StopReason::EndTurn | StopReason::StopSequence => {
-                    self.deliver_final_response(
-                        &response,
-                        sender_id,
-                        session_id,
-                        &mut current_turn,
-                        outbound,
-                    )
-                    .await;
-                    return current_turn;
-                }
-                StopReason::MaxTokens => {
-                    self.deliver_truncated_response(
-                        &response,
-                        sender_id,
-                        session_id,
-                        &mut current_turn,
-                        outbound,
-                    )
-                    .await;
-                    return current_turn;
-                }
-            }
-        }
-
-        current_turn.completed_at = Some(Utc::now());
-        let _ = outbound
-            .send(OutboundEvent::Error {
-                text: "Maximum tool rounds exceeded. Stopping.".into(),
-                recipient_id: sender_id.into(),
-            })
-            .await;
-
-        current_turn
     }
 
     /// Look up a tool by name.
