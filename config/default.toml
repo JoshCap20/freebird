@@ -29,6 +29,10 @@ base_dir = "~/.freebird/conversations"
 max_tool_calls_per_turn = 25
 require_consent_above = "high"
 
+[daemon]
+host = "127.0.0.1"
+port = 7531
+
 [logging]
 level = "info"
 format = "pretty"
