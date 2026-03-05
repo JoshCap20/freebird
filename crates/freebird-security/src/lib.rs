@@ -6,6 +6,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod audit;
+pub mod auth;
 pub mod capability;
 pub mod egress;
 pub mod error;

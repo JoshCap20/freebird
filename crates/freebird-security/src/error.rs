@@ -76,6 +76,13 @@ pub enum SecurityError {
 
     #[error("failed to write audit log: {reason}")]
     AuditWriteFailed { reason: String },
+
+    // ── Session authentication ──────────────────────────────────
+    #[error("session key `{key_id}` has expired")]
+    SessionExpired { key_id: String },
+
+    #[error("invalid session key for `{key_id}`")]
+    InvalidSessionKey { key_id: String },
 }
 
 #[cfg(test)]
@@ -218,5 +225,27 @@ mod tests {
         assert_eq!(json, r#""high""#);
         let deserialized: Severity = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, severity);
+    }
+
+    #[test]
+    fn test_security_error_session_expired_display() {
+        let err = SecurityError::SessionExpired {
+            key_id: "freebird_a1b2c3d4e5f6".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "session key `freebird_a1b2c3d4e5f6` has expired"
+        );
+    }
+
+    #[test]
+    fn test_security_error_invalid_session_key_display() {
+        let err = SecurityError::InvalidSessionKey {
+            key_id: "freebird_a1b2c3d4e5f6".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "invalid session key for `freebird_a1b2c3d4e5f6`"
+        );
     }
 }
