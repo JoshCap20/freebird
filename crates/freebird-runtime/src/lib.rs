@@ -11,3 +11,4 @@ pub mod registry;
 pub mod router;
 pub mod session;
 pub mod shutdown;
+pub mod stream;
