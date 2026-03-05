@@ -264,7 +264,7 @@ impl ToolExecutor {
         result: CapabilityCheckResult,
     ) {
         if let Some(audit) = &self.audit {
-            let _ = audit
+            if let Err(e) = audit
                 .record(
                     session_id.as_str(),
                     AuditEventType::ToolInvocation {
@@ -272,7 +272,10 @@ impl ToolExecutor {
                         capability_check: result,
                     },
                 )
-                .await;
+                .await
+            {
+                tracing::error!(error = %e, "failed to write tool invocation audit event");
+            }
         }
     }
 
@@ -284,7 +287,7 @@ impl ToolExecutor {
         severity: Severity,
     ) {
         if let Some(audit) = &self.audit {
-            let _ = audit
+            if let Err(e) = audit
                 .record(
                     session_id.as_str(),
                     AuditEventType::PolicyViolation {
@@ -293,13 +296,16 @@ impl ToolExecutor {
                         severity,
                     },
                 )
-                .await;
+                .await
+            {
+                tracing::error!(error = %e, "failed to write policy violation audit event");
+            }
         }
     }
 
     async fn audit_injection_detected(&self, session_id: &SessionId, pattern: &str) {
         if let Some(audit) = &self.audit {
-            let _ = audit
+            if let Err(e) = audit
                 .record(
                     session_id.as_str(),
                     AuditEventType::InjectionDetected {
@@ -308,7 +314,10 @@ impl ToolExecutor {
                         severity: Severity::High,
                     },
                 )
-                .await;
+                .await
+            {
+                tracing::error!(error = %e, "failed to write injection detection audit event");
+            }
         }
     }
 }
