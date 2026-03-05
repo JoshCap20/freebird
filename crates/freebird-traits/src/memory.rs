@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::id::SessionId;
 use crate::provider::Message;
+use crate::tool::ToolOutcome;
 
 /// A complete conversation turn: user message + assistant responses + tool calls.
 ///
@@ -30,7 +31,7 @@ pub struct ToolInvocation {
     pub tool_name: String,
     pub input: serde_json::Value,
     pub output: Option<String>,
-    pub is_error: bool,
+    pub outcome: ToolOutcome,
     pub duration_ms: Option<u64>,
 }
 

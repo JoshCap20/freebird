@@ -23,7 +23,7 @@ use freebird_traits::provider::{
     CompletionRequest, CompletionResponse, ContentBlock, Message, ProviderError, Role, StopReason,
     StreamEvent, TokenUsage, ToolDefinition,
 };
-use freebird_traits::tool::{Tool, ToolContext, ToolOutput};
+use freebird_traits::tool::{Tool, ToolContext, ToolOutcome, ToolOutput};
 use freebird_types::config::{RuntimeConfig, ToolsConfig};
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -613,8 +613,8 @@ impl AgentRuntime {
             let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
             // Scan tool output for injection — BLOCK if detected
-            let (final_content, is_error) = match ScannedToolOutput::from_raw(&output.content) {
-                Ok(scanned) => (scanned.into_inner(), output.is_error),
+            let (final_content, outcome) = match ScannedToolOutput::from_raw(&output.content) {
+                Ok(scanned) => (scanned.into_inner(), output.outcome),
                 Err(e) => {
                     tracing::warn!(tool = %tool_name, "injection detected in tool output, blocking");
                     if let Some(audit) = &self.audit {
@@ -631,17 +631,19 @@ impl AgentRuntime {
                     }
                     (
                         "Tool output blocked: potential prompt injection detected".to_owned(),
-                        true,
+                        ToolOutcome::Error,
                     )
                 }
             };
+
+            let is_error = outcome == ToolOutcome::Error;
 
             current_turn.tool_invocations.push(ToolInvocation {
                 tool_use_id: tool_use_id.clone(),
                 tool_name,
                 input,
                 output: Some(final_content.clone()),
-                is_error,
+                outcome,
                 duration_ms: Some(duration_ms),
             });
 
@@ -807,7 +809,7 @@ impl AgentRuntime {
             }
             return ToolOutput {
                 content: format!("Error: tool `{tool_name}` not found"),
-                is_error: true,
+                outcome: ToolOutcome::Error,
                 metadata: None,
             };
         };
@@ -837,12 +839,12 @@ impl AgentRuntime {
             Ok(Ok(output)) => output,
             Ok(Err(e)) => ToolOutput {
                 content: format!("Error: {e}"),
-                is_error: true,
+                outcome: ToolOutcome::Error,
                 metadata: None,
             },
             Err(_) => ToolOutput {
                 content: format!("Error: tool `{tool_name}` timed out"),
-                is_error: true,
+                outcome: ToolOutcome::Error,
                 metadata: None,
             },
         }

@@ -41,7 +41,8 @@ use freebird_traits::provider::{
     ProviderFeature, ProviderInfo, Role, StopReason, StreamEvent, TokenUsage,
 };
 use freebird_traits::tool::{
-    Capability, RiskLevel, Tool, ToolContext, ToolError, ToolInfo, ToolOutput,
+    Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
+    ToolOutput,
 };
 use freebird_types::config::{RuntimeConfig, ToolsConfig};
 
@@ -280,7 +281,7 @@ impl MockTool {
                 input_schema: serde_json::json!({"type": "object"}),
                 required_capability: Capability::FileRead,
                 risk_level: RiskLevel::Low,
-                has_side_effects: false,
+                side_effects: SideEffects::None,
             },
             outputs: TokioMutex::new(VecDeque::from(outputs)),
         }
@@ -606,7 +607,7 @@ async fn test_streaming_tool_use_round() {
         "read_file",
         vec![Ok(ToolOutput {
             content: "hello".into(),
-            is_error: false,
+            outcome: ToolOutcome::Success,
             metadata: None,
         })],
     );
@@ -748,7 +749,7 @@ async fn test_streaming_multi_tool_rounds() {
         "tool_a",
         vec![Ok(ToolOutput {
             content: "result_a".into(),
-            is_error: false,
+            outcome: ToolOutcome::Success,
             metadata: None,
         })],
     );
@@ -756,7 +757,7 @@ async fn test_streaming_multi_tool_rounds() {
         "tool_b",
         vec![Ok(ToolOutput {
             content: "result_b".into(),
-            is_error: false,
+            outcome: ToolOutcome::Success,
             metadata: None,
         })],
     );
@@ -887,7 +888,7 @@ async fn test_streaming_multiple_tools_same_round() {
         "tool_a",
         vec![Ok(ToolOutput {
             content: "result_a".into(),
-            is_error: false,
+            outcome: ToolOutcome::Success,
             metadata: None,
         })],
     );
@@ -895,7 +896,7 @@ async fn test_streaming_multiple_tools_same_round() {
         "tool_b",
         vec![Ok(ToolOutput {
             content: "result_b".into(),
-            is_error: false,
+            outcome: ToolOutcome::Success,
             metadata: None,
         })],
     );
@@ -924,7 +925,7 @@ async fn test_streaming_max_tool_rounds_exceeded() {
         "tool_a",
         vec![Ok(ToolOutput {
             content: "result".into(),
-            is_error: false,
+            outcome: ToolOutcome::Success,
             metadata: None,
         })],
     );

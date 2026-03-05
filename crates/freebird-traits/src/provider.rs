@@ -96,6 +96,7 @@ pub enum ContentBlock {
     ToolResult {
         tool_use_id: String,
         content: String,
+        /// Kept as `bool` to match Anthropic API wire format (CLAUDE.md §23 exception).
         is_error: bool,
     },
     Image {
