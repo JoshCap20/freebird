@@ -850,3 +850,277 @@ async fn test_streaming_injection_audit_only() {
             .all(|e| !matches!(e, OutboundEvent::Error { .. }))
     );
 }
+
+#[tokio::test]
+async fn test_streaming_multiple_tools_same_round() {
+    // Stream returns two ToolUse events in a single round — both should be executed
+    // before re-streaming.
+    let factory: StreamFactory = Box::new(|| {
+        let events: Vec<Result<StreamEvent, ProviderError>> = vec![
+            Ok(StreamEvent::TextDelta("Using both tools".into())),
+            Ok(StreamEvent::ToolUse {
+                id: "call-1".into(),
+                name: "tool_a".into(),
+                input: serde_json::json!({}),
+            }),
+            Ok(StreamEvent::ToolUse {
+                id: "call-2".into(),
+                name: "tool_b".into(),
+                input: serde_json::json!({}),
+            }),
+            Ok(StreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                usage: TokenUsage::default(),
+            }),
+        ];
+        Ok(Box::pin(futures::stream::iter(events))
+            as Pin<
+                Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>,
+            >)
+    });
+
+    let provider = Arc::new(QueuedStreamProvider::new(vec![
+        factory,
+        text_stream("Both tools done"),
+    ]));
+    let tool_a = MockTool::new(
+        "tool_a",
+        vec![Ok(ToolOutput {
+            content: "result_a".into(),
+            is_error: false,
+            metadata: None,
+        })],
+    );
+    let tool_b = MockTool::new(
+        "tool_b",
+        vec![Ok(ToolOutput {
+            content: "result_b".into(),
+            is_error: false,
+            metadata: None,
+        })],
+    );
+    let (channel, inbound_tx, outbound_rx) = StreamingMockChannel::new();
+    let runtime = make_stream_runtime(channel, provider, vec![Box::new(tool_a), Box::new(tool_b)]);
+
+    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Use both").await;
+
+    // Round 1: StreamChunk("Using both tools") + StreamEnd (tool use, 2 tools executed)
+    // Round 2: StreamChunk("Both tools done") + StreamEnd
+    assert_eq!(stream_chunk_text(&events[0]), Some("Using both tools"));
+    assert!(is_stream_end(&events[1]));
+    assert_eq!(stream_chunk_text(&events[2]), Some("Both tools done"));
+    assert!(is_stream_end(&events[3]));
+}
+
+#[tokio::test]
+async fn test_streaming_max_tool_rounds_exceeded() {
+    // With max_tool_rounds = 1, the loop should exit after one tool round
+    // and report an error.
+    let provider = Arc::new(QueuedStreamProvider::new(vec![tool_use_stream(
+        "tool_a",
+        serde_json::json!({}),
+    )]));
+    let tool = MockTool::new(
+        "tool_a",
+        vec![Ok(ToolOutput {
+            content: "result".into(),
+            is_error: false,
+            metadata: None,
+        })],
+    );
+    let (channel, inbound_tx, outbound_rx) = StreamingMockChannel::new();
+
+    let runtime = AgentRuntime::new(
+        make_stream_registry(provider),
+        Box::new(channel),
+        vec![Box::new(tool)],
+        Box::new(InMemoryMemory::new()),
+        RuntimeConfig {
+            max_tool_rounds: 1,
+            ..default_config()
+        },
+        default_tools_config(),
+        None,
+    );
+
+    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Loop forever").await;
+
+    // Should get: StreamChunk + StreamEnd (tool round) + Error (max rounds)
+    assert!(
+        events
+            .iter()
+            .any(|e| { error_text(e).is_some_and(|t| t.contains("Maximum tool rounds")) })
+    );
+}
+
+#[tokio::test]
+async fn test_streaming_stop_sequence() {
+    // StopSequence should behave identically to EndTurn — StreamEnd, save conversation.
+    let factory: StreamFactory = Box::new(|| {
+        let events: Vec<Result<StreamEvent, ProviderError>> = vec![
+            Ok(StreamEvent::TextDelta("stopped early".into())),
+            Ok(StreamEvent::Done {
+                stop_reason: StopReason::StopSequence,
+                usage: TokenUsage::default(),
+            }),
+        ];
+        Ok(Box::pin(futures::stream::iter(events))
+            as Pin<
+                Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>,
+            >)
+    });
+
+    let memory = SharedMemory::new();
+    let provider = Arc::new(QueuedStreamProvider::new(vec![factory]));
+    let (channel, inbound_tx, outbound_rx) = StreamingMockChannel::new();
+
+    let runtime = AgentRuntime::new(
+        make_stream_registry(Arc::clone(&provider)),
+        Box::new(channel),
+        vec![],
+        Box::new(memory.clone()),
+        default_config(),
+        default_tools_config(),
+        None,
+    );
+
+    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+
+    // Should deliver text and send StreamEnd (same as EndTurn)
+    assert_eq!(stream_chunk_text(&events[0]), Some("stopped early"));
+    assert!(is_stream_end(&events[1]));
+
+    // Conversation should be persisted
+    let sessions = memory.list_sessions(10).await.unwrap();
+    assert_eq!(
+        sessions.len(),
+        1,
+        "conversation should be saved on StopSequence"
+    );
+}
+
+#[tokio::test]
+async fn test_non_streaming_provider_uses_complete_path() {
+    // Channel supports streaming, but provider does NOT advertise Streaming feature.
+    // Should use non-streaming complete() path.
+
+    struct NonStreamingProvider;
+
+    #[async_trait]
+    impl Provider for NonStreamingProvider {
+        fn info(&self) -> &ProviderInfo {
+            // Leak a static ref — fine in tests
+            static INFO: std::sync::OnceLock<ProviderInfo> = std::sync::OnceLock::new();
+            INFO.get_or_init(|| ProviderInfo {
+                id: ProviderId::from("no-stream-provider"),
+                display_name: "No Stream".into(),
+                supported_models: vec![],
+                // No ProviderFeature::Streaming
+                features: BTreeSet::from([ProviderFeature::ToolUse]),
+            })
+        }
+
+        async fn validate_credentials(&self) -> Result<(), ProviderError> {
+            Ok(())
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            Ok(CompletionResponse {
+                message: Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "non-streaming response".into(),
+                    }],
+                    timestamp: Utc::now(),
+                },
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+                model: ModelId::from("test-model"),
+            })
+        }
+
+        async fn stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<
+            Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>,
+            ProviderError,
+        > {
+            Err(ProviderError::NotConfigured)
+        }
+    }
+
+    let mut registry = ProviderRegistry::new();
+    let id = ProviderId::from("no-stream-provider");
+    registry.register(id.clone(), Box::new(NonStreamingProvider));
+    registry.set_failover_chain(vec![id]);
+
+    let (channel, inbound_tx, outbound_rx) = StreamingMockChannel::new();
+    let runtime = AgentRuntime::new(
+        registry,
+        Box::new(channel),
+        vec![],
+        Box::new(InMemoryMemory::new()),
+        RuntimeConfig {
+            default_provider: "no-stream-provider".into(),
+            ..default_config()
+        },
+        default_tools_config(),
+        None,
+    );
+
+    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+
+    // Should get a Message (not StreamChunks) — non-streaming path
+    assert_eq!(message_text(&events[0]), Some("non-streaming response"));
+    assert!(
+        events
+            .iter()
+            .all(|e| !matches!(e, OutboundEvent::StreamChunk { .. }))
+    );
+}
+
+#[tokio::test]
+async fn test_streaming_empty_done() {
+    // Stream sends Done immediately with no text deltas — should not panic.
+    let factory: StreamFactory = Box::new(|| {
+        let events: Vec<Result<StreamEvent, ProviderError>> = vec![Ok(StreamEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+        })];
+        Ok(Box::pin(futures::stream::iter(events))
+            as Pin<
+                Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>,
+            >)
+    });
+
+    let memory = SharedMemory::new();
+    let provider = Arc::new(QueuedStreamProvider::new(vec![factory]));
+    let (channel, inbound_tx, outbound_rx) = StreamingMockChannel::new();
+
+    let runtime = AgentRuntime::new(
+        make_stream_registry(Arc::clone(&provider)),
+        Box::new(channel),
+        vec![],
+        Box::new(memory.clone()),
+        default_config(),
+        default_tools_config(),
+        None,
+    );
+
+    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+
+    // StreamEnd should be sent even with no text deltas
+    assert!(is_stream_end(&events[0]));
+
+    // Conversation should still be saved (empty content assistant message)
+    let sessions = memory.list_sessions(10).await.unwrap();
+    assert_eq!(
+        sessions.len(),
+        1,
+        "conversation should be saved on empty Done"
+    );
+}
