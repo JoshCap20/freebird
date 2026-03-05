@@ -598,7 +598,7 @@ impl AgentRuntime {
         // Record intermediate assistant message in the turn for persistence
         current_turn
             .assistant_messages
-            .push(response.message.clone());
+            .push(assistant_message.clone());
 
         // Add assistant message with tool_use blocks to conversation
         messages.push(assistant_message.clone());
@@ -947,7 +947,7 @@ impl AgentRuntime {
                 StopReason::EndTurn | StopReason::StopSequence => {
                     let msg = accumulator.into_message();
                     self.audit_streaming_injection(session_id, &msg).await;
-                    current_turn.assistant_response = Some(msg);
+                    current_turn.assistant_messages.push(msg);
                     current_turn.completed_at = Some(Utc::now());
                     return current_turn;
                 }
@@ -962,7 +962,7 @@ impl AgentRuntime {
                         },
                     )
                     .await;
-                    current_turn.assistant_response = Some(msg);
+                    current_turn.assistant_messages.push(msg);
                     current_turn.completed_at = Some(Utc::now());
                     return current_turn;
                 }
