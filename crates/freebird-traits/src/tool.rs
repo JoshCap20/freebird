@@ -78,7 +78,7 @@ pub enum ToolOutcome {
 }
 
 /// Metadata describing a tool for both the runtime and the LLM.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolInfo {
     pub name: String,
     pub description: String,
@@ -93,6 +93,7 @@ pub struct ToolInfo {
 /// The runtime verifies capability grants and logs audit events before
 /// calling `Tool::execute`. This context provides sandbox boundaries and
 /// the granted capabilities for tools that need sub-capability checks.
+#[derive(Debug)]
 pub struct ToolContext<'a> {
     pub session_id: &'a SessionId,
     pub sandbox_root: &'a Path,
@@ -141,6 +142,12 @@ pub enum ToolError {
 
     #[error("security violation in tool `{tool}`: {reason}")]
     SecurityViolation { tool: String, reason: String },
+
+    #[error("consent denied for tool `{tool}`")]
+    ConsentDenied { tool: String },
+
+    #[error("consent expired for tool `{tool}`")]
+    ConsentExpired { tool: String },
 }
 
 #[cfg(test)]

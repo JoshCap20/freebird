@@ -12,10 +12,12 @@ macro_rules! define_id {
         pub struct $name(String);
 
         impl $name {
+            #[must_use]
             pub fn from_string(s: impl Into<String>) -> Self {
                 Self(s.into())
             }
 
+            #[must_use]
             pub fn as_str(&self) -> &str {
                 &self.0
             }

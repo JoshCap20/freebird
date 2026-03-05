@@ -83,4 +83,7 @@ pub enum MemoryError {
 
     #[error("storage is read-only")]
     ReadOnly,
+
+    #[error("integrity violation: {reason}")]
+    IntegrityViolation { reason: String },
 }
