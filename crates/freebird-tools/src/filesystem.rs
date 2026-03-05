@@ -12,7 +12,8 @@ use tokio::io::AsyncReadExt;
 
 use freebird_security::taint::TaintedToolInput;
 use freebird_traits::tool::{
-    Capability, RiskLevel, Tool, ToolContext, ToolError, ToolInfo, ToolOutput,
+    Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
+    ToolOutput,
 };
 
 /// Maximum file size `read_file` will return (10 MiB).
@@ -65,7 +66,7 @@ impl ReadFileTool {
                 }),
                 required_capability: Capability::FileRead,
                 risk_level: RiskLevel::Low,
-                has_side_effects: false,
+                side_effects: SideEffects::None,
             },
         }
     }
@@ -123,7 +124,7 @@ impl Tool for ReadFileTool {
 
         Ok(ToolOutput {
             content: file_content,
-            is_error: false,
+            outcome: ToolOutcome::Success,
             metadata: None,
         })
     }
@@ -161,7 +162,7 @@ impl WriteFileTool {
                 }),
                 required_capability: Capability::FileWrite,
                 risk_level: RiskLevel::Medium,
-                has_side_effects: true,
+                side_effects: SideEffects::HasSideEffects,
             },
         }
     }
@@ -234,7 +235,7 @@ impl Tool for WriteFileTool {
                 file_content.len(),
                 relative.display()
             ),
-            is_error: false,
+            outcome: ToolOutcome::Success,
             metadata: None,
         })
     }
@@ -268,7 +269,7 @@ impl ListDirectoryTool {
                 }),
                 required_capability: Capability::FileRead,
                 risk_level: RiskLevel::Low,
-                has_side_effects: false,
+                side_effects: SideEffects::None,
             },
         }
     }
@@ -334,7 +335,7 @@ impl Tool for ListDirectoryTool {
             } else {
                 entries.join("\n")
             },
-            is_error: false,
+            outcome: ToolOutcome::Success,
             metadata: None,
         })
     }
@@ -376,7 +377,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(output.content, "Hello, world!");
-        assert!(!output.is_error);
+        assert!(matches!(output.outcome, ToolOutcome::Success));
     }
 
     #[tokio::test]
@@ -521,7 +522,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(output.content, "");
-        assert!(!output.is_error);
+        assert!(matches!(output.outcome, ToolOutcome::Success));
     }
 
     #[tokio::test]
@@ -565,7 +566,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!output.is_error);
+        assert!(matches!(output.outcome, ToolOutcome::Success));
 
         let written = std::fs::read_to_string(tmp.path().join("new.txt")).unwrap();
         assert_eq!(written, "hello");
@@ -591,7 +592,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!output.is_error);
+        assert!(matches!(output.outcome, ToolOutcome::Success));
 
         let written = std::fs::read_to_string(tmp.path().join("existing.txt")).unwrap();
         assert_eq!(written, "new content");
@@ -769,7 +770,7 @@ mod tests {
             .execute(serde_json::json!({"path": "."}), &ctx)
             .await
             .unwrap();
-        assert!(!output.is_error);
+        assert!(matches!(output.outcome, ToolOutcome::Success));
 
         let lines: Vec<&str> = output.content.lines().collect();
         assert_eq!(lines.len(), 3);
@@ -864,7 +865,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(output.content, "(empty directory)");
-        assert!(!output.is_error);
+        assert!(matches!(output.outcome, ToolOutcome::Success));
     }
 
     #[tokio::test]
@@ -885,7 +886,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!output.is_error);
+        assert!(matches!(output.outcome, ToolOutcome::Success));
         assert!(output.content.contains("0 bytes"));
 
         let written = std::fs::read_to_string(tmp.path().join("empty.txt")).unwrap();
@@ -938,7 +939,7 @@ mod tests {
             .execute(serde_json::json!({"path": "big"}), &ctx)
             .await
             .unwrap();
-        assert!(!output.is_error);
+        assert!(matches!(output.outcome, ToolOutcome::Success));
 
         let lines: Vec<&str> = output.content.lines().collect();
         // MAX_DIR_ENTRIES entries + 1 truncation message

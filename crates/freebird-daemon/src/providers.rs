@@ -12,7 +12,7 @@ use freebird_providers::anthropic::{AnthropicConfig, AnthropicProvider};
 use freebird_runtime::registry::ProviderRegistry;
 use freebird_traits::id::ProviderId;
 use freebird_traits::provider::Provider;
-use freebird_types::config::{AppConfig, ProviderKind};
+use freebird_types::config::{AppConfig, ProviderConfig, ProviderKind};
 
 /// Build and populate the provider registry from configuration.
 ///
@@ -27,43 +27,18 @@ pub async fn build_provider_registry(config: &AppConfig) -> Result<ProviderRegis
     for provider_config in &config.providers {
         match provider_config.kind {
             ProviderKind::Anthropic => {
-                let api_key = std::env::var("ANTHROPIC_API_KEY")
-                    .map(SecretString::from)
-                    .map_err(|e| match e {
-                        std::env::VarError::NotPresent => anyhow::anyhow!(
-                            "ANTHROPIC_API_KEY environment variable not set \
-                             (required for provider `{}`)",
-                            provider_config.id,
-                        ),
-                        std::env::VarError::NotUnicode(_) => anyhow::anyhow!(
-                            "ANTHROPIC_API_KEY environment variable contains invalid UTF-8 \
-                             (required for provider `{}`)",
-                            provider_config.id,
-                        ),
-                    })?;
-
-                let anthropic_config = AnthropicConfig {
-                    base_url: provider_config.base_url.clone(),
-                    default_model: provider_config
-                        .default_model
-                        .as_ref()
-                        .map(|m| m.as_str().to_owned()),
-                };
-
-                let provider_id = provider_config.id.clone();
-                let provider = AnthropicProvider::new(api_key, anthropic_config)
-                    .with_context(|| format!("failed to create provider `{provider_id}`"))?;
-
-                provider.validate_credentials().await.with_context(|| {
-                    format!(
-                        "credential validation failed for provider `{}`",
-                        provider_config.id,
-                    )
-                })?;
-
-                tracing::info!(provider = %provider_config.id, "credentials validated");
-
-                registry.register(provider_config.id.clone(), Box::new(provider));
+                match build_anthropic_provider(provider_config).await {
+                    Ok(provider) => {
+                        registry.register(provider_config.id.clone(), Box::new(provider));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            provider = %provider_config.id,
+                            error = %e,
+                            "failed to initialize provider, skipping"
+                        );
+                    }
+                }
             }
             ProviderKind::OpenAi => {
                 tracing::warn!(
@@ -92,4 +67,43 @@ pub async fn build_provider_registry(config: &AppConfig) -> Result<ProviderRegis
     registry.set_failover_chain(failover_chain);
 
     Ok(registry)
+}
+
+/// Build a single Anthropic provider from config, loading credentials from env.
+async fn build_anthropic_provider(
+    provider_config: &ProviderConfig,
+) -> Result<AnthropicProvider> {
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .map(SecretString::from)
+        .map_err(|e| match e {
+            std::env::VarError::NotPresent => anyhow::anyhow!(
+                "ANTHROPIC_API_KEY environment variable not set"
+            ),
+            std::env::VarError::NotUnicode(_) => anyhow::anyhow!(
+                "ANTHROPIC_API_KEY contains invalid UTF-8"
+            ),
+        })?;
+
+    let anthropic_config = AnthropicConfig {
+        base_url: provider_config.base_url.clone(),
+        default_model: provider_config
+            .default_model
+            .as_ref()
+            .map(|m| m.as_str().to_owned()),
+    };
+
+    let provider_id = provider_config.id.clone();
+    let provider = AnthropicProvider::new(api_key, anthropic_config)
+        .with_context(|| format!("failed to create provider `{provider_id}`"))?;
+
+    match provider.validate_credentials().await {
+        Ok(()) => tracing::info!(provider = %provider_config.id, "credentials validated"),
+        Err(e) => tracing::warn!(
+            provider = %provider_config.id,
+            error = %e,
+            "credential validation failed — provider registered but may fail at request time"
+        ),
+    }
+
+    Ok(provider)
 }

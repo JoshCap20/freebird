@@ -349,6 +349,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "freebird-traits",
+ "freebird-types",
  "proptest",
  "serde",
  "serde_json",
@@ -369,6 +370,7 @@ dependencies = [
  "freebird-memory",
  "freebird-providers",
  "freebird-runtime",
+ "freebird-tools",
  "freebird-traits",
  "freebird-types",
  "home",

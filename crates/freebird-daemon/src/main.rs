@@ -102,8 +102,13 @@ async fn cmd_serve() -> Result<()> {
         .context("file memory init task panicked")?
         .context("failed to initialize file memory backend")?;
 
-    // 7. TOOLS (none initially)
-    let tools: Vec<Box<dyn freebird_traits::tool::Tool>> = vec![];
+    // 7. TOOLS
+    let sandbox_root = expand_tilde(&config.tools.sandbox_root)?;
+    tokio::fs::create_dir_all(&sandbox_root)
+        .await
+        .with_context(|| format!("failed to create sandbox directory `{}`", sandbox_root.display()))?;
+    let tools: Vec<Box<dyn freebird_traits::tool::Tool>> =
+        freebird_tools::filesystem::filesystem_tools(sandbox_root);
 
     // 8. SHUTDOWN COORDINATOR
     let shutdown = ShutdownCoordinator::new(Duration::from_secs(config.runtime.drain_timeout_secs));

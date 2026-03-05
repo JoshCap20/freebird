@@ -17,6 +17,7 @@ freebird-runtime = { workspace = true }
 freebird-providers = { workspace = true }
 freebird-channels = { workspace = true }
 freebird-memory = { workspace = true }
+freebird-tools = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
