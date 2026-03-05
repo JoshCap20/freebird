@@ -24,3 +24,5 @@ tokio-util = { workspace = true }
 
 [dev-dependencies]
 freebird-memory = { path = "../freebird-memory" }
+tempfile = { workspace = true }
+ring = { workspace = true }
