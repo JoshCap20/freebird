@@ -16,6 +16,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::SecurityError;
 
+/// Prefix for all key IDs, making them greppable in logs.
+const KEY_ID_PREFIX: &str = "freebird_";
+
+/// Number of hex characters from the hash used in the key ID.
+/// 12 hex chars = 48 bits, giving ~281 trillion unique IDs before collision.
+const KEY_ID_HASH_LEN: usize = 12;
+
+/// SHA-256 hash a raw key string and return the hex-encoded digest.
+///
+/// This is the single source of truth for key hashing. Used by generation,
+/// derivation, and verification to ensure consistent behavior.
+fn hash_raw_key(raw_key: &str) -> String {
+    hex::encode(digest::digest(&digest::SHA256, raw_key.as_bytes()))
+}
+
+/// Derive a key ID from a hex-encoded hash string.
+fn key_id_from_hash(hash: &str) -> String {
+    format!("{KEY_ID_PREFIX}{}", &hash[..KEY_ID_HASH_LEN])
+}
+
 /// A stored session credential. The raw key is never stored — only its hash.
 ///
 /// This is a serialization type for `~/.freebird/keys.json`. Fields are
@@ -27,6 +47,9 @@ use crate::error::SecurityError;
 /// - The runtime constructs `CapabilityGrant` at session creation by combining
 ///   the credential's capabilities + the runtime's configured sandbox root
 ///   + the credential's expiration
+///
+/// Use [`SessionCredential::validate()`] after deserializing from untrusted
+/// sources (e.g., `keys.json`) to verify structural invariants.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionCredential {
     /// Public identifier for this key (e.g., `freebird_a1b2c3d4e5f6`).
@@ -42,6 +65,39 @@ pub struct SessionCredential {
     pub capabilities: Vec<Capability>,
 }
 
+impl SessionCredential {
+    /// Validate structural invariants of a deserialized credential.
+    ///
+    /// Call this after loading credentials from `keys.json` or any untrusted
+    /// source. Credentials produced by [`generate_session_key()`] are always
+    /// valid by construction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SecurityError::InvalidCredential`] if:
+    /// - `key_hash` is not exactly 64 hex characters
+    /// - `key_id` does not match the expected format derived from `key_hash`
+    pub fn validate(&self) -> Result<(), SecurityError> {
+        if self.key_hash.len() != 64 || !self.key_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(SecurityError::InvalidCredential {
+                reason: "key_hash must be exactly 64 hex characters".into(),
+            });
+        }
+
+        let expected_id = key_id_from_hash(&self.key_hash);
+        if self.key_id != expected_id {
+            return Err(SecurityError::InvalidCredential {
+                reason: format!(
+                    "key_id `{}` does not match hash (expected `{expected_id}`)",
+                    self.key_id
+                ),
+            });
+        }
+
+        Ok(())
+    }
+}
+
 /// Generate a new session key.
 ///
 /// Returns a tuple of:
@@ -51,27 +107,43 @@ pub struct SessionCredential {
 /// The raw key is a 64-character hex string encoding 32 random bytes (256 bits
 /// of entropy). The credential stores the SHA-256 hash of this hex string.
 ///
+/// # Errors
+///
+/// Returns [`SecurityError::InvalidTtl`] if the TTL is too large for chrono
+/// to represent (roughly > 292 billion years). A security-critical module
+/// must never silently degrade to no-expiration.
+///
 /// # Panics
 ///
 /// Panics if the system RNG fails (indicates a broken OS — no recovery possible).
 /// This is the only `expect()` in the codebase, matching `ring`'s own guidance.
 #[allow(clippy::expect_used)]
-#[must_use]
 pub fn generate_session_key(
     capabilities: Vec<Capability>,
     ttl: Option<Duration>,
-) -> (SecretString, SessionCredential) {
+) -> Result<(SecretString, SessionCredential), SecurityError> {
     let rng = SystemRandom::new();
     let mut key_bytes = [0u8; 32];
     rng.fill(&mut key_bytes)
         .expect("system RNG failed — OS entropy source is broken");
 
+    // Zeroize raw bytes after encoding — defense-in-depth against stack exposure
     let raw_key = hex::encode(key_bytes);
-    let key_hash = hex::encode(digest::digest(&digest::SHA256, raw_key.as_bytes()));
-    let key_id = format!("freebird_{}", &key_hash[..12]);
+    key_bytes.fill(0);
+
+    let key_hash = hash_raw_key(&raw_key);
+    let key_id = key_id_from_hash(&key_hash);
 
     let now = Utc::now();
-    let expires_at = ttl.and_then(|d| chrono::Duration::from_std(d).ok().map(|cd| now + cd));
+    let expires_at = match ttl {
+        Some(d) => {
+            let cd = chrono::Duration::from_std(d).map_err(|_| SecurityError::InvalidTtl {
+                seconds: d.as_secs(),
+            })?;
+            Some(now + cd)
+        }
+        None => None,
+    };
 
     let credential = SessionCredential {
         key_id,
@@ -81,7 +153,7 @@ pub fn generate_session_key(
         capabilities,
     };
 
-    (SecretString::from(raw_key), credential)
+    Ok((SecretString::from(raw_key), credential))
 }
 
 /// Derive a `key_id` from a raw key without needing the stored credential.
@@ -94,8 +166,8 @@ pub fn generate_session_key(
 /// 4. Router calls `verify_session_key(raw_key, &credential)`
 #[must_use]
 pub fn derive_key_id(raw_key: &str) -> String {
-    let hash = hex::encode(digest::digest(&digest::SHA256, raw_key.as_bytes()));
-    format!("freebird_{}", &hash[..12])
+    let hash = hash_raw_key(raw_key);
+    key_id_from_hash(&hash)
 }
 
 /// Verify a session key against a stored credential.
@@ -127,11 +199,11 @@ pub fn verify_session_key<'a>(
     }
 
     // 2. Constant-time comparison via HMAC verification.
-    //    Hash the provided key, then use HMAC to compare the two hash strings.
-    //    ring::hmac::verify is inherently constant-time, preventing timing
-    //    side-channel attacks. We HMAC the stored hash to produce a tag, then
-    //    verify that HMAC(provided_hash) produces the same tag.
-    let provided_hash = hex::encode(digest::digest(&digest::SHA256, raw_key.as_bytes()));
+    //    We use HMAC purely as a constant-time equality check — the key is
+    //    static because secrecy of the HMAC key is irrelevant here. What
+    //    matters is that ring::hmac::verify runs in constant time, preventing
+    //    timing side-channel attacks on the hash comparison.
+    let provided_hash = hash_raw_key(raw_key);
     let verify_key = hmac::Key::new(hmac::HMAC_SHA256, b"freebird-session-key-verify");
     let tag = hmac::sign(&verify_key, stored.key_hash.as_bytes());
 
@@ -150,25 +222,33 @@ mod tests {
     use super::*;
     use secrecy::ExposeSecret;
 
+    /// Helper: generate a key and unwrap — tests that don't exercise the
+    /// error path of generation can use this to reduce boilerplate.
+    fn make_key(caps: Vec<Capability>, ttl: Option<Duration>) -> (SecretString, SessionCredential) {
+        generate_session_key(caps, ttl).unwrap()
+    }
+
     // ── Key Generation ──────────────────────────────────────────
 
     #[test]
     fn test_generate_produces_valid_credential() {
         let caps = vec![Capability::FileRead];
-        let (_, cred) = generate_session_key(caps, None);
+        let (_, cred) = make_key(caps, None);
 
-        assert!(cred.key_id.starts_with("freebird_"));
-        assert_eq!(cred.key_id.len(), "freebird_".len() + 12);
+        assert!(cred.key_id.starts_with(KEY_ID_PREFIX));
+        assert_eq!(cred.key_id.len(), KEY_ID_PREFIX.len() + KEY_ID_HASH_LEN);
         assert_eq!(cred.key_hash.len(), 64);
         assert!(cred.key_hash.chars().all(|c| c.is_ascii_hexdigit()));
         // issued_at should be very recent
         let elapsed = Utc::now() - cred.issued_at;
         assert!(elapsed.num_seconds() < 2);
+        // Generated credentials are always structurally valid
+        assert!(cred.validate().is_ok());
     }
 
     #[test]
     fn test_generated_key_is_64_hex_chars() {
-        let (raw_key, _) = generate_session_key(vec![], None);
+        let (raw_key, _) = make_key(vec![], None);
         let exposed = raw_key.expose_secret();
         assert_eq!(exposed.len(), 64);
         assert!(exposed.chars().all(|c| c.is_ascii_hexdigit()));
@@ -176,14 +256,14 @@ mod tests {
 
     #[test]
     fn test_two_keys_are_different() {
-        let (key1, _) = generate_session_key(vec![], None);
-        let (key2, _) = generate_session_key(vec![], None);
+        let (key1, _) = make_key(vec![], None);
+        let (key2, _) = make_key(vec![], None);
         assert_ne!(key1.expose_secret(), key2.expose_secret());
     }
 
     #[test]
     fn test_ttl_none_produces_no_expiration() {
-        let (_, cred) = generate_session_key(vec![], None);
+        let (_, cred) = make_key(vec![], None);
         assert!(cred.expires_at.is_none());
     }
 
@@ -191,7 +271,7 @@ mod tests {
     fn test_ttl_sets_correct_expiration() {
         let ttl = Duration::from_secs(3600); // 1 hour
         let before = Utc::now();
-        let (_, cred) = generate_session_key(vec![], Some(ttl));
+        let (_, cred) = make_key(vec![], Some(ttl));
         let after = Utc::now();
 
         let expires = cred.expires_at.unwrap();
@@ -201,9 +281,21 @@ mod tests {
     }
 
     #[test]
+    fn test_ttl_overflow_returns_error() {
+        let result = generate_session_key(vec![], Some(Duration::MAX));
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SecurityError::InvalidTtl { seconds } => {
+                assert_eq!(seconds, Duration::MAX.as_secs());
+            }
+            other => panic!("expected InvalidTtl, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_capabilities_stored_in_credential() {
         let caps = vec![Capability::FileRead, Capability::ShellExecute];
-        let (_, cred) = generate_session_key(caps.clone(), None);
+        let (_, cred) = make_key(caps.clone(), None);
         assert_eq!(cred.capabilities, caps);
     }
 
@@ -212,7 +304,7 @@ mod tests {
     #[test]
     fn test_valid_key_verifies_successfully() {
         let caps = vec![Capability::FileRead, Capability::FileWrite];
-        let (raw_key, cred) = generate_session_key(caps.clone(), None);
+        let (raw_key, cred) = make_key(caps.clone(), None);
 
         let result = verify_session_key(raw_key.expose_secret(), &cred);
         assert!(result.is_ok());
@@ -221,7 +313,7 @@ mod tests {
 
     #[test]
     fn test_wrong_key_returns_invalid() {
-        let (_, cred) = generate_session_key(vec![], None);
+        let (_, cred) = make_key(vec![], None);
         let wrong_key = "a".repeat(64);
 
         let result = verify_session_key(&wrong_key, &cred);
@@ -236,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_expired_key_returns_expired() {
-        let (raw_key, mut cred) = generate_session_key(vec![], None);
+        let (raw_key, mut cred) = make_key(vec![], None);
         // Manually set expiration to the past
         cred.expires_at = Some(Utc::now() - chrono::Duration::seconds(60));
 
@@ -252,14 +344,14 @@ mod tests {
 
     #[test]
     fn test_no_expiration_never_expires() {
-        let (raw_key, cred) = generate_session_key(vec![], None);
+        let (raw_key, cred) = make_key(vec![], None);
         assert!(cred.expires_at.is_none());
         assert!(verify_session_key(raw_key.expose_secret(), &cred).is_ok());
     }
 
     #[test]
     fn test_key_just_before_expiry_succeeds() {
-        let (raw_key, mut cred) = generate_session_key(vec![], None);
+        let (raw_key, mut cred) = make_key(vec![], None);
         // Set expiration to 10 seconds from now — well within range
         cred.expires_at = Some(Utc::now() + chrono::Duration::seconds(10));
         assert!(verify_session_key(raw_key.expose_secret(), &cred).is_ok());
@@ -267,7 +359,7 @@ mod tests {
 
     #[test]
     fn test_key_just_after_expiry_fails() {
-        let (raw_key, mut cred) = generate_session_key(vec![], None);
+        let (raw_key, mut cred) = make_key(vec![], None);
         // Set expiration to 1 second in the past
         cred.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
 
@@ -279,15 +371,15 @@ mod tests {
 
     #[test]
     fn test_derive_key_id_matches_generated() {
-        let (raw_key, cred) = generate_session_key(vec![], None);
+        let (raw_key, cred) = make_key(vec![], None);
         let derived = derive_key_id(raw_key.expose_secret());
         assert_eq!(derived, cred.key_id);
     }
 
     #[test]
     fn test_derive_key_id_different_keys_different_ids() {
-        let (key1, _) = generate_session_key(vec![], None);
-        let (key2, _) = generate_session_key(vec![], None);
+        let (key1, _) = make_key(vec![], None);
+        let (key2, _) = make_key(vec![], None);
         let id1 = derive_key_id(key1.expose_secret());
         let id2 = derive_key_id(key2.expose_secret());
         assert_ne!(id1, id2);
@@ -297,7 +389,7 @@ mod tests {
 
     #[test]
     fn test_raw_key_not_in_credential_debug() {
-        let (raw_key, cred) = generate_session_key(vec![], None);
+        let (raw_key, cred) = make_key(vec![], None);
         let debug_output = format!("{cred:?}");
         assert!(
             !debug_output.contains(raw_key.expose_secret()),
@@ -307,13 +399,51 @@ mod tests {
 
     #[test]
     fn test_key_id_does_not_reveal_full_hash() {
-        let (_, cred) = generate_session_key(vec![], None);
+        let (_, cred) = make_key(vec![], None);
         // key_id = "freebird_" + 12 hex chars = 21 chars total
         // key_hash = 64 hex chars
         assert!(cred.key_id.len() < cred.key_hash.len());
-        let suffix = &cred.key_id["freebird_".len()..];
-        assert_eq!(suffix.len(), 12);
+        let suffix = &cred.key_id[KEY_ID_PREFIX.len()..];
+        assert_eq!(suffix.len(), KEY_ID_HASH_LEN);
         assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ── Credential Validation ───────────────────────────────────
+
+    #[test]
+    fn test_validate_rejects_short_hash() {
+        let (_, mut cred) = make_key(vec![], None);
+        cred.key_hash = "abcd".into();
+        assert!(matches!(
+            cred.validate(),
+            Err(SecurityError::InvalidCredential { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validate_rejects_non_hex_hash() {
+        let (_, mut cred) = make_key(vec![], None);
+        cred.key_hash = "g".repeat(64);
+        assert!(matches!(
+            cred.validate(),
+            Err(SecurityError::InvalidCredential { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validate_rejects_mismatched_key_id() {
+        let (_, mut cred) = make_key(vec![], None);
+        cred.key_id = "freebird_000000000000".into();
+        assert!(matches!(
+            cred.validate(),
+            Err(SecurityError::InvalidCredential { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validate_accepts_valid_credential() {
+        let (_, cred) = make_key(vec![Capability::FileRead], None);
+        assert!(cred.validate().is_ok());
     }
 
     // ── Serde Roundtrip ─────────────────────────────────────────
@@ -321,11 +451,12 @@ mod tests {
     #[test]
     fn test_credential_serde_roundtrip() {
         let caps = vec![Capability::FileRead, Capability::ShellExecute];
-        let (_, cred) = generate_session_key(caps, Some(Duration::from_secs(86400)));
+        let (_, cred) = make_key(caps, Some(Duration::from_secs(86400)));
 
         let json = serde_json::to_string_pretty(&cred).unwrap();
         let deserialized: SessionCredential = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, cred);
+        assert!(deserialized.validate().is_ok());
     }
 
     // ── Property-Based Test ─────────────────────────────────────
@@ -353,7 +484,7 @@ mod tests {
             fn test_generate_then_verify_always_succeeds(
                 caps in proptest::collection::vec(arb_capability(), 0..8),
             ) {
-                let (raw_key, cred) = generate_session_key(caps, None);
+                let (raw_key, cred) = make_key(caps, None);
                 let result = verify_session_key(raw_key.expose_secret(), &cred);
                 prop_assert!(result.is_ok());
             }
