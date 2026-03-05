@@ -400,7 +400,7 @@ impl AgentRuntime {
 
         let mut current_turn = Turn {
             user_message,
-            assistant_response: None,
+            assistant_messages: Vec::new(),
             tool_invocations: Vec::new(),
             started_at: Utc::now(),
             completed_at: None,
@@ -525,6 +525,11 @@ impl AgentRuntime {
             })
             .collect();
 
+        // Record intermediate assistant message in the turn for persistence
+        current_turn
+            .assistant_messages
+            .push(response.message.clone());
+
         // Add assistant message with tool_use blocks to conversation
         messages.push(response.message.clone());
 
@@ -604,7 +609,9 @@ impl AgentRuntime {
         // only tool-use blocks with no text, or genuinely empty content.
         if response_text.is_empty() {
             tracing::warn!(%session_id, "model returned empty text response, skipping delivery");
-            current_turn.assistant_response = Some(response.message.clone());
+            current_turn
+                .assistant_messages
+                .push(response.message.clone());
             current_turn.completed_at = Some(Utc::now());
             return;
         }
@@ -619,7 +626,9 @@ impl AgentRuntime {
                     })
                     .await;
 
-                current_turn.assistant_response = Some(response.message.clone());
+                current_turn
+                    .assistant_messages
+                    .push(response.message.clone());
                 current_turn.completed_at = Some(Utc::now());
             }
             Err(e) => {
@@ -664,7 +673,9 @@ impl AgentRuntime {
                     })
                     .await;
 
-                current_turn.assistant_response = Some(response.message.clone());
+                current_turn
+                    .assistant_messages
+                    .push(response.message.clone());
                 current_turn.completed_at = Some(Utc::now());
             }
             Err(e) => {

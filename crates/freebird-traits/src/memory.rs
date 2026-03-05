@@ -7,12 +7,16 @@ use serde::{Deserialize, Serialize};
 use crate::id::SessionId;
 use crate::provider::Message;
 
-/// A complete conversation turn: user message + assistant response + tool calls.
+/// A complete conversation turn: user message + assistant responses + tool calls.
+///
+/// `assistant_messages` stores all assistant messages in order: intermediate
+/// `ToolUse` responses followed by the final text response. Empty when the
+/// turn is still in progress.
 #[allow(clippy::derive_partial_eq_without_eq)] // serde_json::Value does not impl Eq
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Turn {
     pub user_message: Message,
-    pub assistant_response: Option<Message>,
+    pub assistant_messages: Vec<Message>,
     pub tool_invocations: Vec<ToolInvocation>,
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
