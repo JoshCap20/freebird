@@ -437,8 +437,8 @@ fn text_response_factory(text: &str) -> ResponseFactory {
 
 fn default_config() -> RuntimeConfig {
     RuntimeConfig {
-        default_model: "test-model".into(),
-        default_provider: "test-stream-provider".into(),
+        default_model: ModelId::from("test-model"),
+        default_provider: ProviderId::from("test-stream-provider"),
         system_prompt: None,
         max_output_tokens: 1024,
         max_tool_rounds: 10,

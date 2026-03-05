@@ -17,7 +17,7 @@ use freebird_security::taint::Tainted;
 use freebird_traits::channel::{
     Channel, ChannelError, ChannelFeature, InboundEvent, OutboundEvent,
 };
-use freebird_traits::id::{ModelId, SessionId};
+use freebird_traits::id::SessionId;
 use freebird_traits::memory::{Conversation, Memory, MemoryError, ToolInvocation, Turn};
 use freebird_traits::provider::{
     CompletionRequest, CompletionResponse, ContentBlock, Message, ProviderError, Role, StopReason,
@@ -548,7 +548,7 @@ impl AgentRuntime {
         tool_definitions: &[ToolDefinition],
     ) -> CompletionRequest {
         CompletionRequest {
-            model: ModelId::from(conversation.model_id.as_str()),
+            model: conversation.model_id.clone(),
             system_prompt: conversation.system_prompt.clone(),
             messages: messages.to_vec(),
             tools: tool_definitions.to_vec(),

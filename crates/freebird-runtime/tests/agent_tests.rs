@@ -14,7 +14,7 @@ use std::time::Duration;
 use freebird_runtime::agent::AgentRuntime;
 use freebird_runtime::registry::ProviderRegistry;
 use freebird_traits::channel::InboundEvent;
-use freebird_traits::id::SessionId;
+use freebird_traits::id::{ModelId, ProviderId, SessionId};
 use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary};
 use freebird_types::config::{RuntimeConfig, ToolsConfig};
 use tokio_util::sync::CancellationToken;
@@ -53,8 +53,8 @@ fn make_runtime(channel: MockChannel) -> AgentRuntime {
         vec![],
         Box::new(NoopMemory),
         RuntimeConfig {
-            default_model: "test-model".into(),
-            default_provider: "test-provider".into(),
+            default_model: ModelId::from("test-model"),
+            default_provider: ProviderId::from("test-provider"),
             system_prompt: None,
             max_output_tokens: 1024,
             max_tool_rounds: 10,

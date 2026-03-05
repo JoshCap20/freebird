@@ -425,8 +425,8 @@ fn error_response() -> ResponseFactory {
 
 fn default_config() -> RuntimeConfig {
     RuntimeConfig {
-        default_model: "test-model".into(),
-        default_provider: "test-provider".into(),
+        default_model: ModelId::from("test-model"),
+        default_provider: ProviderId::from("test-provider"),
         system_prompt: None,
         max_output_tokens: 1024,
         max_tool_rounds: 10,
@@ -1293,8 +1293,8 @@ async fn test_continuing_session_includes_history_in_request() {
         }],
         created_at: Utc::now(),
         updated_at: Utc::now(),
-        model_id: "test-model".into(),
-        provider_id: "test-provider".into(),
+        model_id: ModelId::from("test-model"),
+        provider_id: ProviderId::from("test-provider"),
     };
 
     let provider = Arc::new(RequestCapturingProvider::new(vec![text_response(
@@ -1367,8 +1367,8 @@ async fn test_new_conversation_uses_config_values() {
     let memory = Arc::new(InMemoryMemory::new());
 
     let config = RuntimeConfig {
-        default_model: "custom-model-v2".into(),
-        default_provider: "test-provider".into(),
+        default_model: ModelId::from("custom-model-v2"),
+        default_provider: ProviderId::from("test-provider"),
         system_prompt: Some("You are a custom bot.".into()),
         max_output_tokens: 2048,
         max_tool_rounds: 5,
@@ -1405,7 +1405,7 @@ async fn test_new_conversation_uses_config_values() {
     assert_eq!(sessions.len(), 1);
 
     let conv = memory.load(&sessions[0].session_id).await.unwrap().unwrap();
-    assert_eq!(conv.model_id, "custom-model-v2");
-    assert_eq!(conv.provider_id, "test-provider");
+    assert_eq!(conv.model_id.as_str(), "custom-model-v2");
+    assert_eq!(conv.provider_id.as_str(), "test-provider");
     assert_eq!(conv.system_prompt.as_deref(), Some("You are a custom bot."));
 }

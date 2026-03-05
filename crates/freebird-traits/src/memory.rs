@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::id::SessionId;
+use crate::id::{ModelId, ProviderId, SessionId};
 use crate::provider::Message;
 use crate::tool::ToolOutcome;
 
@@ -44,8 +44,8 @@ pub struct Conversation {
     pub turns: Vec<Turn>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    pub model_id: String,
-    pub provider_id: String,
+    pub model_id: ModelId,
+    pub provider_id: ProviderId,
 }
 
 /// Summary of a stored session for listing/search results.
@@ -55,7 +55,7 @@ pub struct SessionSummary {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub turn_count: usize,
-    pub model_id: String,
+    pub model_id: ModelId,
     pub preview: String,
 }
 

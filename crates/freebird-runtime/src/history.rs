@@ -128,7 +128,7 @@ fn reconstruct_tool_results(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use freebird_traits::id::SessionId;
+    use freebird_traits::id::{ModelId, ProviderId, SessionId};
     use freebird_traits::memory::ToolInvocation;
 
     // -- Test helpers --
@@ -213,8 +213,8 @@ mod tests {
             turns,
             created_at: Utc::now(),
             updated_at: Utc::now(),
-            model_id: "test-model".into(),
-            provider_id: "test-provider".into(),
+            model_id: ModelId::from("test-model"),
+            provider_id: ProviderId::from("test-provider"),
         }
     }
 
