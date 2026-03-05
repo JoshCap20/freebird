@@ -1097,7 +1097,7 @@ async fn test_model_output_injection_blocks_delivery() {
     let conv = memory.load(&sessions[0].session_id).await.unwrap().unwrap();
     let last_turn = conv.turns.last().expect("should have a turn");
     assert!(
-        last_turn.assistant_response.is_none(),
+        last_turn.assistant_messages.is_empty(),
         "tainted model response should NOT be saved to memory"
     );
 }
@@ -1140,7 +1140,7 @@ async fn test_truncated_response_injection_blocks_delivery() {
     let conv = memory.load(&sessions[0].session_id).await.unwrap().unwrap();
     let last_turn = conv.turns.last().expect("should have a turn");
     assert!(
-        last_turn.assistant_response.is_none(),
+        last_turn.assistant_messages.is_empty(),
         "tainted truncated response should NOT be saved to memory"
     );
 }
@@ -1279,13 +1279,13 @@ async fn test_continuing_session_includes_history_in_request() {
                 }],
                 timestamp: Utc::now(),
             },
-            assistant_response: Some(Message {
+            assistant_messages: vec![Message {
                 role: Role::Assistant,
                 content: vec![ContentBlock::Text {
                     text: "Previous answer".into(),
                 }],
                 timestamp: Utc::now(),
-            }),
+            }],
             tool_invocations: vec![],
             started_at: Utc::now(),
             completed_at: Some(Utc::now()),

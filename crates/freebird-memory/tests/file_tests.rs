@@ -374,13 +374,13 @@ async fn test_search_finds_assistant_response() {
                 }],
                 timestamp: now,
             },
-            assistant_response: Some(Message {
+            assistant_messages: vec![Message {
                 role: Role::Assistant,
                 content: vec![ContentBlock::Text {
                     text: "specific phrase here".to_string(),
                 }],
                 timestamp: now,
-            }),
+            }],
             tool_invocations: vec![],
             started_at: now,
             completed_at: Some(now),
@@ -511,7 +511,7 @@ async fn test_summary_turn_count() {
             }],
             timestamp: now,
         },
-        assistant_response: None,
+        assistant_messages: vec![],
         tool_invocations: vec![],
         started_at: now,
         completed_at: Some(now),

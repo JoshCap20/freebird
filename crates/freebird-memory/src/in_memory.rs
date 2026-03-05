@@ -130,9 +130,9 @@ fn conversation_contains(conv: &Conversation, query_lower: &str) -> bool {
     conv.turns.iter().any(|turn| {
         message_contains(&turn.user_message, query_lower)
             || turn
-                .assistant_response
-                .as_ref()
-                .is_some_and(|msg| message_contains(msg, query_lower))
+                .assistant_messages
+                .iter()
+                .any(|msg| message_contains(msg, query_lower))
     })
 }
 
