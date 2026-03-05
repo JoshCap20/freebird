@@ -290,6 +290,11 @@ async fn handle_connection(
 }
 
 /// Convert an `OutboundEvent` into a (`recipient_id`, `ServerMessage`) pair.
+///
+/// Note: `ServerMessage::CommandResponse` has no corresponding `OutboundEvent`
+/// variant. Command responses currently route through `OutboundEvent::Message`.
+/// If distinct client-side rendering is needed, add a `CommandResponse` variant
+/// to `OutboundEvent` in `freebird-traits`.
 fn outbound_to_server_message(event: OutboundEvent) -> (String, ServerMessage) {
     match event {
         OutboundEvent::Message { text, recipient_id } => {

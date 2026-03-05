@@ -1,7 +1,9 @@
 //! Typed configuration structs, loaded from TOML/env via figment.
 
-use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
 
 use freebird_traits::tool::RiskLevel;
 
@@ -15,6 +17,28 @@ pub struct AppConfig {
     pub memory: MemoryConfig,
     pub security: SecurityConfig,
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub daemon: DaemonConfig,
+}
+
+/// Daemon TCP listener configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonConfig {
+    /// Bind address for the TCP listener (parsed at deserialization per §3.3).
+    pub host: IpAddr,
+    /// Port for the TCP listener. Use `0` to let the OS assign an ephemeral
+    /// port (useful in tests; the actual port is available via
+    /// `TcpListener::local_addr` after binding).
+    pub port: u16,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            port: 7531,
+        }
+    }
 }
 
 /// Runtime behavior configuration.
@@ -144,6 +168,7 @@ pub struct LoggingConfig {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
 
     /// Build a minimal valid TOML config with customizable sections.
     ///
@@ -174,6 +199,10 @@ format = "pretty""#,
             |(_, v)| v,
         );
 
+        let daemon = overrides.iter().find(|(k, _)| *k == "daemon");
+
+        let daemon_section = daemon.map_or(String::new(), |(_, v)| format!("\n[daemon]\n{v}\n"));
+
         format!(
             r#"
 [runtime]
@@ -196,7 +225,7 @@ kind = "file"
 
 [security]
 {security}
-
+{daemon_section}
 [logging]
 {logging}
 "#
@@ -382,5 +411,52 @@ drain_timeout_secs = 1"#,
             result.is_err(),
             "invalid log format should fail deserialization"
         );
+    }
+
+    // ── Daemon config tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_daemon_config_defaults_when_absent() {
+        let toml_str = config_toml(&[]);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(config.daemon.host, IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_eq!(config.daemon.port, 7531);
+    }
+
+    #[test]
+    fn test_daemon_config_explicit_values() {
+        let toml_str = config_toml(&[("daemon", "host = \"0.0.0.0\"\nport = 9000")]);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(config.daemon.host, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(config.daemon.port, 9000);
+    }
+
+    #[test]
+    fn test_daemon_config_from_default_toml() {
+        let toml_str = include_str!("../../../config/default.toml");
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.daemon.host, IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_eq!(config.daemon.port, 7531);
+    }
+
+    #[test]
+    fn test_daemon_config_invalid_host_errors() {
+        let toml_str = config_toml(&[("daemon", "host = \"not-an-ip\"\nport = 7531")]);
+        let result = toml::from_str::<AppConfig>(&toml_str);
+        assert!(
+            result.is_err(),
+            "invalid IP address should fail deserialization"
+        );
+    }
+
+    #[test]
+    fn test_daemon_config_serde_roundtrip() {
+        let daemon = DaemonConfig {
+            host: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            port: 8080,
+        };
+        let json = serde_json::to_string(&daemon).unwrap();
+        let back: DaemonConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(daemon, back);
     }
 }

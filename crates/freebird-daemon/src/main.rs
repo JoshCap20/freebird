@@ -65,6 +65,8 @@ async fn main() -> Result<()> {
 /// `freebird serve` — start daemon with TCP channel.
 async fn cmd_serve() -> Result<()> {
     // 1. LOGGING — before anything else, so config errors are visible.
+    // Intentional silent fallback: if RUST_LOG is absent or unparseable, default
+    // to "info". We can't log the parse error because tracing isn't initialized yet.
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
@@ -82,8 +84,10 @@ async fn cmd_serve() -> Result<()> {
     let registry = providers::build_provider_registry(&config).await?;
 
     // 5. CHANNEL — TcpChannel from daemon config.
-    let channel: Box<dyn freebird_traits::channel::Channel> =
-        Box::new(TcpChannel::new(&config.daemon.host, config.daemon.port));
+    let channel: Box<dyn freebird_traits::channel::Channel> = Box::new(TcpChannel::new(
+        config.daemon.host.to_string(),
+        config.daemon.port,
+    ));
 
     // 6. MEMORY
     let memory_dir = expand_tilde(
@@ -353,7 +357,10 @@ format = "pretty"
     #[test]
     fn test_daemon_config_defaults_used_when_absent() {
         let config = valid_config();
-        assert_eq!(config.daemon.host, "127.0.0.1");
+        assert_eq!(
+            config.daemon.host,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
         assert_eq!(config.daemon.port, 7531);
     }
 }
