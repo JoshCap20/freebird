@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use freebird_traits::id::SessionId;
+use freebird_traits::id::{ModelId, ProviderId, SessionId};
 use freebird_traits::memory::{Conversation, Turn};
 use freebird_traits::provider::{ContentBlock, Message, Role};
 
@@ -33,7 +33,7 @@ pub fn make_conversation(
         }],
         created_at: updated_at,
         updated_at,
-        model_id: "test-model".to_string(),
-        provider_id: "test-provider".to_string(),
+        model_id: ModelId::from("test-model"),
+        provider_id: ProviderId::from("test-provider"),
     }
 }

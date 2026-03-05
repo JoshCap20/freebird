@@ -14,6 +14,17 @@ use freebird_traits::tool::Capability;
 
 use crate::error::SecurityError;
 
+/// Raw deserialization target for `CapabilityGrant`.
+///
+/// Used by `TryFrom` to enforce post-deserialization validation:
+/// the `sandbox_root` must exist and be canonicalizable.
+#[derive(Deserialize)]
+struct RawCapabilityGrant {
+    capabilities: BTreeSet<Capability>,
+    sandbox_root: PathBuf,
+    expires_at: Option<DateTime<Utc>>,
+}
+
 /// A scoped, optionally time-limited set of capabilities bound to a sandbox root.
 ///
 /// Invariants (enforced by construction):
@@ -26,11 +37,37 @@ use crate::error::SecurityError;
 /// Uses `BTreeSet` (not `HashSet`) for deterministic serialization order.
 /// This ensures stable debug output, predictable test assertions, and
 /// future-proof compatibility with HMAC signing of structures containing grants.
+///
+/// # Deserialization safety
+///
+/// Deserialization validates that `sandbox_root` exists and can be
+/// canonicalized. This prevents deserialized grants from bypassing the
+/// path validation performed by `CapabilityGrant::new()`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawCapabilityGrant")]
 pub struct CapabilityGrant {
     capabilities: BTreeSet<Capability>,
     sandbox_root: PathBuf,
     expires_at: Option<DateTime<Utc>>,
+}
+
+impl TryFrom<RawCapabilityGrant> for CapabilityGrant {
+    type Error = String;
+
+    fn try_from(raw: RawCapabilityGrant) -> Result<Self, Self::Error> {
+        let resolved = raw.sandbox_root.canonicalize().map_err(|e| {
+            format!(
+                "sandbox_root `{}` cannot be canonicalized: {e}",
+                raw.sandbox_root.display()
+            )
+        })?;
+
+        Ok(Self {
+            capabilities: raw.capabilities,
+            sandbox_root: resolved,
+            expires_at: raw.expires_at,
+        })
+    }
 }
 
 impl CapabilityGrant {
@@ -851,6 +888,19 @@ mod tests {
         assert!(
             matches!(err, SecurityError::SubGrantSandboxEscape { .. }),
             "expected SubGrantSandboxEscape, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_deserialize_rejects_nonexistent_sandbox_root() {
+        // Craft JSON with a sandbox_root that does not exist on disk.
+        // The custom TryFrom<RawCapabilityGrant> should reject it.
+        let json = r#"{"capabilities":["file_read"],"sandbox_root":"/nonexistent/fake/path","expires_at":null}"#;
+        let result: Result<CapabilityGrant, _> = serde_json::from_str(json);
+        let err = result.expect_err("should reject nonexistent sandbox_root");
+        assert!(
+            err.to_string().contains("cannot be canonicalized"),
+            "expected canonicalization error, got: {err}"
         );
     }
 

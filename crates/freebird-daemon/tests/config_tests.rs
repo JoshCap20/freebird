@@ -8,6 +8,7 @@
 
 use figment::Figment;
 use figment::providers::{Format, Toml};
+use freebird_traits::id::ProviderId;
 use freebird_types::config::{AppConfig, ChannelKind, ProviderKind};
 
 /// A complete, valid TOML config string for testing.
@@ -57,8 +58,8 @@ fn test_config_deserializes_from_toml() {
         .extract()
         .expect("complete TOML should deserialize");
 
-    assert_eq!(config.runtime.default_model, "claude-opus-4-6");
-    assert_eq!(config.runtime.default_provider, "anthropic");
+    assert_eq!(config.runtime.default_model.as_str(), "claude-opus-4-6");
+    assert_eq!(config.runtime.default_provider.as_str(), "anthropic");
     assert_eq!(
         config.runtime.system_prompt.as_deref(),
         Some("You are a test assistant.")
@@ -70,7 +71,7 @@ fn test_config_deserializes_from_toml() {
     assert_eq!(config.runtime.drain_timeout_secs, 30);
 
     assert_eq!(config.providers.len(), 1);
-    assert_eq!(config.providers[0].id, "anthropic");
+    assert_eq!(config.providers[0].id, ProviderId::from("anthropic"));
     assert!(matches!(config.providers[0].kind, ProviderKind::Anthropic));
 
     assert_eq!(config.channels.len(), 1);
@@ -86,7 +87,7 @@ fn test_config_figment_merge_override() {
         .extract()
         .expect("merge override should work");
 
-    assert_eq!(config.runtime.default_model, "override-model");
+    assert_eq!(config.runtime.default_model.as_str(), "override-model");
     // Other fields unchanged
     assert_eq!(config.runtime.max_output_tokens, 8192);
 }
@@ -218,8 +219,8 @@ fn test_default_toml_deserializes() {
         .expect("config/default.toml should deserialize without error");
 
     // Spot-check key fields
-    assert_eq!(config.runtime.default_model, "claude-sonnet-4-6");
-    assert_eq!(config.runtime.default_provider, "anthropic");
+    assert_eq!(config.runtime.default_model.as_str(), "claude-sonnet-4-6");
+    assert_eq!(config.runtime.default_provider.as_str(), "anthropic");
     assert!(!config.providers.is_empty());
     assert!(!config.channels.is_empty());
 }

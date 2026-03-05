@@ -9,7 +9,6 @@ description = "Channel implementations for Freebird — CLI, Signal, WebSocket, 
 [dependencies]
 freebird-traits = { workspace = true }
 freebird-types = { workspace = true }
-freebird-security = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }

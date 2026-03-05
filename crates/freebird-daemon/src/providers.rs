@@ -44,7 +44,10 @@ pub async fn build_provider_registry(config: &AppConfig) -> Result<ProviderRegis
 
                 let anthropic_config = AnthropicConfig {
                     base_url: provider_config.base_url.clone(),
-                    default_model: provider_config.default_model.clone(),
+                    default_model: provider_config
+                        .default_model
+                        .as_ref()
+                        .map(|m| m.as_str().to_owned()),
                 };
 
                 let provider_id = provider_config.id.clone();
@@ -60,10 +63,7 @@ pub async fn build_provider_registry(config: &AppConfig) -> Result<ProviderRegis
 
                 tracing::info!(provider = %provider_config.id, "credentials validated");
 
-                registry.register(
-                    ProviderId::from_string(provider_config.id.clone()),
-                    Box::new(provider),
-                );
+                registry.register(provider_config.id.clone(), Box::new(provider));
             }
             ProviderKind::OpenAi => {
                 tracing::warn!(
@@ -86,7 +86,7 @@ pub async fn build_provider_registry(config: &AppConfig) -> Result<ProviderRegis
     let failover_chain = config
         .providers
         .iter()
-        .map(|p| ProviderId::from_string(p.id.clone()))
+        .map(|p| p.id.clone())
         .filter(|id| registered.contains(id))
         .collect();
     registry.set_failover_chain(failover_chain);

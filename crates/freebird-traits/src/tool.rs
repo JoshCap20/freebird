@@ -55,15 +55,37 @@ pub enum RiskLevel {
     Critical,
 }
 
+/// Whether a tool has observable side effects (writes, mutations, network calls).
+///
+/// Replaces the `bool` anti-pattern (CLAUDE.md §23). Used by the runtime to
+/// decide whether a consent gate or extra audit logging is warranted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SideEffects {
+    None,
+    HasSideEffects,
+}
+
+/// Whether a tool execution succeeded or failed.
+///
+/// Replaces the `bool` anti-pattern (CLAUDE.md §23). Used in `ToolOutput`
+/// and `ToolInvocation` to indicate the outcome of a tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutcome {
+    Success,
+    Error,
+}
+
 /// Metadata describing a tool for both the runtime and the LLM.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolInfo {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
     pub required_capability: Capability,
     pub risk_level: RiskLevel,
-    pub has_side_effects: bool,
+    pub side_effects: SideEffects,
 }
 
 /// Context passed to every tool invocation by the runtime.
@@ -71,6 +93,7 @@ pub struct ToolInfo {
 /// The runtime verifies capability grants and logs audit events before
 /// calling `Tool::execute`. This context provides sandbox boundaries and
 /// the granted capabilities for tools that need sub-capability checks.
+#[derive(Debug)]
 pub struct ToolContext<'a> {
     pub session_id: &'a SessionId,
     pub sandbox_root: &'a Path,
@@ -81,7 +104,7 @@ pub struct ToolContext<'a> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolOutput {
     pub content: String,
-    pub is_error: bool,
+    pub outcome: ToolOutcome,
     pub metadata: Option<serde_json::Value>,
 }
 
@@ -119,6 +142,12 @@ pub enum ToolError {
 
     #[error("security violation in tool `{tool}`: {reason}")]
     SecurityViolation { tool: String, reason: String },
+
+    #[error("consent denied for tool `{tool}`")]
+    ConsentDenied { tool: String },
+
+    #[error("consent expired for tool `{tool}`")]
+    ConsentExpired { tool: String },
 }
 
 #[cfg(test)]

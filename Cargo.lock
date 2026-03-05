@@ -348,9 +348,7 @@ name = "freebird-channels"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "freebird-security",
  "freebird-traits",
- "freebird-types",
  "proptest",
  "serde",
  "serde_json",
@@ -419,7 +417,6 @@ dependencies = [
 name = "freebird-runtime"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "chrono",
  "freebird-memory",

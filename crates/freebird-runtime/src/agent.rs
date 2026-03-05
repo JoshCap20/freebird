@@ -12,18 +12,19 @@ use freebird_security::audit::{
     AuditEventType, AuditLogger, CapabilityCheckResult, InjectionSource,
 };
 use freebird_security::error::Severity;
+use freebird_security::injection;
 use freebird_security::safe_types::{SafeMessage, ScannedModelResponse, ScannedToolOutput};
 use freebird_security::taint::Tainted;
 use freebird_traits::channel::{
     Channel, ChannelError, ChannelFeature, InboundEvent, OutboundEvent,
 };
-use freebird_traits::id::{ModelId, SessionId};
+use freebird_traits::id::SessionId;
 use freebird_traits::memory::{Conversation, Memory, MemoryError, ToolInvocation, Turn};
 use freebird_traits::provider::{
     CompletionRequest, CompletionResponse, ContentBlock, Message, ProviderError, Role, StopReason,
     StreamEvent, TokenUsage, ToolDefinition,
 };
-use freebird_traits::tool::{Tool, ToolContext, ToolOutput};
+use freebird_traits::tool::{Tool, ToolContext, ToolOutcome, ToolOutput};
 use freebird_types::config::{RuntimeConfig, ToolsConfig};
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -414,6 +415,25 @@ impl AgentRuntime {
             self.tools.iter().map(|t| t.to_definition()).collect();
 
         let mut messages = conversation_to_messages(conversation);
+
+        // CLAUDE.md §14: scan loaded conversation history for context injection
+        // before sending to provider. Filter out any messages containing injection
+        // patterns to prevent memory poisoning attacks.
+        messages.retain(|msg| {
+            for block in &msg.content {
+                if let ContentBlock::Text { text } = block {
+                    if injection::scan_context(text).is_err() {
+                        tracing::warn!(
+                            role = ?msg.role,
+                            "context injection detected in loaded history, removing message"
+                        );
+                        return false;
+                    }
+                }
+            }
+            true
+        });
+
         messages.push(user_message.clone());
 
         let current_turn = Turn {
@@ -548,7 +568,7 @@ impl AgentRuntime {
         tool_definitions: &[ToolDefinition],
     ) -> CompletionRequest {
         CompletionRequest {
-            model: ModelId::from(conversation.model_id.as_str()),
+            model: conversation.model_id.clone(),
             system_prompt: conversation.system_prompt.clone(),
             messages: messages.to_vec(),
             tools: tool_definitions.to_vec(),
@@ -613,8 +633,8 @@ impl AgentRuntime {
             let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
             // Scan tool output for injection — BLOCK if detected
-            let (final_content, is_error) = match ScannedToolOutput::from_raw(&output.content) {
-                Ok(scanned) => (scanned.into_inner(), output.is_error),
+            let (final_content, outcome) = match ScannedToolOutput::from_raw(&output.content) {
+                Ok(scanned) => (scanned.into_inner(), output.outcome),
                 Err(e) => {
                     tracing::warn!(tool = %tool_name, "injection detected in tool output, blocking");
                     if let Some(audit) = &self.audit {
@@ -631,17 +651,19 @@ impl AgentRuntime {
                     }
                     (
                         "Tool output blocked: potential prompt injection detected".to_owned(),
-                        true,
+                        ToolOutcome::Error,
                     )
                 }
             };
+
+            let is_error = outcome == ToolOutcome::Error;
 
             current_turn.tool_invocations.push(ToolInvocation {
                 tool_use_id: tool_use_id.clone(),
                 tool_name,
                 input,
                 output: Some(final_content.clone()),
-                is_error,
+                outcome,
                 duration_ms: Some(duration_ms),
             });
 
@@ -807,7 +829,7 @@ impl AgentRuntime {
             }
             return ToolOutput {
                 content: format!("Error: tool `{tool_name}` not found"),
-                is_error: true,
+                outcome: ToolOutcome::Error,
                 metadata: None,
             };
         };
@@ -837,12 +859,12 @@ impl AgentRuntime {
             Ok(Ok(output)) => output,
             Ok(Err(e)) => ToolOutput {
                 content: format!("Error: {e}"),
-                is_error: true,
+                outcome: ToolOutcome::Error,
                 metadata: None,
             },
             Err(_) => ToolOutput {
                 content: format!("Error: tool `{tool_name}` timed out"),
-                is_error: true,
+                outcome: ToolOutcome::Error,
                 metadata: None,
             },
         }
@@ -1099,7 +1121,15 @@ async fn send_stream_error(outbound: &mpsc::Sender<OutboundEvent>, sender_id: &s
 
 /// Join all `ContentBlock::Text` blocks in a message.
 fn extract_text(message: &Message) -> String {
-    let mut result = String::new();
+    let total_len: usize = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.len()),
+            _ => None,
+        })
+        .sum();
+    let mut result = String::with_capacity(total_len);
     for block in &message.content {
         if let ContentBlock::Text { text } = block {
             result.push_str(text);

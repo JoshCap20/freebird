@@ -4,7 +4,7 @@ mod common;
 
 use chrono::{TimeZone, Utc};
 use freebird_memory::file::FileMemory;
-use freebird_traits::id::SessionId;
+use freebird_traits::id::{ModelId, ProviderId, SessionId};
 use freebird_traits::memory::{Conversation, Memory, MemoryError, Turn};
 use freebird_traits::provider::{ContentBlock, Message, Role};
 use proptest::prelude::*;
@@ -387,8 +387,8 @@ async fn test_search_finds_assistant_response() {
         }],
         created_at: now,
         updated_at: now,
-        model_id: "test-model".to_string(),
-        provider_id: "test-provider".to_string(),
+        model_id: ModelId::from("test-model"),
+        provider_id: ProviderId::from("test-provider"),
     };
     mem.save(&conv).await.unwrap();
 
@@ -489,8 +489,8 @@ async fn test_preview_empty_turns() {
         turns: vec![],
         created_at: now,
         updated_at: now,
-        model_id: "test-model".to_string(),
-        provider_id: "test-provider".to_string(),
+        model_id: ModelId::from("test-model"),
+        provider_id: ProviderId::from("test-provider"),
     };
     mem.save(&conv).await.unwrap();
 
@@ -523,8 +523,8 @@ async fn test_summary_turn_count() {
         turns: vec![make_turn("a"), make_turn("b"), make_turn("c")],
         created_at: now,
         updated_at: now,
-        model_id: "test-model".to_string(),
-        provider_id: "test-provider".to_string(),
+        model_id: ModelId::from("test-model"),
+        provider_id: ProviderId::from("test-provider"),
     };
     mem.save(&conv).await.unwrap();
 

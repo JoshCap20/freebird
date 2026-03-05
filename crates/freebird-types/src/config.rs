@@ -3,9 +3,9 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
-
+use freebird_traits::id::{ChannelId, ModelId, ProviderId};
 use freebird_traits::tool::RiskLevel;
+use serde::{Deserialize, Serialize};
 
 /// Top-level application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,9 +45,9 @@ impl Default for DaemonConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {
     /// Default LLM model ID (e.g., "claude-sonnet-4-6").
-    pub default_model: String,
+    pub default_model: ModelId,
     /// Default provider ID — must match a `ProviderConfig::id` in `providers`.
-    pub default_provider: String,
+    pub default_provider: ProviderId,
     /// System prompt prepended to every new conversation. None = no system prompt.
     pub system_prompt: Option<String>,
     /// Maximum tokens per provider response.
@@ -74,9 +74,9 @@ pub enum ProviderKind {
 /// Provider-specific configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
-    pub id: String,
+    pub id: ProviderId,
     pub kind: ProviderKind,
-    pub default_model: Option<String>,
+    pub default_model: Option<ModelId>,
     pub base_url: Option<String>,
 }
 
@@ -92,7 +92,7 @@ pub enum ChannelKind {
 /// Channel-specific configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelConfig {
-    pub id: String,
+    pub id: ChannelId,
     pub kind: ChannelKind,
     /// Optional prompt string for interactive channels (e.g., "you> " for CLI).
     /// Consumed by channel implementations. None = channel uses its own default.
@@ -243,8 +243,8 @@ kind = "file"
         let config: AppConfig =
             toml::from_str(toml_str).expect("default.toml should deserialize into AppConfig");
 
-        assert_eq!(config.runtime.default_model, "claude-sonnet-4-6");
-        assert_eq!(config.runtime.default_provider, "anthropic");
+        assert_eq!(config.runtime.default_model.as_str(), "claude-sonnet-4-6");
+        assert_eq!(config.runtime.default_provider.as_str(), "anthropic");
         assert_eq!(
             config.runtime.system_prompt.as_deref(),
             Some("You are FreeBird, a helpful AI assistant.")

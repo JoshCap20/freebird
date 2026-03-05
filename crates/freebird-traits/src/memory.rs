@@ -4,8 +4,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::id::SessionId;
+use crate::id::{ModelId, ProviderId, SessionId};
 use crate::provider::Message;
+use crate::tool::ToolOutcome;
 
 /// A complete conversation turn: user message + assistant responses + tool calls.
 ///
@@ -30,7 +31,7 @@ pub struct ToolInvocation {
     pub tool_name: String,
     pub input: serde_json::Value,
     pub output: Option<String>,
-    pub is_error: bool,
+    pub outcome: ToolOutcome,
     pub duration_ms: Option<u64>,
 }
 
@@ -43,8 +44,8 @@ pub struct Conversation {
     pub turns: Vec<Turn>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    pub model_id: String,
-    pub provider_id: String,
+    pub model_id: ModelId,
+    pub provider_id: ProviderId,
 }
 
 /// Summary of a stored session for listing/search results.
@@ -54,7 +55,7 @@ pub struct SessionSummary {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub turn_count: usize,
-    pub model_id: String,
+    pub model_id: ModelId,
     pub preview: String,
 }
 
@@ -82,4 +83,7 @@ pub enum MemoryError {
 
     #[error("storage is read-only")]
     ReadOnly,
+
+    #[error("integrity violation: {reason}")]
+    IntegrityViolation { reason: String },
 }

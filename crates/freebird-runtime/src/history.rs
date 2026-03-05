@@ -7,6 +7,7 @@
 
 use freebird_traits::memory::{Conversation, ToolInvocation, Turn};
 use freebird_traits::provider::{ContentBlock, Message, Role};
+use freebird_traits::tool::ToolOutcome;
 
 /// Reconstruct a flat `Vec<Message>` from a conversation's turn history.
 ///
@@ -111,7 +112,7 @@ fn reconstruct_tool_results(
         .map(|inv| ContentBlock::ToolResult {
             tool_use_id: inv.tool_use_id.clone(),
             content: inv.output.clone().unwrap_or_default(),
-            is_error: inv.is_error,
+            is_error: inv.outcome == ToolOutcome::Error,
         })
         .collect();
 
@@ -127,7 +128,7 @@ fn reconstruct_tool_results(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use freebird_traits::id::SessionId;
+    use freebird_traits::id::{ModelId, ProviderId, SessionId};
     use freebird_traits::memory::ToolInvocation;
 
     // -- Test helpers --
@@ -170,7 +171,7 @@ mod tests {
             tool_name: name.to_owned(),
             input: serde_json::json!({"arg": "value"}),
             output: output.map(str::to_owned),
-            is_error: false,
+            outcome: ToolOutcome::Success,
             duration_ms: Some(100),
         }
     }
@@ -181,7 +182,7 @@ mod tests {
             tool_name: name.to_owned(),
             input: serde_json::json!({"arg": "value"}),
             output: Some(output.to_owned()),
-            is_error: true,
+            outcome: ToolOutcome::Error,
             duration_ms: Some(50),
         }
     }
@@ -212,8 +213,8 @@ mod tests {
             turns,
             created_at: Utc::now(),
             updated_at: Utc::now(),
-            model_id: "test-model".into(),
-            provider_id: "test-provider".into(),
+            model_id: ModelId::from("test-model"),
+            provider_id: ProviderId::from("test-provider"),
         }
     }
 
