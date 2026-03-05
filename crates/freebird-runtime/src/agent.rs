@@ -20,8 +20,8 @@ use freebird_traits::channel::{
 use freebird_traits::id::{ModelId, SessionId};
 use freebird_traits::memory::{Conversation, Memory, MemoryError, ToolInvocation, Turn};
 use freebird_traits::provider::{
-    CompletionRequest, CompletionResponse, ContentBlock, Message, ProviderError, ProviderFeature,
-    Role, StopReason, StreamEvent, TokenUsage, ToolDefinition,
+    CompletionRequest, CompletionResponse, ContentBlock, Message, ProviderError, Role, StopReason,
+    StreamEvent, TokenUsage, ToolDefinition,
 };
 use freebird_traits::tool::{Tool, ToolContext, ToolOutput};
 use freebird_types::config::{RuntimeConfig, ToolsConfig};
@@ -298,7 +298,7 @@ impl AgentRuntime {
             .info()
             .features
             .contains(&ChannelFeature::Streaming)
-            && self.primary_provider_supports_streaming();
+            && self.any_provider_supports_streaming();
 
         let current_turn = if use_streaming {
             self.run_agentic_loop_streaming(
@@ -848,12 +848,9 @@ impl AgentRuntime {
         }
     }
 
-    /// Check whether the primary provider supports streaming.
-    fn primary_provider_supports_streaming(&self) -> bool {
-        self.provider_registry
-            .primary_provider_id()
-            .and_then(|id| self.provider_registry.get(id))
-            .is_some_and(|p| p.info().supports(&ProviderFeature::Streaming))
+    /// Check whether any provider in the failover chain supports streaming.
+    fn any_provider_supports_streaming(&self) -> bool {
+        self.provider_registry.any_in_chain_supports_streaming()
     }
 
     /// Streaming variant of the agentic loop.
@@ -875,29 +872,17 @@ impl AgentRuntime {
         let (mut messages, mut current_turn, tool_definitions) =
             self.prepare_agentic_loop(safe_message, conversation);
 
-        let Some(provider_id) = self.provider_registry.primary_provider_id().cloned() else {
-            send_outbound(
-                outbound,
-                OutboundEvent::Error {
-                    text: "Provider error: no provider configured".into(),
-                    recipient_id: sender_id.into(),
-                },
-            )
-            .await;
-            return current_turn;
-        };
-
         for _round in 0..self.config.max_tool_rounds {
             let request = self.build_completion_request(conversation, &messages, &tool_definitions);
 
             let event_stream = match self
                 .provider_registry
-                .stream(&provider_id, request.clone())
+                .stream_with_failover(request.clone())
                 .await
             {
-                Ok(s) => s,
+                Ok((_provider_id, s)) => s,
                 Err(e) => {
-                    tracing::warn!(error = %e, "stream setup failed, falling back to non-streaming");
+                    tracing::warn!(error = %e, "stream setup failed on all providers, falling back to non-streaming");
                     return self
                         .run_agentic_loop(
                             safe_message,

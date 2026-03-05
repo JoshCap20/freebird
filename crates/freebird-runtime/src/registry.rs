@@ -88,13 +88,18 @@ impl ProviderRegistry {
         self.providers.is_empty()
     }
 
-    /// Return the first provider ID in the failover chain (the "primary" provider).
+    /// Return `true` if any provider in the failover chain advertises streaming support.
     ///
-    /// Used by the streaming path, which targets a specific provider rather than
-    /// iterating the failover chain.
+    /// Used as a pre-check before attempting the streaming path — avoids the
+    /// overhead of `stream_with_failover()` when no provider supports it.
     #[must_use]
-    pub fn primary_provider_id(&self) -> Option<&ProviderId> {
-        self.failover_chain.first()
+    pub fn any_in_chain_supports_streaming(&self) -> bool {
+        use freebird_traits::provider::ProviderFeature;
+        self.failover_chain.iter().any(|id| {
+            self.providers
+                .get(id)
+                .is_some_and(|p| p.info().supports(&ProviderFeature::Streaming))
+        })
     }
 
     /// Try the failover chain in order. Returns the responding provider's ID
@@ -155,25 +160,60 @@ impl ProviderRegistry {
         Err(last_error)
     }
 
-    /// Stream from a specific provider (no failover — reconnecting mid-stream
-    /// is not meaningful).
+    /// Try the failover chain for stream setup. Returns the responding
+    /// provider's ID alongside the stream.
+    ///
+    /// Failover applies only to stream *setup* — once a stream is established,
+    /// mid-stream errors are handled by the caller (reconnecting mid-stream is
+    /// not meaningful). Uses the same retriability classification as
+    /// `complete_with_failover`.
     ///
     /// # Errors
     ///
-    /// Returns `ProviderError::NotConfigured` if the provider ID is not registered.
-    /// Propagates any error from the underlying provider's `stream()` call.
-    pub async fn stream(
+    /// Returns `ProviderError::NotConfigured` if the failover chain is empty or
+    /// all chain IDs are unregistered. Returns the last retriable error if all
+    /// providers fail with retriable errors. Non-retriable errors short-circuit
+    /// immediately.
+    pub async fn stream_with_failover(
         &self,
-        provider_id: &ProviderId,
         request: CompletionRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError>
-    {
-        let provider = self
-            .providers
-            .get(provider_id)
-            .ok_or(ProviderError::NotConfigured)?;
+    ) -> Result<
+        (
+            ProviderId,
+            Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>,
+        ),
+        ProviderError,
+    > {
+        if self.failover_chain.is_empty() {
+            return Err(ProviderError::NotConfigured);
+        }
 
-        provider.stream(request).await
+        let mut last_error = ProviderError::NotConfigured;
+
+        for provider_id in &self.failover_chain {
+            let Some(provider) = self.providers.get(provider_id) else {
+                tracing::warn!(
+                    provider_id = %provider_id,
+                    "provider in failover chain but not registered, skipping"
+                );
+                continue;
+            };
+
+            match provider.stream(request.clone()).await {
+                Ok(stream) => return Ok((provider_id.clone(), stream)),
+                Err(e) if is_retriable(&e) => {
+                    tracing::warn!(
+                        provider_id = %provider_id,
+                        error = %e,
+                        "stream setup failed with retriable error, trying next"
+                    );
+                    last_error = e;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(last_error)
     }
 }
 
@@ -705,23 +745,202 @@ mod tests {
         assert!(matches!(result, Err(ProviderError::NotConfigured)));
     }
 
-    // ── Stream tests ────────────────────────────────────────────────
+    // ── Stream failover tests ────────────────────────────────────────
 
-    #[tokio::test]
-    async fn test_stream_delegates_to_provider() {
-        let mut registry = ProviderRegistry::new();
-        let pid = id("streamer");
-        registry.register(pid.clone(), Box::new(MockProvider::new_ok("ok")));
+    /// Mock provider that fails on stream setup with a configurable error.
+    struct StreamFailProvider {
+        info: ProviderInfo,
+        stream_error: Box<dyn Fn() -> ProviderError + Send + Sync>,
+    }
 
-        let result = registry.stream(&pid, make_request()).await;
-        assert!(result.is_ok());
+    #[async_trait]
+    impl Provider for StreamFailProvider {
+        fn info(&self) -> &ProviderInfo {
+            &self.info
+        }
+        async fn validate_credentials(&self) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            Ok(make_response("complete-fallback"))
+        }
+        async fn stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<
+            Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>,
+            ProviderError,
+        > {
+            Err((self.stream_error)())
+        }
     }
 
     #[tokio::test]
-    async fn test_stream_unknown_provider() {
+    async fn test_stream_with_failover_success() {
+        let mut registry = ProviderRegistry::new();
+        let pid = id("streamer");
+        registry.register(pid.clone(), Box::new(MockProvider::new_ok("ok")));
+        registry.set_failover_chain(vec![pid.clone()]);
+
+        let result = registry.stream_with_failover(make_request()).await;
+        assert!(result.is_ok());
+        let (returned_id, _stream) = result.expect("should succeed");
+        assert_eq!(returned_id, pid);
+    }
+
+    #[tokio::test]
+    async fn test_stream_with_failover_empty_chain() {
         let registry = ProviderRegistry::new();
-        let result = registry.stream(&id("nonexistent"), make_request()).await;
+        let result = registry.stream_with_failover(make_request()).await;
         assert!(matches!(result, Err(ProviderError::NotConfigured)));
+    }
+
+    #[tokio::test]
+    async fn test_stream_with_failover_retries_on_retriable_error() {
+        let mut registry = ProviderRegistry::new();
+        let first = id("first");
+        let second = id("second");
+
+        registry.register(
+            first.clone(),
+            Box::new(StreamFailProvider {
+                info: make_provider_info("first"),
+                stream_error: Box::new(|| ProviderError::RateLimited {
+                    retry_after_ms: 100,
+                }),
+            }),
+        );
+        registry.register(second.clone(), Box::new(MockProvider::new_ok("ok")));
+        registry.set_failover_chain(vec![first, second.clone()]);
+
+        let (returned_id, _stream) = registry
+            .stream_with_failover(make_request())
+            .await
+            .expect("should succeed via failover");
+        assert_eq!(returned_id, second);
+    }
+
+    #[tokio::test]
+    async fn test_stream_with_failover_short_circuits_on_auth_failure() {
+        let mut registry = ProviderRegistry::new();
+        let first = id("first");
+        let second = id("second");
+
+        registry.register(
+            first.clone(),
+            Box::new(StreamFailProvider {
+                info: make_provider_info("first"),
+                stream_error: Box::new(|| ProviderError::AuthenticationFailed {
+                    reason: "bad key".into(),
+                }),
+            }),
+        );
+        registry.register(second.clone(), Box::new(MockProvider::new_ok("ok")));
+        registry.set_failover_chain(vec![first, second]);
+
+        let result = registry.stream_with_failover(make_request()).await;
+        assert!(matches!(
+            result,
+            Err(ProviderError::AuthenticationFailed { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_stream_with_failover_all_fail_returns_last_error() {
+        let mut registry = ProviderRegistry::new();
+        let first = id("first");
+        let second = id("second");
+
+        registry.register(
+            first.clone(),
+            Box::new(StreamFailProvider {
+                info: make_provider_info("first"),
+                stream_error: Box::new(|| ProviderError::RateLimited {
+                    retry_after_ms: 100,
+                }),
+            }),
+        );
+        registry.register(
+            second.clone(),
+            Box::new(StreamFailProvider {
+                info: make_provider_info("second"),
+                stream_error: Box::new(|| ProviderError::Network {
+                    reason: "timeout".into(),
+                    kind: freebird_traits::provider::NetworkErrorKind::Timeout,
+                    status_code: None,
+                }),
+            }),
+        );
+        registry.set_failover_chain(vec![first, second]);
+
+        let Err(err) = registry.stream_with_failover(make_request()).await else {
+            panic!("expected error from all-fail stream failover");
+        };
+        assert!(
+            matches!(err, ProviderError::Network { .. }),
+            "expected last error (Network), got {err:?}"
+        );
+    }
+
+    // ── any_in_chain_supports_streaming tests ────────────────────────
+
+    #[test]
+    fn test_any_in_chain_supports_streaming_true() {
+        let mut registry = ProviderRegistry::new();
+        let pid = id("streaming");
+        registry.register(pid.clone(), Box::new(MockProvider::new_ok("ok")));
+        registry.set_failover_chain(vec![pid]);
+        assert!(registry.any_in_chain_supports_streaming());
+    }
+
+    #[test]
+    fn test_any_in_chain_supports_streaming_empty_chain() {
+        let registry = ProviderRegistry::new();
+        assert!(!registry.any_in_chain_supports_streaming());
+    }
+
+    #[test]
+    fn test_any_in_chain_supports_streaming_no_streaming_provider() {
+        use freebird_traits::provider::ProviderFeature;
+        let mut registry = ProviderRegistry::new();
+        let pid = id("non-streaming");
+
+        // Create a provider with no streaming feature
+        let mut info = make_provider_info("non-streaming");
+        info.features = BTreeSet::from([ProviderFeature::ToolUse]);
+
+        struct NoStreamProvider(ProviderInfo);
+        #[async_trait]
+        impl Provider for NoStreamProvider {
+            fn info(&self) -> &ProviderInfo {
+                &self.0
+            }
+            async fn validate_credentials(&self) -> Result<(), ProviderError> {
+                Ok(())
+            }
+            async fn complete(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse, ProviderError> {
+                Ok(make_response("ok"))
+            }
+            async fn stream(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<
+                Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>,
+                ProviderError,
+            > {
+                Err(ProviderError::NotConfigured)
+            }
+        }
+
+        registry.register(pid.clone(), Box::new(NoStreamProvider(info)));
+        registry.set_failover_chain(vec![pid]);
+        assert!(!registry.any_in_chain_supports_streaming());
     }
 
     // ── Edge case tests ─────────────────────────────────────────────
