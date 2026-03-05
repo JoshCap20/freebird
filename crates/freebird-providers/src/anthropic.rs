@@ -274,7 +274,7 @@ impl AnthropicProvider {
                 },
                 ModelInfo {
                     id: ModelId::from("claude-sonnet-4-6"),
-                    display_name: "Claude Sonnet 4.5".into(),
+                    display_name: "Claude Sonnet 4.6".into(),
                     max_context_tokens: 200_000,
                     max_output_tokens: 16_384,
                 },
