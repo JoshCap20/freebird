@@ -8,10 +8,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 use tokio_util::sync::CancellationToken;
 
 use freebird_traits::channel::{
@@ -20,6 +22,14 @@ use freebird_traits::channel::{
 };
 use freebird_traits::id::ChannelId;
 use freebird_types::protocol::{ClientMessage, ServerMessage};
+
+/// Maximum bytes per JSON line from a client connection.
+///
+/// Limits per-read memory allocation to prevent OOM from malicious clients
+/// sending arbitrarily long lines without a newline terminator.
+/// Connections that exceed this limit are terminated — a client sending
+/// >64 KiB in a single line is either malicious or broken.
+const MAX_LINE_BYTES: usize = 65_536;
 
 /// Per-connection writer senders, keyed by `sender_id` (e.g., `"tcp-0"`).
 type WriterMap = HashMap<String, mpsc::Sender<ServerMessage>>;
@@ -172,6 +182,89 @@ async fn accept_loop(
 
 /// Handle a single TCP connection: read JSON lines → inbound events, and
 /// write server messages from `writer_rx` → JSON lines.
+/// Read JSON lines from a single client connection and forward as `InboundEvent`s.
+///
+/// Uses `LinesCodec` with `MAX_LINE_BYTES` to bound per-line memory allocation,
+/// preventing OOM from malicious clients sending arbitrarily long lines.
+/// Connections that exceed the limit are terminated (`FramedRead` yields
+/// `None` after any codec error, ending the read loop).
+async fn read_client_lines(
+    read_half: tokio::net::tcp::OwnedReadHalf,
+    sender_id: String,
+    inbound_tx: mpsc::Sender<InboundEvent>,
+) {
+    let codec = LinesCodec::new_with_max_length(MAX_LINE_BYTES);
+    let mut lines = FramedRead::new(read_half, codec);
+
+    while let Some(result) = lines.next().await {
+        match result {
+            Ok(line) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                match serde_json::from_str::<ClientMessage>(trimmed) {
+                    Ok(ClientMessage::Message { text }) => {
+                        let _ = inbound_tx
+                            .send(InboundEvent::Message {
+                                raw_text: text,
+                                sender_id: sender_id.clone(),
+                                attachments: vec![],
+                            })
+                            .await;
+                    }
+                    Ok(ClientMessage::Command { name, args }) => {
+                        let _ = inbound_tx
+                            .send(InboundEvent::Command {
+                                name,
+                                args,
+                                sender_id: sender_id.clone(),
+                            })
+                            .await;
+                    }
+                    Ok(ClientMessage::Disconnect) => {
+                        break;
+                    }
+                    Err(e) => {
+                        // Truncate logged input to prevent disk exhaustion
+                        // from oversized malformed payloads.
+                        let preview: &str = if trimmed.len() > 200 {
+                            &trimmed[..200]
+                        } else {
+                            trimmed
+                        };
+                        tracing::warn!(
+                            sender = %sender_id,
+                            error = %e,
+                            line = %preview,
+                            "invalid JSON from client"
+                        );
+                    }
+                }
+            }
+            Err(LinesCodecError::MaxLineLengthExceeded) => {
+                tracing::warn!(
+                    sender = %sender_id,
+                    max_bytes = MAX_LINE_BYTES,
+                    "oversized line from client, disconnecting"
+                );
+                break;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    sender = %sender_id,
+                    error = %e,
+                    "read error from client"
+                );
+                break;
+            }
+        }
+    }
+}
+
+/// Handle a single TCP connection: read JSON lines → inbound events, and
+/// write server messages from `writer_rx` → JSON lines.
 async fn handle_connection(
     stream: tokio::net::TcpStream,
     sender_id: String,
@@ -180,7 +273,6 @@ async fn handle_connection(
     writers: Arc<tokio::sync::Mutex<WriterMap>>,
 ) {
     let (read_half, mut write_half) = stream.into_split();
-    let reader = BufReader::new(read_half);
 
     // Send Connected event
     let _ = inbound_tx
@@ -189,60 +281,12 @@ async fn handle_connection(
         })
         .await;
 
-    let sender_for_reader = sender_id.clone();
-    let inbound_for_reader = inbound_tx.clone();
-
     // Spawn reader task: JSON lines from client → InboundEvent
-    let reader_handle = tokio::spawn(async move {
-        let mut lines = reader.lines();
-        loop {
-            match lines.next_line().await {
-                Ok(Some(line)) => {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-
-                    match serde_json::from_str::<ClientMessage>(trimmed) {
-                        Ok(ClientMessage::Message { text }) => {
-                            let _ = inbound_for_reader
-                                .send(InboundEvent::Message {
-                                    raw_text: text,
-                                    sender_id: sender_for_reader.clone(),
-                                    attachments: vec![],
-                                })
-                                .await;
-                        }
-                        Ok(ClientMessage::Command { name, args }) => {
-                            let _ = inbound_for_reader
-                                .send(InboundEvent::Command {
-                                    name,
-                                    args,
-                                    sender_id: sender_for_reader.clone(),
-                                })
-                                .await;
-                        }
-                        Ok(ClientMessage::Disconnect) => {
-                            break;
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                sender = %sender_for_reader,
-                                error = %e,
-                                line = %trimmed,
-                                "invalid JSON from client"
-                            );
-                        }
-                    }
-                }
-                Ok(None) => break, // EOF
-                Err(e) => {
-                    tracing::warn!(sender = %sender_for_reader, error = %e, "read error");
-                    break;
-                }
-            }
-        }
-    });
+    let reader_handle = tokio::spawn(read_client_lines(
+        read_half,
+        sender_id.clone(),
+        inbound_tx.clone(),
+    ));
 
     // Spawn writer task: ServerMessage from runtime → JSON lines to client
     let sender_for_writer = sender_id.clone();
@@ -280,13 +324,11 @@ async fn handle_connection(
         guard.remove(&sender_id);
     }
 
-    let _ = inbound_tx
-        .send(InboundEvent::Disconnected {
-            sender_id: sender_id.clone(),
-        })
-        .await;
-
     tracing::info!(sender_id = %sender_id, "client disconnected");
+
+    let _ = inbound_tx
+        .send(InboundEvent::Disconnected { sender_id })
+        .await;
 }
 
 /// Convert an `OutboundEvent` into a (`recipient_id`, `ServerMessage`) pair.
@@ -731,6 +773,36 @@ mod tests {
             }
             other => panic!("expected Message, got {other:?}"),
         }
+
+        channel.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_oversized_line_disconnects_client() {
+        let (listener, port) = bind_random().await;
+        let channel = TcpChannel::new("127.0.0.1", port);
+        let mut handle = channel.start_with_listener(listener);
+
+        let mut client = connect_test_client(port).await;
+
+        // Consume Connected
+        let _ = handle.inbound.next().await.unwrap();
+
+        // Send a line exceeding MAX_LINE_BYTES — the server should
+        // disconnect the client (a client sending >64 KiB in a single
+        // JSON line is either malicious or broken).
+        let oversized = "x".repeat(MAX_LINE_BYTES + 100);
+        client
+            .write_all(format!("{oversized}\n").as_bytes())
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+
+        let event = handle.inbound.next().await.unwrap();
+        assert!(
+            matches!(event, InboundEvent::Disconnected { .. }),
+            "expected Disconnected after oversized line, got {event:?}"
+        );
 
         channel.stop().await.unwrap();
     }
