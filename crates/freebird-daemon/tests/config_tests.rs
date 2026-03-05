@@ -14,7 +14,7 @@ use freebird_types::config::{AppConfig, ChannelKind, ProviderKind};
 const fn complete_toml() -> &'static str {
     r#"
 [runtime]
-default_model = "claude-opus-4-6-20250929"
+default_model = "claude-opus-4-6"
 default_provider = "anthropic"
 system_prompt = "You are a test assistant."
 max_output_tokens = 8192
@@ -57,7 +57,7 @@ fn test_config_deserializes_from_toml() {
         .extract()
         .expect("complete TOML should deserialize");
 
-    assert_eq!(config.runtime.default_model, "claude-opus-4-6-20250929");
+    assert_eq!(config.runtime.default_model, "claude-opus-4-6");
     assert_eq!(config.runtime.default_provider, "anthropic");
     assert_eq!(
         config.runtime.system_prompt.as_deref(),
@@ -218,7 +218,7 @@ fn test_default_toml_deserializes() {
         .expect("config/default.toml should deserialize without error");
 
     // Spot-check key fields
-    assert_eq!(config.runtime.default_model, "claude-opus-4-6-20250929");
+    assert_eq!(config.runtime.default_model, "claude-sonnet-4-6");
     assert_eq!(config.runtime.default_provider, "anthropic");
     assert!(!config.providers.is_empty());
     assert!(!config.channels.is_empty());

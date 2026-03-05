@@ -25,7 +25,7 @@ const API_VERSION: &str = "2023-06-01";
 /// Default base URL for the Anthropic API.
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 /// Default model ID.
-const DEFAULT_MODEL: &str = "claude-opus-4-6-20250929";
+const DEFAULT_MODEL: &str = "claude-opus-4-6";
 /// HTTP request timeout in seconds.
 const REQUEST_TIMEOUT_SECS: u64 = 300;
 /// Default retry-after delay when header is missing (ms).
@@ -267,13 +267,13 @@ impl AnthropicProvider {
             display_name: "Anthropic Claude".into(),
             supported_models: vec![
                 ModelInfo {
-                    id: ModelId::from("claude-opus-4-6-20250929"),
+                    id: ModelId::from("claude-opus-4-6"),
                     display_name: "Claude Opus 4.6".into(),
                     max_context_tokens: 200_000,
                     max_output_tokens: 32_768,
                 },
                 ModelInfo {
-                    id: ModelId::from("claude-sonnet-4-5-20250929"),
+                    id: ModelId::from("claude-sonnet-4-6"),
                     display_name: "Claude Sonnet 4.5".into(),
                     max_context_tokens: 200_000,
                     max_output_tokens: 16_384,
@@ -993,7 +993,7 @@ mod tests {
 
     fn simple_completion_request() -> CompletionRequest {
         CompletionRequest {
-            model: ModelId::from("claude-opus-4-6-20250929"),
+            model: ModelId::from("claude-opus-4-6"),
             system_prompt: Some("You are helpful.".into()),
             messages: vec![
                 Message {
@@ -1026,7 +1026,7 @@ mod tests {
             "content": [
                 {"type": "text", "text": "Hello, world!"}
             ],
-            "model": "claude-opus-4-6-20250929",
+            "model": "claude-opus-4-6",
             "stop_reason": "end_turn",
             "usage": {
                 "input_tokens": 25,
@@ -1055,7 +1055,7 @@ mod tests {
 
         let api_req = build_request_body(request);
 
-        assert_eq!(api_req.model, "claude-opus-4-6-20250929");
+        assert_eq!(api_req.model, "claude-opus-4-6");
         assert_eq!(api_req.max_tokens, 1024);
         assert_eq!(api_req.messages.len(), 2);
         assert_eq!(api_req.messages[0].role, "user");
@@ -1211,7 +1211,7 @@ mod tests {
                 {"type": "text", "text": "Hello!"},
                 {"type": "tool_use", "id": "tu_1", "name": "read_file", "input": {"path": "test.txt"}}
             ],
-            "model": "claude-opus-4-6-20250929",
+            "model": "claude-opus-4-6",
             "stop_reason": "tool_use",
             "usage": {
                 "input_tokens": 100,
@@ -1224,7 +1224,7 @@ mod tests {
         let resp: ApiResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.id, "msg_abc123");
         assert_eq!(resp.content.len(), 2);
-        assert_eq!(resp.model, "claude-opus-4-6-20250929");
+        assert_eq!(resp.model, "claude-opus-4-6");
         assert_eq!(resp.stop_reason, Some("tool_use".into()));
         assert_eq!(resp.usage.input_tokens, 100);
         assert_eq!(resp.usage.output_tokens, 50);
@@ -1240,7 +1240,7 @@ mod tests {
             "content": [
                 {"type": "text", "text": "Hello!"}
             ],
-            "model": "claude-opus-4-6-20250929",
+            "model": "claude-opus-4-6",
             "stop_reason": "end_turn",
             "usage": {
                 "input_tokens": 25,
@@ -1251,7 +1251,7 @@ mod tests {
         let api_resp: ApiResponse = serde_json::from_str(json).unwrap();
         let resp = api_resp.into_completion_response();
 
-        assert_eq!(resp.model, ModelId::from("claude-opus-4-6-20250929"));
+        assert_eq!(resp.model, ModelId::from("claude-opus-4-6"));
         assert_eq!(resp.stop_reason, StopReason::EndTurn);
         assert_eq!(resp.usage.input_tokens, 25);
         assert_eq!(resp.usage.output_tokens, 10);
@@ -1308,7 +1308,7 @@ mod tests {
         let result = provider.complete(simple_completion_request()).await;
 
         let resp = result.unwrap();
-        assert_eq!(resp.model, ModelId::from("claude-opus-4-6-20250929"));
+        assert_eq!(resp.model, ModelId::from("claude-opus-4-6"));
         assert_eq!(resp.stop_reason, StopReason::EndTurn);
         assert_eq!(resp.usage.input_tokens, 25);
         assert_eq!(resp.usage.output_tokens, 10);
@@ -1735,7 +1735,7 @@ mod tests {
     #[test]
     fn test_process_message_start_captures_usage() {
         let mut state = make_stream_state();
-        let data = r#"{"type":"message_start","message":{"id":"msg_1","model":"claude-opus-4-6-20250929","usage":{"input_tokens":150,"output_tokens":0}}}"#;
+        let data = r#"{"type":"message_start","message":{"id":"msg_1","model":"claude-opus-4-6","usage":{"input_tokens":150,"output_tokens":0}}}"#;
         let result = state.process_event_data(data);
         assert!(result.is_none());
         assert!(state.initial_usage.is_some());
@@ -1820,7 +1820,7 @@ mod tests {
 
         let server = MockServer::start().await;
         let sse_body = build_sse_body(&[
-            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-opus-4-6-20250929\",\"usage\":{\"input_tokens\":25,\"output_tokens\":0}}}",
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-opus-4-6\",\"usage\":{\"input_tokens\":25,\"output_tokens\":0}}}",
             "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
             "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}",
             "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\", world!\"}}",
@@ -1858,7 +1858,7 @@ mod tests {
 
         let server = MockServer::start().await;
         let sse_body = build_sse_body(&[
-            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-opus-4-6-20250929\",\"usage\":{\"input_tokens\":50,\"output_tokens\":0}}}",
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-opus-4-6\",\"usage\":{\"input_tokens\":50,\"output_tokens\":0}}}",
             "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_abc\",\"name\":\"read_file\"}}",
             "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\"}}",
             "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"test.txt\\\"}\"}}",
@@ -1902,7 +1902,7 @@ mod tests {
 
         let server = MockServer::start().await;
         let sse_body = build_sse_body(&[
-            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-opus-4-6-20250929\",\"usage\":{\"input_tokens\":30,\"output_tokens\":0}}}",
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-opus-4-6\",\"usage\":{\"input_tokens\":30,\"output_tokens\":0}}}",
             "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
             "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Let me read that.\"}}",
             "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}",
@@ -1942,7 +1942,7 @@ mod tests {
 
         let server = MockServer::start().await;
         let sse_body = build_sse_body(&[
-            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-opus-4-6-20250929\",\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}",
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-opus-4-6\",\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}",
             "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
             "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}",
             "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}",
@@ -2032,7 +2032,7 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200).set_body_raw(
                     build_sse_body(&[
-                        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-opus-4-6-20250929\",\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}",
+                        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-opus-4-6\",\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}",
                         "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}",
                         "event: message_stop\ndata: {\"type\":\"message_stop\"}",
                     ]),
@@ -2061,7 +2061,7 @@ mod tests {
         // This tests that partial chunks are reassembled correctly.
         // The SSE event is split across the response but should still parse.
         let sse_body = build_sse_body(&[
-            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-opus-4-6-20250929\",\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}",
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-opus-4-6\",\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}",
             "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
             "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"chunk\"}}",
             "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}",
@@ -2096,7 +2096,7 @@ mod tests {
         let server = MockServer::start().await;
 
         // Response with incomplete SSE (no message_stop, abrupt end)
-        let incomplete_body = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-opus-4-6-20250929\",\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n";
+        let incomplete_body = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-opus-4-6\",\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n";
 
         Mock::given(method("POST"))
             .and(path("/v1/messages"))

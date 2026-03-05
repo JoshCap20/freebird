@@ -20,7 +20,7 @@ pub struct AppConfig {
 /// Runtime behavior configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {
-    /// Default LLM model ID (e.g., "claude-opus-4-6-20250929").
+    /// Default LLM model ID (e.g., "claude-sonnet-4-6").
     pub default_model: String,
     /// Default provider ID — must match a `ProviderConfig::id` in `providers`.
     pub default_provider: String,
@@ -214,7 +214,7 @@ kind = "file"
         let config: AppConfig =
             toml::from_str(toml_str).expect("default.toml should deserialize into AppConfig");
 
-        assert_eq!(config.runtime.default_model, "claude-opus-4-6-20250929");
+        assert_eq!(config.runtime.default_model, "claude-sonnet-4-6");
         assert_eq!(config.runtime.default_provider, "anthropic");
         assert_eq!(
             config.runtime.system_prompt.as_deref(),
@@ -231,7 +231,7 @@ kind = "file"
     #[test]
     fn test_optional_fields_absent() {
         let toml_str = config_toml_with_runtime(
-            r#"default_model = "claude-opus-4-6-20250929"
+            r#"default_model = "claude-opus-4-6"
 default_provider = "anthropic"
 max_output_tokens = 8192
 max_tool_rounds = 10
@@ -248,7 +248,7 @@ drain_timeout_secs = 30"#,
     #[test]
     fn test_missing_required_field_errors() {
         let toml_str = config_toml_with_runtime(
-            r#"default_model = "claude-opus-4-6-20250929"
+            r#"default_model = "claude-opus-4-6"
 max_output_tokens = 8192
 max_tool_rounds = 10
 max_turns_per_session = 50
@@ -264,7 +264,7 @@ drain_timeout_secs = 30"#,
     #[test]
     fn test_temperature_none_when_absent() {
         let toml_str = config_toml_with_runtime(
-            r#"default_model = "claude-opus-4-6-20250929"
+            r#"default_model = "claude-opus-4-6"
 default_provider = "anthropic"
 max_output_tokens = 8192
 max_tool_rounds = 10

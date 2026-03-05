@@ -1,5 +1,5 @@
 [runtime]
-default_model = "claude-opus-4-6-20250929"
+default_model = "claude-sonnet-4-6"
 default_provider = "anthropic"
 system_prompt = "You are FreeBird, a helpful AI assistant."
 max_output_tokens = 8192

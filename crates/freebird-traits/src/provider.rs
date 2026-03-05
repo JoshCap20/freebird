@@ -265,12 +265,12 @@ mod tests {
     #[test]
     fn test_model_info_uses_model_id_newtype() {
         let model = ModelInfo {
-            id: ModelId::from("claude-opus-4-6-20250929"),
+            id: ModelId::from("claude-opus-4-6"),
             display_name: "Claude Opus 4.6".into(),
             max_context_tokens: 200_000,
             max_output_tokens: 32_768,
         };
-        assert_eq!(model.id.as_str(), "claude-opus-4-6-20250929");
+        assert_eq!(model.id.as_str(), "claude-opus-4-6");
     }
 
     #[test]
@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn test_completion_request_model_is_model_id() {
         let request = CompletionRequest {
-            model: ModelId::from("claude-opus-4-6-20250929"),
+            model: ModelId::from("claude-opus-4-6"),
             system_prompt: None,
             messages: vec![],
             tools: vec![],
@@ -309,12 +309,12 @@ mod tests {
             temperature: None,
             stop_sequences: vec![],
         };
-        assert_eq!(request.model.as_str(), "claude-opus-4-6-20250929");
+        assert_eq!(request.model.as_str(), "claude-opus-4-6");
 
         // Serde roundtrip preserves the newtype
         let json = serde_json::to_string(&request).unwrap();
         let back: CompletionRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.model.as_str(), "claude-opus-4-6-20250929");
+        assert_eq!(back.model.as_str(), "claude-opus-4-6");
     }
 
     #[test]
@@ -329,9 +329,9 @@ mod tests {
             },
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
-            model: ModelId::from("claude-opus-4-6-20250929"),
+            model: ModelId::from("claude-opus-4-6"),
         };
-        assert_eq!(response.model.as_str(), "claude-opus-4-6-20250929");
+        assert_eq!(response.model.as_str(), "claude-opus-4-6");
     }
 
     #[test]
