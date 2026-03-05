@@ -76,6 +76,19 @@ pub enum SecurityError {
 
     #[error("failed to write audit log: {reason}")]
     AuditWriteFailed { reason: String },
+
+    // ── Session authentication ──────────────────────────────────
+    #[error("session key `{key_id}` has expired")]
+    SessionExpired { key_id: String },
+
+    #[error("invalid session key for `{key_id}`")]
+    InvalidSessionKey { key_id: String },
+
+    #[error("TTL too large to represent: {seconds}s exceeds maximum")]
+    InvalidTtl { seconds: u64 },
+
+    #[error("invalid session credential: {reason}")]
+    InvalidCredential { reason: String },
 }
 
 #[cfg(test)]
@@ -218,5 +231,48 @@ mod tests {
         assert_eq!(json, r#""high""#);
         let deserialized: Severity = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, severity);
+    }
+
+    #[test]
+    fn test_security_error_session_expired_display() {
+        let err = SecurityError::SessionExpired {
+            key_id: "freebird_a1b2c3d4e5f6".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "session key `freebird_a1b2c3d4e5f6` has expired"
+        );
+    }
+
+    #[test]
+    fn test_security_error_invalid_session_key_display() {
+        let err = SecurityError::InvalidSessionKey {
+            key_id: "freebird_a1b2c3d4e5f6".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "invalid session key for `freebird_a1b2c3d4e5f6`"
+        );
+    }
+
+    #[test]
+    fn test_security_error_invalid_ttl_display() {
+        let err = SecurityError::InvalidTtl {
+            seconds: 18_446_744_073_709_551_615,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("TTL too large"));
+        assert!(msg.contains("18446744073709551615"));
+    }
+
+    #[test]
+    fn test_security_error_invalid_credential_display() {
+        let err = SecurityError::InvalidCredential {
+            reason: "key_hash must be 64 hex characters".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "invalid session credential: key_hash must be 64 hex characters"
+        );
     }
 }
