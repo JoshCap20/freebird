@@ -51,10 +51,10 @@ impl StreamAccumulator {
     }
 
     /// Consume the accumulator and produce an assistant-role `Message`.
-    #[must_use]
     ///
     /// Flushes any remaining buffered text, then builds a `Message` with
     /// `Role::Assistant` and a timestamp of `Utc::now()`.
+    #[must_use]
     pub fn into_message(mut self) -> Message {
         self.flush_text();
         Message {
