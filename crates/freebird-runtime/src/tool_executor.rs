@@ -11,6 +11,7 @@
 //! 6. Injection scan on output via [`ScannedToolOutput::from_raw`]
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::time::Duration;
 
 use freebird_security::audit::{
@@ -22,6 +23,17 @@ use freebird_security::safe_types::ScannedToolOutput;
 use freebird_traits::id::SessionId;
 use freebird_traits::provider::ToolDefinition;
 use freebird_traits::tool::{Capability, Tool, ToolContext, ToolOutput};
+
+/// Errors that can occur when constructing a [`ToolExecutor`].
+#[derive(Debug, thiserror::Error)]
+pub enum ToolExecutorError {
+    /// Two or more tools share the same name.
+    #[error("duplicate tool name: `{name}`")]
+    DuplicateToolName {
+        /// The tool name that appeared more than once.
+        name: String,
+    },
+}
 
 /// The single security boundary through which all tool calls flow.
 ///
@@ -51,21 +63,27 @@ impl ToolExecutor {
     ///
     /// # Errors
     ///
-    /// Returns an error if two or more tools share the same name.
-    /// Duplicate tool names are a configuration bug — fail loudly at
-    /// startup rather than silently overwriting (CLAUDE.md §3.4).
+    /// Returns [`ToolExecutorError::DuplicateToolName`] if two or more tools
+    /// share the same name. Duplicate tool names are a configuration bug —
+    /// fail loudly at startup rather than silently overwriting (CLAUDE.md §3.4).
     pub fn new(
         tools: Vec<Box<dyn Tool>>,
         default_timeout: Duration,
         audit: Option<AuditLogger>,
-    ) -> Result<Self, anyhow::Error> {
+    ) -> Result<Self, ToolExecutorError> {
         let mut map = HashMap::with_capacity(tools.len());
         for tool in tools {
             let name = tool.info().name.clone();
-            if map.contains_key(&name) {
-                anyhow::bail!("duplicate tool name: `{name}`");
+            match map.entry(name) {
+                Entry::Occupied(e) => {
+                    return Err(ToolExecutorError::DuplicateToolName {
+                        name: e.key().clone(),
+                    });
+                }
+                Entry::Vacant(e) => {
+                    e.insert(tool);
+                }
             }
-            map.insert(name, tool);
         }
         Ok(Self {
             tools: map,
