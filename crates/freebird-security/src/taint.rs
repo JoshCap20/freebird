@@ -39,7 +39,7 @@ use std::path::Path;
 
 use crate::egress::EgressPolicy;
 use crate::error::SecurityError;
-use crate::safe_types::{SafeFilePath, SafeShellArg, SafeUrl};
+use crate::safe_types::{SafeFileContent, SafeFilePath, SafeShellArg, SafeUrl};
 
 /// Opaque wrapper for unvalidated external string input.
 ///
@@ -144,6 +144,20 @@ impl TaintedToolInput {
     pub fn extract_shell_arg(&self, key: &str) -> Result<SafeShellArg, SecurityError> {
         let tainted = self.extract_string(key)?;
         SafeShellArg::from_tainted(&tainted)
+    }
+
+    /// Extract a string field as file content for writing.
+    ///
+    /// No content validation — file content is arbitrary text. The safe type
+    /// exists solely to bridge the `pub(crate)` taint boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SecurityError::MissingField` if the key doesn't exist or
+    /// the value is not a string.
+    pub fn extract_file_content(&self, key: &str) -> Result<SafeFileContent, SecurityError> {
+        let tainted = self.extract_string(key)?;
+        Ok(SafeFileContent::from_tainted(&tainted))
     }
 
     /// Extract a string field and validate it as a URL.

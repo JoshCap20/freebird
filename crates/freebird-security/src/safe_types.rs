@@ -452,6 +452,46 @@ define_scanned_output! {
 /// This is the ONLY way to get a string representation of `Tainted` input
 /// for diagnostics. Contents are truncated and scrubbed — NOT suitable
 /// for processing, only for logging.
+/// File content extracted from tainted tool input.
+///
+/// Unlike `SafeFilePath` or `SafeShellArg`, this type performs NO content
+/// validation — file content is arbitrary text. The safe type exists solely
+/// to bridge the `pub(crate)` taint boundary: tools cannot call
+/// `Tainted::inner()`, but they can call `SafeFileContent::as_str()`.
+///
+/// Security note: the *path* is validated (`SafeFilePath`); the content is
+/// not interpreted by the system. Injection scanning happens on tool
+/// *output* (when content is read back), not on write.
+#[derive(Debug)]
+pub struct SafeFileContent(String);
+
+impl SafeFileContent {
+    /// Extract file content from tainted input. No validation — just
+    /// bridges the `pub(crate)` boundary.
+    #[must_use]
+    pub fn from_tainted(t: &Tainted) -> Self {
+        Self(t.inner().to_owned())
+    }
+
+    /// Access the file content.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Byte length of the content.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the content is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 pub struct Redacted(String);
 
 const MAX_REDACTED_LEN: usize = 80;
