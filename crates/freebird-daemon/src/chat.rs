@@ -12,6 +12,7 @@ use freebird_types::protocol::{ClientMessage, ServerMessage};
 /// Parse a line of user input into a [`ClientMessage`].
 ///
 /// Returns `None` for `/quit` and `/exit` (signals the caller to disconnect).
+#[must_use]
 pub fn parse_user_input(line: &str) -> Option<ClientMessage> {
     if line == "/quit" || line == "/exit" {
         return None;
@@ -37,6 +38,7 @@ pub fn parse_user_input(line: &str) -> Option<ClientMessage> {
 }
 
 /// Render a [`ServerMessage`] as user-facing text.
+#[must_use]
 pub fn render_server_message(msg: &ServerMessage) -> String {
     match msg {
         ServerMessage::Message { text } | ServerMessage::CommandResponse { text } => {
