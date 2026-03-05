@@ -464,6 +464,7 @@ dependencies = [
  "freebird-traits",
  "freebird-types",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]
