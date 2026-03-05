@@ -6,6 +6,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod agent;
+pub mod history;
 pub mod registry;
 pub mod router;
 pub mod session;
