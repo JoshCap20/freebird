@@ -268,10 +268,16 @@ impl AuditLogger {
         let path = path.as_ref();
 
         // Read existing content (if any) and verify chain.
-        let (sequence, last_hash, truncate_to) = if path.exists() {
-            Self::verify_and_recover(path, &signing_key)?
-        } else {
-            (0, String::new(), None)
+        // Attempt the read directly instead of checking exists() first,
+        // eliminating a TOCTOU race between the check and the read.
+        let (sequence, last_hash, truncate_to) = match std::fs::read_to_string(path) {
+            Ok(content) => Self::verify_and_recover_from_content(&content, &signing_key)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (0, String::new(), None),
+            Err(e) => {
+                return Err(SecurityError::AuditWriteFailed {
+                    reason: format!("failed to read audit log: {e}"),
+                });
+            }
         };
 
         // If we need to truncate a partial trailing line, do so before opening for append.
@@ -444,20 +450,19 @@ impl AuditLogger {
         Ok(())
     }
 
-    /// Read an existing log file, verify the chain, and return recovery state.
+    /// Verify a chain from already-read content and return recovery state.
     ///
     /// Returns `(next_sequence, last_valid_hmac, optional_truncate_position)`.
     /// If the last line is a partial write (crash recovery), returns the byte
     /// position to truncate to.
-    fn verify_and_recover(
-        path: &Path,
+    ///
+    /// Accepts the file content as a `&str` so the caller handles the I/O
+    /// (eliminating the TOCTOU race that existed when `new()` checked
+    /// `path.exists()` before calling into this method).
+    fn verify_and_recover_from_content(
+        content: &str,
         signing_key: &hmac::Key,
     ) -> Result<(u64, String, Option<u64>), SecurityError> {
-        let content =
-            std::fs::read_to_string(path).map_err(|e| SecurityError::AuditWriteFailed {
-                reason: format!("failed to read audit log: {e}"),
-            })?;
-
         if content.is_empty() {
             return Ok((0, String::new(), None));
         }

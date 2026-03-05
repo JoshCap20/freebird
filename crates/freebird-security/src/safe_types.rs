@@ -223,29 +223,33 @@ impl SafeFilePath {
         // Construct resolved path
         let resolved = canonical_parent.join(filename);
 
-        // Overwrite-safe: if the path already exists (e.g., as a symlink),
-        // canonicalize it to detect symlink escapes. A symlink to /etc/passwd
-        // at this path would pass parent validation but canonicalize reveals the escape.
-        if resolved.exists() {
-            let actual = resolved
-                .canonicalize()
-                .map_err(|e| SecurityError::PathResolution {
-                    path: resolved.clone(),
-                    source: e,
-                })?;
-            if !actual.starts_with(&root) {
-                return Err(SecurityError::PathTraversal {
-                    attempted: actual,
-                    sandbox: root,
-                });
+        // Overwrite-safe: attempt to canonicalize the resolved path to detect
+        // symlink escapes. A symlink to /etc/passwd at this path would pass
+        // parent validation but canonicalize reveals the escape.
+        //
+        // We canonicalize unconditionally instead of checking exists() first,
+        // eliminating a TOCTOU race between the existence check and canonicalize.
+        match resolved.canonicalize() {
+            Ok(actual) => {
+                if !actual.starts_with(&root) {
+                    return Err(SecurityError::PathTraversal {
+                        attempted: actual,
+                        sandbox: root,
+                    });
+                }
+                Ok(Self {
+                    resolved: actual,
+                    root,
+                })
             }
-            return Ok(Self {
-                resolved: actual,
-                root,
-            });
+            // NotFound means the path doesn't exist yet — this is the creation
+            // case, so no symlink escape is possible at this location.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self { resolved, root }),
+            Err(e) => Err(SecurityError::PathResolution {
+                path: resolved,
+                source: e,
+            }),
         }
-
-        Ok(Self { resolved, root })
     }
 
     /// Access the validated, canonicalized path.
