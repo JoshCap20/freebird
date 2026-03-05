@@ -12,6 +12,7 @@ use freebird_security::audit::{
     AuditEventType, AuditLogger, CapabilityCheckResult, InjectionSource,
 };
 use freebird_security::error::Severity;
+use freebird_security::injection;
 use freebird_security::safe_types::{SafeMessage, ScannedModelResponse, ScannedToolOutput};
 use freebird_security::taint::Tainted;
 use freebird_traits::channel::{
@@ -414,6 +415,25 @@ impl AgentRuntime {
             self.tools.iter().map(|t| t.to_definition()).collect();
 
         let mut messages = conversation_to_messages(conversation);
+
+        // CLAUDE.md §14: scan loaded conversation history for context injection
+        // before sending to provider. Filter out any messages containing injection
+        // patterns to prevent memory poisoning attacks.
+        messages.retain(|msg| {
+            for block in &msg.content {
+                if let ContentBlock::Text { text } = block {
+                    if injection::scan_context(text).is_err() {
+                        tracing::warn!(
+                            role = ?msg.role,
+                            "context injection detected in loaded history, removing message"
+                        );
+                        return false;
+                    }
+                }
+            }
+            true
+        });
+
         messages.push(user_message.clone());
 
         let current_turn = Turn {
@@ -1101,7 +1121,15 @@ async fn send_stream_error(outbound: &mpsc::Sender<OutboundEvent>, sender_id: &s
 
 /// Join all `ContentBlock::Text` blocks in a message.
 fn extract_text(message: &Message) -> String {
-    let mut result = String::new();
+    let total_len: usize = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.len()),
+            _ => None,
+        })
+        .sum();
+    let mut result = String::with_capacity(total_len);
     for block in &message.content {
         if let ContentBlock::Text { text } = block {
             result.push_str(text);
