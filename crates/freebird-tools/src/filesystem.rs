@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+use tokio::io::AsyncReadExt;
 
 use freebird_security::taint::TaintedToolInput;
 use freebird_traits::tool::{
@@ -18,7 +19,7 @@ use freebird_traits::tool::{
 ///
 /// Prevents the LLM context window from being flooded with a single
 /// file read. Matches the egress `max_body_bytes` default.
-const MAX_READ_FILE_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_READ_FILE_BYTES: usize = 10 * 1024 * 1024;
 
 /// Maximum number of entries `list_directory` will return.
 ///
@@ -26,29 +27,31 @@ const MAX_READ_FILE_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_DIR_ENTRIES: usize = 1000;
 
 /// Returns all filesystem tools as trait objects.
+///
+/// `sandbox_root` is reserved for future per-tool sandbox configuration.
+/// Currently, the sandbox is provided at execution time via `ToolContext`.
 #[must_use]
-pub fn filesystem_tools(sandbox_root: PathBuf) -> Vec<Box<dyn Tool>> {
+pub fn filesystem_tools(_sandbox_root: PathBuf) -> Vec<Box<dyn Tool>> {
     vec![
-        Box::new(ReadFileTool::new(sandbox_root.clone())),
-        Box::new(WriteFileTool::new(sandbox_root.clone())),
-        Box::new(ListDirectoryTool::new(sandbox_root)),
+        Box::new(ReadFileTool::new()),
+        Box::new(WriteFileTool::new()),
+        Box::new(ListDirectoryTool::new()),
     ]
 }
 
 // ── ReadFileTool ────────────────────────────────────────────────────
 
 struct ReadFileTool {
-    #[allow(dead_code)]
-    sandbox_root: PathBuf,
     info: ToolInfo,
 }
 
 impl ReadFileTool {
-    fn new(sandbox_root: PathBuf) -> Self {
+    const NAME: &str = "read_file";
+
+    fn new() -> Self {
         Self {
-            sandbox_root,
             info: ToolInfo {
-                name: "read_file".into(),
+                name: Self::NAME.into(),
                 description: "Read the contents of a file as UTF-8 text. Maximum 10 MiB.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -83,34 +86,40 @@ impl Tool for ReadFileTool {
         let safe_path = tainted
             .extract_path("path", context.sandbox_root)
             .map_err(|e| ToolError::InvalidInput {
-                tool: "read_file".into(),
+                tool: Self::NAME.into(),
                 reason: e.to_string(),
             })?;
 
-        let metadata = tokio::fs::metadata(safe_path.as_path())
+        // Capped read: open → read up to limit+1 → reject if over limit.
+        // Single atomic operation avoids TOCTOU between metadata and read.
+        let file = tokio::fs::File::open(safe_path.as_path())
             .await
             .map_err(|e| ToolError::ExecutionFailed {
-                tool: "read_file".into(),
+                tool: Self::NAME.into(),
                 reason: e.to_string(),
             })?;
 
-        if metadata.len() > MAX_READ_FILE_BYTES {
+        let cap = MAX_READ_FILE_BYTES + 1;
+        let mut buf = Vec::with_capacity(cap.min(8 * 1024));
+        file.take(cap as u64)
+            .read_to_end(&mut buf)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                tool: Self::NAME.into(),
+                reason: e.to_string(),
+            })?;
+
+        if buf.len() > MAX_READ_FILE_BYTES {
             return Err(ToolError::ExecutionFailed {
-                tool: "read_file".into(),
-                reason: format!(
-                    "file is {} bytes, exceeds {} byte limit",
-                    metadata.len(),
-                    MAX_READ_FILE_BYTES,
-                ),
+                tool: Self::NAME.into(),
+                reason: format!("file exceeds {MAX_READ_FILE_BYTES} byte limit"),
             });
         }
 
-        let file_content = tokio::fs::read_to_string(safe_path.as_path())
-            .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool: "read_file".into(),
-                reason: e.to_string(),
-            })?;
+        let file_content = String::from_utf8(buf).map_err(|_| ToolError::ExecutionFailed {
+            tool: Self::NAME.into(),
+            reason: "file is not valid UTF-8".into(),
+        })?;
 
         Ok(ToolOutput {
             content: file_content,
@@ -123,17 +132,16 @@ impl Tool for ReadFileTool {
 // ── WriteFileTool ───────────────────────────────────────────────────
 
 struct WriteFileTool {
-    #[allow(dead_code)]
-    sandbox_root: PathBuf,
     info: ToolInfo,
 }
 
 impl WriteFileTool {
-    fn new(sandbox_root: PathBuf) -> Self {
+    const NAME: &str = "write_file";
+
+    fn new() -> Self {
         Self {
-            sandbox_root,
             info: ToolInfo {
-                name: "write_file".into(),
+                name: Self::NAME.into(),
                 description:
                     "Write text content to a file. Creates the file if it doesn't exist. Uses atomic write (temp file + rename)."
                         .into(),
@@ -174,14 +182,14 @@ impl Tool for WriteFileTool {
         let safe_path = tainted
             .extract_path_for_creation("path", context.sandbox_root)
             .map_err(|e| ToolError::InvalidInput {
-                tool: "write_file".into(),
+                tool: Self::NAME.into(),
                 reason: e.to_string(),
             })?;
         let file_content =
             tainted
                 .extract_file_content("content")
                 .map_err(|e| ToolError::InvalidInput {
-                    tool: "write_file".into(),
+                    tool: Self::NAME.into(),
                     reason: e.to_string(),
                 })?;
 
@@ -201,7 +209,7 @@ impl Tool for WriteFileTool {
         tokio::fs::write(&tmp_path, file_content.as_str())
             .await
             .map_err(|e| ToolError::ExecutionFailed {
-                tool: "write_file".into(),
+                tool: Self::NAME.into(),
                 reason: e.to_string(),
             })?;
 
@@ -209,7 +217,7 @@ impl Tool for WriteFileTool {
             // Clean up temp file on rename failure
             let _ = tokio::fs::remove_file(&tmp_path).await;
             return Err(ToolError::ExecutionFailed {
-                tool: "write_file".into(),
+                tool: Self::NAME.into(),
                 reason: e.to_string(),
             });
         }
@@ -235,17 +243,16 @@ impl Tool for WriteFileTool {
 // ── ListDirectoryTool ───────────────────────────────────────────────
 
 struct ListDirectoryTool {
-    #[allow(dead_code)]
-    sandbox_root: PathBuf,
     info: ToolInfo,
 }
 
 impl ListDirectoryTool {
-    fn new(sandbox_root: PathBuf) -> Self {
+    const NAME: &str = "list_directory";
+
+    fn new() -> Self {
         Self {
-            sandbox_root,
             info: ToolInfo {
-                name: "list_directory".into(),
+                name: Self::NAME.into(),
                 description:
                     "List files and directories. Returns up to 1000 entries sorted alphabetically, each prefixed with type (file/dir/symlink)."
                         .into(),
@@ -282,7 +289,7 @@ impl Tool for ListDirectoryTool {
         let safe_path = tainted
             .extract_path("path", context.sandbox_root)
             .map_err(|e| ToolError::InvalidInput {
-                tool: "list_directory".into(),
+                tool: Self::NAME.into(),
                 reason: e.to_string(),
             })?;
 
@@ -290,20 +297,21 @@ impl Tool for ListDirectoryTool {
         let mut dir = tokio::fs::read_dir(safe_path.as_path())
             .await
             .map_err(|e| ToolError::ExecutionFailed {
-                tool: "list_directory".into(),
+                tool: Self::NAME.into(),
                 reason: e.to_string(),
             })?;
 
+        let mut truncated = false;
         while let Some(entry) = dir
             .next_entry()
             .await
             .map_err(|e| ToolError::ExecutionFailed {
-                tool: "list_directory".into(),
+                tool: Self::NAME.into(),
                 reason: e.to_string(),
             })?
         {
             if entries.len() >= MAX_DIR_ENTRIES {
-                entries.push(format!("... truncated ({MAX_DIR_ENTRIES} entry limit)"));
+                truncated = true;
                 break;
             }
             let file_type = entry.file_type().await.ok();
@@ -316,6 +324,9 @@ impl Tool for ListDirectoryTool {
         }
 
         entries.sort();
+        if truncated {
+            entries.push(format!("... truncated ({MAX_DIR_ENTRIES} entry limit)"));
+        }
 
         Ok(ToolOutput {
             content: if entries.is_empty() {
@@ -339,7 +350,7 @@ mod tests {
 
     use super::*;
 
-    fn make_context(_sandbox: &std::path::Path) -> (SessionId, Vec<Capability>) {
+    fn make_context() -> (SessionId, Vec<Capability>) {
         let session_id = SessionId::from_string("test-session");
         let caps = vec![Capability::FileRead, Capability::FileWrite];
         (session_id, caps)
@@ -352,8 +363,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("hello.txt"), "Hello, world!").unwrap();
 
-        let tool = ReadFileTool::new(tmp.path().to_path_buf());
-        let (sid, caps) = make_context(tmp.path());
+        let tool = ReadFileTool::new();
+        let (sid, caps) = make_context();
         let ctx = ToolContext {
             session_id: &sid,
             sandbox_root: tmp.path(),
@@ -371,8 +382,8 @@ mod tests {
     #[tokio::test]
     async fn test_read_nonexistent_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let tool = ReadFileTool::new(tmp.path().to_path_buf());
-        let (sid, caps) = make_context(tmp.path());
+        let tool = ReadFileTool::new();
+        let (sid, caps) = make_context();
         let ctx = ToolContext {
             session_id: &sid,
             sandbox_root: tmp.path(),
@@ -396,8 +407,8 @@ mod tests {
     #[tokio::test]
     async fn test_read_path_traversal_rejected() {
         let tmp = tempfile::tempdir().unwrap();
-        let tool = ReadFileTool::new(tmp.path().to_path_buf());
-        let (sid, caps) = make_context(tmp.path());
+        let tool = ReadFileTool::new();
+        let (sid, caps) = make_context();
         let ctx = ToolContext {
             session_id: &sid,
             sandbox_root: tmp.path(),
@@ -417,8 +428,8 @@ mod tests {
     #[tokio::test]
     async fn test_read_missing_path_field() {
         let tmp = tempfile::tempdir().unwrap();
-        let tool = ReadFileTool::new(tmp.path().to_path_buf());
-        let (sid, caps) = make_context(tmp.path());
+        let tool = ReadFileTool::new();
+        let (sid, caps) = make_context();
         let ctx = ToolContext {
             session_id: &sid,
             sandbox_root: tmp.path(),
@@ -441,8 +452,8 @@ mod tests {
             f.write_all(&[0xFF, 0xFE, 0x00, 0x01]).unwrap();
         }
 
-        let tool = ReadFileTool::new(tmp.path().to_path_buf());
-        let (sid, caps) = make_context(tmp.path());
+        let tool = ReadFileTool::new();
+        let (sid, caps) = make_context();
         let ctx = ToolContext {
             session_id: &sid,
             sandbox_root: tmp.path(),
@@ -466,11 +477,11 @@ mod tests {
         {
             let f = std::fs::File::create(&file_path).unwrap();
             // Set file size to just over the limit without writing all bytes
-            f.set_len(MAX_READ_FILE_BYTES + 1).unwrap();
+            f.set_len((MAX_READ_FILE_BYTES + 1) as u64).unwrap();
         }
 
-        let tool = ReadFileTool::new(tmp.path().to_path_buf());
-        let (sid, caps) = make_context(tmp.path());
+        let tool = ReadFileTool::new();
+        let (sid, caps) = make_context();
         let ctx = ToolContext {
             session_id: &sid,
             sandbox_root: tmp.path(),
@@ -497,8 +508,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("empty.txt"), "").unwrap();
 
-        let tool = ReadFileTool::new(tmp.path().to_path_buf());
-        let (sid, caps) = make_context(tmp.path());
+        let tool = ReadFileTool::new();
+        let (sid, caps) = make_context();
         let ctx = ToolContext {
             session_id: &sid,
             sandbox_root: tmp.path(),
@@ -516,8 +527,8 @@ mod tests {
     #[tokio::test]
     async fn test_read_absolute_path_rejected() {
         let tmp = tempfile::tempdir().unwrap();
-        let tool = ReadFileTool::new(tmp.path().to_path_buf());
-        let (sid, caps) = make_context(tmp.path());
+        let tool = ReadFileTool::new();
+        let (sid, caps) = make_context();
         let ctx = ToolContext {
             session_id: &sid,
             sandbox_root: tmp.path(),
@@ -539,8 +550,8 @@ mod tests {
     #[tokio::test]
     async fn test_write_new_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let tool = WriteFileTool::new(tmp.path().to_path_buf());
-        let (sid, caps) = make_context(tmp.path());
+        let tool = WriteFileTool::new();
+        let (sid, caps) = make_context();
         let ctx = ToolContext {
             session_id: &sid,
             sandbox_root: tmp.path(),
@@ -565,8 +576,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("existing.txt"), "old content").unwrap();
 
-        let tool = WriteFileTool::new(tmp.path().to_path_buf());
-        let (sid, caps) = make_context(tmp.path());
+        let tool = WriteFileTool::new();
+        let (sid, caps) = make_context();
         let ctx = ToolContext {
             session_id: &sid,
             sandbox_root: tmp.path(),
@@ -589,8 +600,8 @@ mod tests {
     #[tokio::test]
     async fn test_write_path_traversal_rejected() {
         let tmp = tempfile::tempdir().unwrap();
-        let tool = WriteFileTool::new(tmp.path().to_path_buf());
-        let (sid, caps) = make_context(tmp.path());
+        let tool = WriteFileTool::new();
+        let (sid, caps) = make_context();
         let ctx = ToolContext {
             session_id: &sid,
             sandbox_root: tmp.path(),
@@ -613,8 +624,8 @@ mod tests {
     #[tokio::test]
     async fn test_write_missing_path_field() {
         let tmp = tempfile::tempdir().unwrap();
-        let tool = WriteFileTool::new(tmp.path().to_path_buf());
-        let (sid, caps) = make_context(tmp.path());
+        let tool = WriteFileTool::new();
+        let (sid, caps) = make_context();
         let ctx = ToolContext {
             session_id: &sid,
             sandbox_root: tmp.path(),
@@ -634,8 +645,8 @@ mod tests {
     #[tokio::test]
     async fn test_write_missing_content_field() {
         let tmp = tempfile::tempdir().unwrap();
-        let tool = WriteFileTool::new(tmp.path().to_path_buf());
-        let (sid, caps) = make_context(tmp.path());
+        let tool = WriteFileTool::new();
+        let (sid, caps) = make_context();
         let ctx = ToolContext {
             session_id: &sid,
             sandbox_root: tmp.path(),
@@ -655,8 +666,8 @@ mod tests {
     #[tokio::test]
     async fn test_write_nonexistent_parent_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let tool = WriteFileTool::new(tmp.path().to_path_buf());
-        let (sid, caps) = make_context(tmp.path());
+        let tool = WriteFileTool::new();
+        let (sid, caps) = make_context();
         let ctx = ToolContext {
             session_id: &sid,
             sandbox_root: tmp.path(),
@@ -679,8 +690,8 @@ mod tests {
     #[tokio::test]
     async fn test_write_output_reports_relative_path() {
         let tmp = tempfile::tempdir().unwrap();
-        let tool = WriteFileTool::new(tmp.path().to_path_buf());
-        let (sid, caps) = make_context(tmp.path());
+        let tool = WriteFileTool::new();
+        let (sid, caps) = make_context();
         let ctx = ToolContext {
             session_id: &sid,
             sandbox_root: tmp.path(),
@@ -710,8 +721,8 @@ mod tests {
     #[tokio::test]
     async fn test_write_no_orphaned_temp_on_success() {
         let tmp = tempfile::tempdir().unwrap();
-        let tool = WriteFileTool::new(tmp.path().to_path_buf());
-        let (sid, caps) = make_context(tmp.path());
+        let tool = WriteFileTool::new();
+        let (sid, caps) = make_context();
         let ctx = ToolContext {
             session_id: &sid,
             sandbox_root: tmp.path(),
@@ -746,8 +757,8 @@ mod tests {
         std::fs::write(tmp.path().join("apple.txt"), "").unwrap();
         std::fs::create_dir(tmp.path().join("cherry_dir")).unwrap();
 
-        let tool = ListDirectoryTool::new(tmp.path().to_path_buf());
-        let (sid, caps) = make_context(tmp.path());
+        let tool = ListDirectoryTool::new();
+        let (sid, caps) = make_context();
         let ctx = ToolContext {
             session_id: &sid,
             sandbox_root: tmp.path(),
@@ -771,8 +782,8 @@ mod tests {
     #[tokio::test]
     async fn test_list_nonexistent_directory() {
         let tmp = tempfile::tempdir().unwrap();
-        let tool = ListDirectoryTool::new(tmp.path().to_path_buf());
-        let (sid, caps) = make_context(tmp.path());
+        let tool = ListDirectoryTool::new();
+        let (sid, caps) = make_context();
         let ctx = ToolContext {
             session_id: &sid,
             sandbox_root: tmp.path(),
@@ -796,8 +807,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("afile.txt"), "content").unwrap();
 
-        let tool = ListDirectoryTool::new(tmp.path().to_path_buf());
-        let (sid, caps) = make_context(tmp.path());
+        let tool = ListDirectoryTool::new();
+        let (sid, caps) = make_context();
         let ctx = ToolContext {
             session_id: &sid,
             sandbox_root: tmp.path(),
@@ -817,8 +828,8 @@ mod tests {
     #[tokio::test]
     async fn test_list_path_traversal_rejected() {
         let tmp = tempfile::tempdir().unwrap();
-        let tool = ListDirectoryTool::new(tmp.path().to_path_buf());
-        let (sid, caps) = make_context(tmp.path());
+        let tool = ListDirectoryTool::new();
+        let (sid, caps) = make_context();
         let ctx = ToolContext {
             session_id: &sid,
             sandbox_root: tmp.path(),
@@ -840,8 +851,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join("empty")).unwrap();
 
-        let tool = ListDirectoryTool::new(tmp.path().to_path_buf());
-        let (sid, caps) = make_context(tmp.path());
+        let tool = ListDirectoryTool::new();
+        let (sid, caps) = make_context();
         let ctx = ToolContext {
             session_id: &sid,
             sandbox_root: tmp.path(),
@@ -854,6 +865,89 @@ mod tests {
             .unwrap();
         assert_eq!(output.content, "(empty directory)");
         assert!(!output.is_error);
+    }
+
+    #[tokio::test]
+    async fn test_write_empty_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = WriteFileTool::new();
+        let (sid, caps) = make_context();
+        let ctx = ToolContext {
+            session_id: &sid,
+            sandbox_root: tmp.path(),
+            granted_capabilities: &caps,
+        };
+
+        let output = tool
+            .execute(
+                serde_json::json!({"path": "empty.txt", "content": ""}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(!output.is_error);
+        assert!(output.content.contains("0 bytes"));
+
+        let written = std::fs::read_to_string(tmp.path().join("empty.txt")).unwrap();
+        assert_eq!(written, "");
+    }
+
+    #[tokio::test]
+    async fn test_write_absolute_path_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = WriteFileTool::new();
+        let (sid, caps) = make_context();
+        let ctx = ToolContext {
+            session_id: &sid,
+            sandbox_root: tmp.path(),
+            granted_capabilities: &caps,
+        };
+
+        let err = tool
+            .execute(
+                serde_json::json!({"path": "/etc/evil", "content": "x"}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput { tool, .. } => assert_eq!(tool, "write_file"),
+            other => panic!("expected InvalidInput, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_directory_truncates_at_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("big");
+        std::fs::create_dir(&dir).unwrap();
+        // Create MAX_DIR_ENTRIES + 5 files to exceed the cap
+        for i in 0..MAX_DIR_ENTRIES + 5 {
+            std::fs::write(dir.join(format!("f{i:05}.txt")), "").unwrap();
+        }
+
+        let tool = ListDirectoryTool::new();
+        let (sid, caps) = make_context();
+        let ctx = ToolContext {
+            session_id: &sid,
+            sandbox_root: tmp.path(),
+            granted_capabilities: &caps,
+        };
+
+        let output = tool
+            .execute(serde_json::json!({"path": "big"}), &ctx)
+            .await
+            .unwrap();
+        assert!(!output.is_error);
+
+        let lines: Vec<&str> = output.content.lines().collect();
+        // MAX_DIR_ENTRIES entries + 1 truncation message
+        assert_eq!(lines.len(), MAX_DIR_ENTRIES + 1);
+        let last = lines[lines.len() - 1];
+        assert!(
+            last.contains("truncated"),
+            "last line should be truncation notice: {last}"
+        );
     }
 
     // ── Factory test ────────────────────────────────────────────
