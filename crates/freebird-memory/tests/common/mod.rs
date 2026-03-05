@@ -20,13 +20,13 @@ pub fn make_conversation(
                 }],
                 timestamp: updated_at,
             },
-            assistant_response: Some(Message {
+            assistant_messages: vec![Message {
                 role: Role::Assistant,
                 content: vec![ContentBlock::Text {
                     text: "Response".to_string(),
                 }],
                 timestamp: updated_at,
-            }),
+            }],
             tool_invocations: vec![],
             started_at: updated_at,
             completed_at: Some(updated_at),

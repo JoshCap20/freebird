@@ -27,6 +27,7 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::history::conversation_to_messages;
 use crate::registry::ProviderRegistry;
 
 /// Error message sent to the user when model output injection is detected.
@@ -399,7 +400,7 @@ impl AgentRuntime {
 
         let mut current_turn = Turn {
             user_message,
-            assistant_response: None,
+            assistant_messages: Vec::new(),
             tool_invocations: Vec::new(),
             started_at: Utc::now(),
             completed_at: None,
@@ -524,6 +525,11 @@ impl AgentRuntime {
             })
             .collect();
 
+        // Record intermediate assistant message in the turn for persistence
+        current_turn
+            .assistant_messages
+            .push(response.message.clone());
+
         // Add assistant message with tool_use blocks to conversation
         messages.push(response.message.clone());
 
@@ -603,7 +609,9 @@ impl AgentRuntime {
         // only tool-use blocks with no text, or genuinely empty content.
         if response_text.is_empty() {
             tracing::warn!(%session_id, "model returned empty text response, skipping delivery");
-            current_turn.assistant_response = Some(response.message.clone());
+            current_turn
+                .assistant_messages
+                .push(response.message.clone());
             current_turn.completed_at = Some(Utc::now());
             return;
         }
@@ -618,7 +626,9 @@ impl AgentRuntime {
                     })
                     .await;
 
-                current_turn.assistant_response = Some(response.message.clone());
+                current_turn
+                    .assistant_messages
+                    .push(response.message.clone());
                 current_turn.completed_at = Some(Utc::now());
             }
             Err(e) => {
@@ -663,7 +673,9 @@ impl AgentRuntime {
                     })
                     .await;
 
-                current_turn.assistant_response = Some(response.message.clone());
+                current_turn
+                    .assistant_messages
+                    .push(response.message.clone());
                 current_turn.completed_at = Some(Utc::now());
             }
             Err(e) => {
@@ -786,55 +798,10 @@ fn extract_text(message: &Message) -> String {
     result
 }
 
-/// Reconstruct a flat message list from conversation turns.
-///
-/// Inline helper — will be replaced by a proper abstraction in #18.
-fn conversation_to_messages(conversation: &Conversation) -> Vec<Message> {
-    // Each turn produces at least 2 messages (user + assistant), possibly 3 (+ tool results)
-    let mut messages = Vec::with_capacity(conversation.turns.len() * 2);
-
-    for turn in &conversation.turns {
-        messages.push(turn.user_message.clone());
-
-        if let Some(ref response) = turn.assistant_response {
-            messages.push(response.clone());
-
-            // If the response contained tool_use blocks, also add tool results
-            let has_tool_use = response
-                .content
-                .iter()
-                .any(|b| matches!(b, ContentBlock::ToolUse { .. }));
-
-            if has_tool_use {
-                let tool_results: Vec<ContentBlock> = turn
-                    .tool_invocations
-                    .iter()
-                    .map(|inv| ContentBlock::ToolResult {
-                        tool_use_id: inv.tool_use_id.clone(),
-                        content: inv.output.clone().unwrap_or_default(),
-                        is_error: inv.is_error,
-                    })
-                    .collect();
-
-                if !tool_results.is_empty() {
-                    messages.push(Message {
-                        role: Role::User,
-                        content: tool_results,
-                        timestamp: turn.started_at,
-                    });
-                }
-            }
-        }
-    }
-
-    messages
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
-    use freebird_traits::memory::ToolInvocation;
 
     // -- extract_text --
 
@@ -911,245 +878,5 @@ mod tests {
             timestamp: Utc::now(),
         };
         assert_eq!(extract_text(&msg), "");
-    }
-
-    // -- conversation_to_messages --
-
-    #[test]
-    fn test_conversation_to_messages_empty() {
-        let conv = Conversation {
-            session_id: SessionId::from("s1"),
-            system_prompt: None,
-            turns: vec![],
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            model_id: "m".into(),
-            provider_id: "p".into(),
-        };
-        let msgs = conversation_to_messages(&conv);
-        assert!(msgs.is_empty());
-    }
-
-    #[test]
-    fn test_conversation_to_messages_simple_turn() {
-        let conv = Conversation {
-            session_id: SessionId::from("s1"),
-            system_prompt: None,
-            turns: vec![Turn {
-                user_message: Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::Text { text: "hi".into() }],
-                    timestamp: Utc::now(),
-                },
-                assistant_response: Some(Message {
-                    role: Role::Assistant,
-                    content: vec![ContentBlock::Text {
-                        text: "hello".into(),
-                    }],
-                    timestamp: Utc::now(),
-                }),
-                tool_invocations: vec![],
-                started_at: Utc::now(),
-                completed_at: Some(Utc::now()),
-            }],
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            model_id: "m".into(),
-            provider_id: "p".into(),
-        };
-        let msgs = conversation_to_messages(&conv);
-        assert_eq!(msgs.len(), 2);
-        assert_eq!(msgs[0].role, Role::User);
-        assert_eq!(msgs[1].role, Role::Assistant);
-    }
-
-    #[test]
-    fn test_conversation_to_messages_tool_turn() {
-        let conv = Conversation {
-            session_id: SessionId::from("s1"),
-            system_prompt: None,
-            turns: vec![Turn {
-                user_message: Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::Text {
-                        text: "read file".into(),
-                    }],
-                    timestamp: Utc::now(),
-                },
-                assistant_response: Some(Message {
-                    role: Role::Assistant,
-                    content: vec![ContentBlock::ToolUse {
-                        id: "call-1".into(),
-                        name: "read_file".into(),
-                        input: serde_json::json!({}),
-                    }],
-                    timestamp: Utc::now(),
-                }),
-                tool_invocations: vec![ToolInvocation {
-                    tool_use_id: "call-1".into(),
-                    tool_name: "read_file".into(),
-                    input: serde_json::json!({}),
-                    output: Some("file content".into()),
-                    is_error: false,
-                    duration_ms: Some(10),
-                }],
-                started_at: Utc::now(),
-                completed_at: Some(Utc::now()),
-            }],
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            model_id: "m".into(),
-            provider_id: "p".into(),
-        };
-        let msgs = conversation_to_messages(&conv);
-        // User message + assistant tool_use + user tool_result
-        assert_eq!(msgs.len(), 3);
-        assert_eq!(msgs[0].role, Role::User);
-        assert_eq!(msgs[1].role, Role::Assistant);
-        assert_eq!(msgs[2].role, Role::User);
-        // Verify the tool result content
-        assert!(matches!(
-            &msgs[2].content[0],
-            ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-            } if tool_use_id == "call-1" && content == "file content" && !is_error
-        ));
-    }
-
-    #[test]
-    fn test_conversation_to_messages_incomplete_turn() {
-        let conv = Conversation {
-            session_id: SessionId::from("s1"),
-            system_prompt: None,
-            turns: vec![Turn {
-                user_message: Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::Text { text: "hi".into() }],
-                    timestamp: Utc::now(),
-                },
-                assistant_response: None, // no response yet
-                tool_invocations: vec![],
-                started_at: Utc::now(),
-                completed_at: None,
-            }],
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            model_id: "m".into(),
-            provider_id: "p".into(),
-        };
-        let msgs = conversation_to_messages(&conv);
-        // Only the user message
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].role, Role::User);
-    }
-
-    #[test]
-    fn test_conversation_to_messages_multi_turn() {
-        let conv = Conversation {
-            session_id: SessionId::from("s1"),
-            system_prompt: None,
-            turns: vec![
-                Turn {
-                    user_message: Message {
-                        role: Role::User,
-                        content: vec![ContentBlock::Text {
-                            text: "first".into(),
-                        }],
-                        timestamp: Utc::now(),
-                    },
-                    assistant_response: Some(Message {
-                        role: Role::Assistant,
-                        content: vec![ContentBlock::Text {
-                            text: "response1".into(),
-                        }],
-                        timestamp: Utc::now(),
-                    }),
-                    tool_invocations: vec![],
-                    started_at: Utc::now(),
-                    completed_at: Some(Utc::now()),
-                },
-                Turn {
-                    user_message: Message {
-                        role: Role::User,
-                        content: vec![ContentBlock::Text {
-                            text: "second".into(),
-                        }],
-                        timestamp: Utc::now(),
-                    },
-                    assistant_response: Some(Message {
-                        role: Role::Assistant,
-                        content: vec![ContentBlock::Text {
-                            text: "response2".into(),
-                        }],
-                        timestamp: Utc::now(),
-                    }),
-                    tool_invocations: vec![],
-                    started_at: Utc::now(),
-                    completed_at: Some(Utc::now()),
-                },
-            ],
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            model_id: "m".into(),
-            provider_id: "p".into(),
-        };
-        let msgs = conversation_to_messages(&conv);
-        assert_eq!(msgs.len(), 4);
-        assert_eq!(msgs[0].role, Role::User);
-        assert_eq!(msgs[1].role, Role::Assistant);
-        assert_eq!(msgs[2].role, Role::User);
-        assert_eq!(msgs[3].role, Role::Assistant);
-    }
-
-    #[test]
-    fn test_conversation_to_messages_tool_with_no_output() {
-        let conv = Conversation {
-            session_id: SessionId::from("s1"),
-            system_prompt: None,
-            turns: vec![Turn {
-                user_message: Message {
-                    role: Role::User,
-                    content: vec![ContentBlock::Text {
-                        text: "read file".into(),
-                    }],
-                    timestamp: Utc::now(),
-                },
-                assistant_response: Some(Message {
-                    role: Role::Assistant,
-                    content: vec![ContentBlock::ToolUse {
-                        id: "call-1".into(),
-                        name: "read_file".into(),
-                        input: serde_json::json!({}),
-                    }],
-                    timestamp: Utc::now(),
-                }),
-                tool_invocations: vec![ToolInvocation {
-                    tool_use_id: "call-1".into(),
-                    tool_name: "read_file".into(),
-                    input: serde_json::json!({}),
-                    output: None, // no output recorded
-                    is_error: false,
-                    duration_ms: None,
-                }],
-                started_at: Utc::now(),
-                completed_at: Some(Utc::now()),
-            }],
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            model_id: "m".into(),
-            provider_id: "p".into(),
-        };
-        let msgs = conversation_to_messages(&conv);
-        assert_eq!(msgs.len(), 3);
-        // Tool result should have empty string content (from unwrap_or_default)
-        assert!(matches!(
-            &msgs[2].content[0],
-            ContentBlock::ToolResult {
-                content,
-                ..
-            } if content.is_empty()
-        ));
     }
 }
