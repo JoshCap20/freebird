@@ -4,6 +4,11 @@
 //! users connecting to the daemon. Keys are stored as SHA-256 hashes (never raw),
 //! verified with constant-time comparison, and support configurable TTL and
 //! scoped capabilities.
+//!
+//! [`SessionCredential`] enforces structural invariants by construction:
+//! - Created via [`generate_session_key()`] (always valid)
+//! - Deserialized via `serde` with [`#[serde(try_from)]`](serde::Deserialize)
+//!   which validates on parse (not after)
 
 use std::time::Duration;
 
@@ -39,7 +44,12 @@ fn key_id_from_hash(hash: &str) -> String {
 /// A stored session credential. The raw key is never stored — only its hash.
 ///
 /// This is a serialization type for `~/.freebird/keys.json`. Fields are
-/// immutable after construction via [`generate_session_key()`].
+/// private and immutable after construction — access via getter methods.
+///
+/// **Construction paths** (both enforce invariants):
+/// - [`generate_session_key()`] — valid by construction
+/// - [`serde::Deserialize`] — validated on parse via
+///   [`TryFrom<SessionCredentialUnchecked>`]
 ///
 /// Stores `Vec<Capability>` rather than `CapabilityGrant` because:
 /// - `CapabilityGrant` includes `sandbox_root` which is a runtime-configured
@@ -47,37 +57,57 @@ fn key_id_from_hash(hash: &str) -> String {
 /// - The runtime constructs `CapabilityGrant` at session creation by combining
 ///   the credential's capabilities + the runtime's configured sandbox root
 ///   + the credential's expiration
-///
-/// Use [`SessionCredential::validate()`] after deserializing from untrusted
-/// sources (e.g., `keys.json`) to verify structural invariants.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "SessionCredentialUnchecked")]
 pub struct SessionCredential {
-    /// Public identifier for this key (e.g., `freebird_a1b2c3d4e5f6`).
-    /// Derived from the first 12 hex chars of the key hash.
-    pub key_id: String,
+    /// Public identifier (e.g., `freebird_a1b2c3d4e5f6`).
+    key_id: String,
     /// SHA-256 hash of the raw key (hex-encoded, 64 chars).
-    pub key_hash: String,
+    key_hash: String,
     /// When this key was issued.
-    pub issued_at: DateTime<Utc>,
+    issued_at: DateTime<Utc>,
     /// When this key expires. `None` means no expiration (discouraged).
-    pub expires_at: Option<DateTime<Utc>>,
+    expires_at: Option<DateTime<Utc>>,
     /// Which capabilities this key grants.
-    pub capabilities: Vec<Capability>,
+    capabilities: Vec<Capability>,
 }
 
 impl SessionCredential {
-    /// Validate structural invariants of a deserialized credential.
-    ///
-    /// Call this after loading credentials from `keys.json` or any untrusted
-    /// source. Credentials produced by [`generate_session_key()`] are always
-    /// valid by construction.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SecurityError::InvalidCredential`] if:
-    /// - `key_hash` is not exactly 64 hex characters
-    /// - `key_id` does not match the expected format derived from `key_hash`
-    pub fn validate(&self) -> Result<(), SecurityError> {
+    /// Public identifier for this key (e.g., `freebird_a1b2c3d4e5f6`).
+    /// Derived from the first 12 hex chars of the key hash.
+    #[must_use]
+    pub fn key_id(&self) -> &str {
+        &self.key_id
+    }
+
+    /// SHA-256 hash of the raw key (hex-encoded, 64 chars).
+    #[must_use]
+    pub fn key_hash(&self) -> &str {
+        &self.key_hash
+    }
+
+    /// When this key was issued.
+    #[must_use]
+    pub const fn issued_at(&self) -> DateTime<Utc> {
+        self.issued_at
+    }
+
+    /// When this key expires. `None` means no expiration (discouraged).
+    #[must_use]
+    pub const fn expires_at(&self) -> Option<DateTime<Utc>> {
+        self.expires_at
+    }
+
+    /// Which capabilities this key grants.
+    #[must_use]
+    pub fn capabilities(&self) -> &[Capability] {
+        &self.capabilities
+    }
+
+    /// Validate structural invariants. Called by [`TryFrom`] on deserialization
+    /// to enforce parse-don't-validate — if you hold a `SessionCredential`,
+    /// it is structurally valid.
+    fn validate(&self) -> Result<(), SecurityError> {
         if self.key_hash.len() != 64 || !self.key_hash.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(SecurityError::InvalidCredential {
                 reason: "key_hash must be exactly 64 hex characters".into(),
@@ -95,6 +125,37 @@ impl SessionCredential {
         }
 
         Ok(())
+    }
+}
+
+/// Raw deserialization helper for [`SessionCredential`].
+///
+/// Serde deserializes into this unchecked type first, then
+/// [`TryFrom`] validates invariants before producing a
+/// [`SessionCredential`]. This enforces parse-don't-validate
+/// (CLAUDE.md §2.3).
+#[derive(Deserialize)]
+struct SessionCredentialUnchecked {
+    key_id: String,
+    key_hash: String,
+    issued_at: DateTime<Utc>,
+    expires_at: Option<DateTime<Utc>>,
+    capabilities: Vec<Capability>,
+}
+
+impl TryFrom<SessionCredentialUnchecked> for SessionCredential {
+    type Error = SecurityError;
+
+    fn try_from(raw: SessionCredentialUnchecked) -> Result<Self, Self::Error> {
+        let cred = Self {
+            key_id: raw.key_id,
+            key_hash: raw.key_hash,
+            issued_at: raw.issued_at,
+            expires_at: raw.expires_at,
+            capabilities: raw.capabilities,
+        };
+        cred.validate()?;
+        Ok(cred)
     }
 }
 
@@ -153,6 +214,8 @@ pub fn generate_session_key(
         capabilities,
     };
 
+    tracing::debug!(key_id = %credential.key_id, "session key generated");
+
     Ok((SecretString::from(raw_key), credential))
 }
 
@@ -192,6 +255,7 @@ pub fn verify_session_key<'a>(
     // 1. Check expiry first
     if let Some(expires) = stored.expires_at {
         if Utc::now() > expires {
+            tracing::warn!(key_id = %stored.key_id, "session key verification failed: expired");
             return Err(SecurityError::SessionExpired {
                 key_id: stored.key_id.clone(),
             });
@@ -208,6 +272,7 @@ pub fn verify_session_key<'a>(
     let tag = hmac::sign(&verify_key, stored.key_hash.as_bytes());
 
     if hmac::verify(&verify_key, provided_hash.as_bytes(), tag.as_ref()).is_err() {
+        tracing::warn!(key_id = %stored.key_id, "session key verification failed: invalid key");
         return Err(SecurityError::InvalidSessionKey {
             key_id: stored.key_id.clone(),
         });
@@ -242,8 +307,18 @@ mod tests {
         // issued_at should be very recent
         let elapsed = Utc::now() - cred.issued_at;
         assert!(elapsed.num_seconds() < 2);
-        // Generated credentials are always structurally valid
-        assert!(cred.validate().is_ok());
+    }
+
+    #[test]
+    fn test_getters_match_internal_fields() {
+        let caps = vec![Capability::FileRead, Capability::ShellExecute];
+        let (_, cred) = make_key(caps, Some(Duration::from_secs(3600)));
+
+        assert_eq!(cred.key_id(), &cred.key_id);
+        assert_eq!(cred.key_hash(), &cred.key_hash);
+        assert_eq!(cred.issued_at(), cred.issued_at);
+        assert_eq!(cred.expires_at(), cred.expires_at);
+        assert_eq!(cred.capabilities(), &cred.capabilities[..]);
     }
 
     #[test]
@@ -400,15 +475,13 @@ mod tests {
     #[test]
     fn test_key_id_does_not_reveal_full_hash() {
         let (_, cred) = make_key(vec![], None);
-        // key_id = "freebird_" + 12 hex chars = 21 chars total
-        // key_hash = 64 hex chars
         assert!(cred.key_id.len() < cred.key_hash.len());
         let suffix = &cred.key_id[KEY_ID_PREFIX.len()..];
         assert_eq!(suffix.len(), KEY_ID_HASH_LEN);
         assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
-    // ── Credential Validation ───────────────────────────────────
+    // ── Credential Validation (parse-don't-validate) ────────────
 
     #[test]
     fn test_validate_rejects_short_hash() {
@@ -446,6 +519,24 @@ mod tests {
         assert!(cred.validate().is_ok());
     }
 
+    #[test]
+    fn test_deserialize_rejects_invalid_credential() {
+        let (_, cred) = make_key(vec![], None);
+        let mut json_val: serde_json::Value = serde_json::to_value(&cred).unwrap();
+        json_val
+            .as_object_mut()
+            .unwrap()
+            .insert("key_hash".into(), serde_json::Value::String("abcd".into()));
+
+        let result: Result<SessionCredential, _> = serde_json::from_value(json_val);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("key_hash must be exactly 64 hex characters"),
+            "expected validation error in deserialization, got: {err_msg}"
+        );
+    }
+
     // ── Serde Roundtrip ─────────────────────────────────────────
 
     #[test]
@@ -456,7 +547,6 @@ mod tests {
         let json = serde_json::to_string_pretty(&cred).unwrap();
         let deserialized: SessionCredential = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, cred);
-        assert!(deserialized.validate().is_ok());
     }
 
     // ── Property-Based Test ─────────────────────────────────────
