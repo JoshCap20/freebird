@@ -3,7 +3,7 @@
 //! Implements the `Channel` trait. Each TCP connection is an independent
 //! client identified by `"tcp-{n}"`. Supports multiple concurrent clients.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -20,6 +20,9 @@ use freebird_traits::channel::{
 };
 use freebird_traits::id::ChannelId;
 use freebird_types::protocol::{ClientMessage, ServerMessage};
+
+/// Per-connection writer senders, keyed by `sender_id` (e.g., `"tcp-0"`).
+type WriterMap = HashMap<String, mpsc::Sender<ServerMessage>>;
 
 /// TCP channel — listens on a TCP port, bridges JSON-line protocol to `Channel` trait.
 pub struct TcpChannel {
@@ -103,10 +106,8 @@ async fn accept_loop(
     conn_counter: Arc<AtomicU64>,
 ) {
     // Route outbound events to per-connection writers.
-    // Key: sender_id (e.g., "tcp-0"), Value: sender for that connection's writer.
-    let writers: Arc<
-        tokio::sync::Mutex<std::collections::HashMap<String, mpsc::Sender<ServerMessage>>>,
-    > = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    let writers: Arc<tokio::sync::Mutex<WriterMap>> =
+        Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
     let writers_for_outbound = Arc::clone(&writers);
 
@@ -115,10 +116,16 @@ async fn accept_loop(
     tokio::spawn(async move {
         while let Some(event) = outbound_rx.recv().await {
             let (recipient_id, server_msg) = outbound_to_server_message(event);
-            let guard = writers_for_outbound.lock().await;
-            if let Some(writer_tx) = guard.get(&recipient_id) {
+            // Clone the sender inside the lock scope, then drop the guard
+            // before the `.send().await` — holding a lock across .await is
+            // a concurrency anti-pattern (CLAUDE.md §25, §30).
+            let writer_tx = {
+                let guard = writers_for_outbound.lock().await;
+                guard.get(&recipient_id).cloned()
+            };
+            if let Some(tx) = writer_tx {
                 // Best-effort delivery; if the connection closed, drop silently.
-                let _ = writer_tx.send(server_msg).await;
+                let _ = tx.send(server_msg).await;
             }
         }
     });
@@ -170,9 +177,7 @@ async fn handle_connection(
     sender_id: String,
     inbound_tx: mpsc::Sender<InboundEvent>,
     mut writer_rx: mpsc::Receiver<ServerMessage>,
-    writers: Arc<
-        tokio::sync::Mutex<std::collections::HashMap<String, mpsc::Sender<ServerMessage>>>,
-    >,
+    writers: Arc<tokio::sync::Mutex<WriterMap>>,
 ) {
     let (read_half, mut write_half) = stream.into_split();
     let reader = BufReader::new(read_half);
