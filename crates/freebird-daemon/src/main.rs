@@ -1,8 +1,10 @@
 //! Freebird daemon — the composition root.
 //!
-//! This is the only crate that knows about concrete types (`AnthropicProvider`,
-//! `CliChannel`, `FileMemory`). Everything else works through trait objects.
-//! See CLAUDE.md §3.1: trait-driven extensibility.
+//! Single binary with `clap` subcommands:
+//! - `freebird serve`  — start daemon with TCP listener
+//! - `freebird chat`   — connect to running daemon for interactive chat
+//! - `freebird status` — check if daemon is running
+//! - `freebird stop`   — send graceful shutdown to daemon
 
 #![deny(clippy::all, clippy::pedantic, clippy::nursery)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -13,51 +15,81 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use clap::{Parser, Subcommand};
 use figment::Figment;
 use figment::providers::{Env, Format, Toml};
 use tracing_subscriber::EnvFilter;
 
-use freebird_channels::cli::CliChannel;
+use freebird_channels::tcp::TcpChannel;
 use freebird_memory::file::FileMemory;
 use freebird_runtime::agent::AgentRuntime;
 use freebird_runtime::shutdown::ShutdownCoordinator;
-use freebird_types::config::{AppConfig, ChannelKind};
+use freebird_types::config::AppConfig;
 
+mod chat;
 mod providers;
+
+/// `FreeBird` AI agent daemon.
+#[derive(Parser)]
+#[command(name = "freebird", version, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+/// Available subcommands.
+#[derive(Subcommand)]
+enum Commands {
+    /// Start the daemon, listen on TCP for client connections.
+    Serve,
+    /// Connect to a running daemon for interactive chat.
+    Chat,
+    /// Check if the daemon is running (probes TCP port).
+    Status,
+    /// Send graceful shutdown to the daemon.
+    Stop,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Serve => cmd_serve().await,
+        Commands::Chat => cmd_chat().await,
+        Commands::Status => cmd_status().await,
+        Commands::Stop => cmd_stop().await,
+    }
+}
+
+/// `freebird serve` — start daemon with TCP channel.
+async fn cmd_serve() -> Result<()> {
     // 1. LOGGING — before anything else, so config errors are visible.
+    // Intentional silent fallback: if RUST_LOG is absent or unparseable, default
+    // to "info". We can't log the parse error because tracing isn't initialized yet.
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
-    tracing::info!("freebird starting");
+    tracing::info!("freebird serve starting");
 
-    // 2. CONFIGURATION — TOML base, env overrides.
+    // 2. CONFIGURATION
     let config = load_config()?;
     tracing::debug!(?config.runtime, "loaded configuration");
 
-    // 3. VALIDATE — fail fast on invalid configuration.
+    // 3. VALIDATE
     validate_config(&config)?;
 
     // 4. PROVIDER REGISTRY
     let registry = providers::build_provider_registry(&config).await?;
 
-    // 5. CHANNEL — construct with configured prompt (or default).
-    let cli_config = config
-        .channels
-        .iter()
-        .find(|c| matches!(c.kind, ChannelKind::Cli))
-        .context("cli channel config missing")?;
-    let channel: Box<dyn freebird_traits::channel::Channel> =
-        cli_config.prompt.as_ref().map_or_else(
-            || Box::new(CliChannel::new()),
-            |prompt| Box::new(CliChannel::with_prompt(prompt)),
-        );
+    // 5. CHANNEL — TcpChannel from daemon config.
+    let channel: Box<dyn freebird_traits::channel::Channel> = Box::new(TcpChannel::new(
+        config.daemon.host.to_string(),
+        config.daemon.port,
+    ));
 
-    // 6. MEMORY — FileMemory::new performs blocking I/O (mkdir, canonicalize),
-    //    so run it off the async runtime.
+    // 6. MEMORY
     let memory_dir = expand_tilde(
         &config
             .memory
@@ -70,7 +102,7 @@ async fn main() -> Result<()> {
         .context("file memory init task panicked")?
         .context("failed to initialize file memory backend")?;
 
-    // 7. TOOLS (none initially — added per-issue later)
+    // 7. TOOLS (none initially)
     let tools: Vec<Box<dyn freebird_traits::tool::Tool>> = vec![];
 
     // 8. SHUTDOWN COORDINATOR
@@ -99,16 +131,14 @@ async fn main() -> Result<()> {
         None, // audit logger — wired in a later issue
     );
 
-    // 10. RUN — awaited directly (NOT raced via tokio::select! against
-    //     wait_for_signal) so run() calls channel.stop() before returning.
+    // 10. RUN
     let run_result = runtime.run(token).await;
     match &run_result {
         Ok(()) => tracing::info!("runtime exited cleanly"),
         Err(e) => tracing::error!(%e, "runtime error"),
     }
 
-    // 11. DRAIN — give in-flight work time to complete, then clean up the
-    //     signal handler task. If it finishes early, we're done sooner.
+    // 11. DRAIN
     if drain_timeout > Duration::ZERO {
         tracing::info!(?drain_timeout, "draining in-flight work");
         let _ = tokio::time::timeout(drain_timeout, signal_handle).await;
@@ -118,6 +148,59 @@ async fn main() -> Result<()> {
 
     tracing::info!("freebird stopped");
     run_result.map_err(Into::into)
+}
+
+/// `freebird chat` — thin TCP client that connects to the daemon.
+async fn cmd_chat() -> Result<()> {
+    let config = load_config()?;
+    let addr = format!("{}:{}", config.daemon.host, config.daemon.port);
+
+    let stream = tokio::net::TcpStream::connect(&addr)
+        .await
+        .with_context(|| format!("failed to connect to daemon at {addr}"))?;
+
+    eprintln!("Connected to freebird daemon at {addr}");
+    eprintln!("Type /quit to disconnect, /help for commands.\n");
+
+    let stdin = tokio::io::BufReader::new(tokio::io::stdin());
+    let stdout = tokio::io::stdout();
+
+    chat::run_chat_with_io(stream, stdin, stdout).await
+}
+
+/// `freebird status` — check if daemon is running by probing the TCP port.
+async fn cmd_status() -> Result<()> {
+    let config = load_config()?;
+    let addr = format!("{}:{}", config.daemon.host, config.daemon.port);
+
+    if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+        println!("freebird daemon is running at {addr}");
+    } else {
+        println!("freebird daemon is not running (could not connect to {addr})");
+    }
+
+    Ok(())
+}
+
+/// `freebird stop` — send graceful shutdown command to daemon.
+async fn cmd_stop() -> Result<()> {
+    let config = load_config()?;
+    let addr = format!("{}:{}", config.daemon.host, config.daemon.port);
+
+    let mut stream = tokio::net::TcpStream::connect(&addr)
+        .await
+        .with_context(|| format!("daemon is not running (could not connect to {addr})"))?;
+
+    let msg = freebird_types::protocol::ClientMessage::Command {
+        name: "shutdown".into(),
+        args: vec![],
+    };
+    chat::send_client_message(&mut stream, &msg)
+        .await
+        .context("sending shutdown command")?;
+
+    println!("shutdown command sent to daemon at {addr}");
+    Ok(())
 }
 
 /// Load configuration from TOML file with environment variable overrides.
@@ -138,30 +221,12 @@ fn validate_config(config: &AppConfig) -> Result<()> {
         bail!("at least one provider must be configured in [[providers]]");
     }
 
-    let cli_count = config
-        .channels
-        .iter()
-        .filter(|c| matches!(c.kind, ChannelKind::Cli))
-        .count();
-
-    if cli_count == 0 {
-        bail!("at least one CLI channel must be configured in [[channels]]");
-    }
-    if cli_count > 1 {
-        bail!("only one CLI channel is supported (found {cli_count})");
-    }
-
     Ok(())
 }
 
 /// Expand `~` prefix to the user's home directory.
 ///
 /// Only expands a leading `~` or `~/` — does not expand `~user`.
-///
-/// # Errors
-///
-/// Returns an error if the path starts with `~` but the home directory
-/// cannot be determined (CLAUDE.md §3.4: fail loudly at boundaries).
 fn expand_tilde(path: &Path) -> Result<PathBuf> {
     let s = path.to_string_lossy();
     if s == "~" {
@@ -182,7 +247,6 @@ mod tests {
     #[test]
     fn test_expand_tilde_home() {
         let result = expand_tilde(Path::new("~")).unwrap();
-        // In CI or containers, home may not exist — but on a dev machine it will.
         if let Some(home) = home::home_dir() {
             assert_eq!(result, home);
         }
@@ -210,7 +274,6 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_tilde_user_not_expanded() {
-        // ~otheruser doesn't start with "~/" so it passes through unchanged.
         let result = expand_tilde(Path::new("~otheruser/path")).unwrap();
         assert_eq!(result, PathBuf::from("~otheruser/path"));
     }
@@ -223,7 +286,6 @@ mod tests {
 
     // --- validate_config tests ---
 
-    /// Build a valid `AppConfig` from TOML for test mutation.
     fn valid_config() -> AppConfig {
         use figment::providers::{Format, Toml};
 
@@ -283,25 +345,22 @@ format = "pretty"
     }
 
     #[test]
-    fn test_validate_config_no_cli_channel_errors() {
+    fn test_validate_config_no_channels_still_valid() {
         let mut config = valid_config();
         config.channels.clear();
-        let err = validate_config(&config).unwrap_err();
         assert!(
-            err.to_string().contains("at least one CLI channel"),
-            "expected CLI channel error, got: {err}"
+            validate_config(&config).is_ok(),
+            "channels are optional — TcpChannel uses daemon config, not [[channels]]"
         );
     }
 
     #[test]
-    fn test_validate_config_multiple_cli_channels_errors() {
-        let mut config = valid_config();
-        let second_cli = config.channels[0].clone();
-        config.channels.push(second_cli);
-        let err = validate_config(&config).unwrap_err();
-        assert!(
-            err.to_string().contains("only one CLI channel"),
-            "expected multi-CLI error, got: {err}"
+    fn test_daemon_config_defaults_used_when_absent() {
+        let config = valid_config();
+        assert_eq!(
+            config.daemon.host,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
         );
+        assert_eq!(config.daemon.port, 7531);
     }
 }

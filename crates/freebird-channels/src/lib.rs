@@ -5,4 +5,4 @@
 #![deny(clippy::indexing_slicing)]
 #![allow(clippy::module_name_repetitions)]
 
-pub mod cli;
+pub mod tcp;
