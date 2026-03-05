@@ -4,7 +4,7 @@
 //! permitted hosts and ports. Used by `SafeUrl::from_tainted()` to ensure
 //! the agent can only reach explicitly authorized endpoints.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use crate::error::SecurityError;
 
@@ -12,6 +12,9 @@ use crate::error::SecurityError;
 ///
 /// Default policy is deny-all: only hosts explicitly added to the allowlist
 /// are reachable. The agent cannot modify its own egress policy.
+///
+/// Uses `BTreeSet` (not `HashSet`) for deterministic iteration order,
+/// which ensures stable debug output and predictable test assertions.
 ///
 /// # Future: DNS rebinding prevention
 ///
@@ -21,8 +24,8 @@ use crate::error::SecurityError;
 /// enabling SSRF to internal services. IP validation should be added at the
 /// HTTP client layer before outbound connections are established.
 pub struct EgressPolicy {
-    allowed_hosts: HashSet<String>,
-    allowed_ports: HashSet<u16>,
+    allowed_hosts: BTreeSet<String>,
+    allowed_ports: BTreeSet<u16>,
 }
 
 impl EgressPolicy {
@@ -30,7 +33,7 @@ impl EgressPolicy {
     ///
     /// All hosts are stored lowercase for case-insensitive matching.
     #[must_use]
-    pub fn new(allowed_hosts: HashSet<String>, allowed_ports: HashSet<u16>) -> Self {
+    pub fn new(allowed_hosts: BTreeSet<String>, allowed_ports: BTreeSet<u16>) -> Self {
         let normalized_hosts = allowed_hosts
             .into_iter()
             .map(|h| h.to_lowercase())
@@ -77,17 +80,36 @@ impl EgressPolicy {
     }
 }
 
+/// Default egress policy per CLAUDE.md section 12:
+/// - `allowed_hosts`: `["api.anthropic.com", "api.openai.com"]`
+/// - `allowed_ports`: `[443]` (HTTPS only)
+impl Default for EgressPolicy {
+    fn default() -> Self {
+        let allowed_hosts: BTreeSet<String> =
+            ["api.anthropic.com".to_owned(), "api.openai.com".to_owned()]
+                .into_iter()
+                .collect();
+
+        let allowed_ports: BTreeSet<u16> = std::iter::once(443).collect();
+
+        Self {
+            allowed_hosts,
+            allowed_ports,
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     fn test_policy() -> EgressPolicy {
-        let mut hosts = HashSet::new();
+        let mut hosts = BTreeSet::new();
         hosts.insert("api.anthropic.com".into());
         hosts.insert("api.openai.com".into());
 
-        let mut ports = HashSet::new();
+        let mut ports = BTreeSet::new();
         ports.insert(443);
 
         EgressPolicy::new(hosts, ports)
@@ -135,5 +157,26 @@ mod tests {
         let policy = test_policy();
         let url: url::Url = "https://API.ANTHROPIC.COM/v1/messages".parse().unwrap();
         assert!(policy.check_url(&url).is_ok());
+    }
+
+    #[test]
+    fn test_egress_default_policy() {
+        let policy = EgressPolicy::default();
+        let anthropic: url::Url = "https://api.anthropic.com/v1/messages".parse().unwrap();
+        let openai: url::Url = "https://api.openai.com/v1/chat".parse().unwrap();
+        let evil: url::Url = "https://evil.com/exfiltrate".parse().unwrap();
+
+        assert!(policy.check_url(&anthropic).is_ok());
+        assert!(policy.check_url(&openai).is_ok());
+        assert!(policy.check_url(&evil).is_err());
+    }
+
+    #[test]
+    fn test_egress_default_blocks_non_443_port() {
+        let policy = EgressPolicy::default();
+        let url: url::Url = "https://api.anthropic.com:8080/v1/messages"
+            .parse()
+            .unwrap();
+        assert!(policy.check_url(&url).is_err());
     }
 }

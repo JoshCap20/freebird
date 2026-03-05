@@ -25,13 +25,13 @@ use crate::taint::Tainted;
 #[derive(Debug)]
 pub struct SafeMessage(String);
 
-const MAX_MESSAGE_LEN: usize = 100_000;
+const MAX_MESSAGE_LEN: usize = 32_768;
 
 impl SafeMessage {
     /// Validate untrusted input as a user message.
     ///
     /// - Scans for prompt injection patterns
-    /// - Enforces maximum length (100KB)
+    /// - Enforces maximum length (32KB per CLAUDE.md §6)
     /// - Strips null bytes and control characters (preserves newlines, tabs)
     ///
     /// # Errors
@@ -287,6 +287,8 @@ const FORBIDDEN_CHARS: &[char] = &[
     '\\', // quoting & escaping — defense-in-depth against quoted context breakout
     '!',  // history expansion in bash
     '*', '?', '[', ']', // glob expansion
+    '~', // home directory expansion
+    '#', // comment injection
     '\0', '\n', '\r', // null byte & newline injection
 ];
 
@@ -501,7 +503,7 @@ impl std::fmt::Display for Redacted {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::BTreeSet;
 
     use super::*;
 
@@ -874,9 +876,9 @@ mod tests {
     // ── SafeUrl tests ────────────────────────────────────────────
 
     fn test_egress_policy() -> EgressPolicy {
-        let mut hosts = HashSet::new();
+        let mut hosts = BTreeSet::new();
         hosts.insert("api.anthropic.com".into());
-        let mut ports = HashSet::new();
+        let mut ports = BTreeSet::new();
         ports.insert(443);
         EgressPolicy::new(hosts, ports)
     }
