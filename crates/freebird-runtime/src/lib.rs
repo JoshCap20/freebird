@@ -12,3 +12,4 @@ pub mod router;
 pub mod session;
 pub mod shutdown;
 pub mod stream;
+pub mod tool_executor;
