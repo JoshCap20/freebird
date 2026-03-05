@@ -432,6 +432,12 @@ mod tests {
                         tool: tool.clone(),
                         reason: reason.clone(),
                     },
+                    ToolError::ConsentDenied { tool } => {
+                        ToolError::ConsentDenied { tool: tool.clone() }
+                    }
+                    ToolError::ConsentExpired { tool } => {
+                        ToolError::ConsentExpired { tool: tool.clone() }
+                    }
                 });
             }
             Ok(self.output.clone().unwrap())
