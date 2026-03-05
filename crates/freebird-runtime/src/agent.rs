@@ -14,12 +14,14 @@ use freebird_security::audit::{
 use freebird_security::error::Severity;
 use freebird_security::safe_types::{SafeMessage, ScannedModelResponse, ScannedToolOutput};
 use freebird_security::taint::Tainted;
-use freebird_traits::channel::{Channel, ChannelError, InboundEvent, OutboundEvent};
+use freebird_traits::channel::{
+    Channel, ChannelError, ChannelFeature, InboundEvent, OutboundEvent,
+};
 use freebird_traits::id::{ModelId, SessionId};
 use freebird_traits::memory::{Conversation, Memory, MemoryError, ToolInvocation, Turn};
 use freebird_traits::provider::{
-    CompletionRequest, CompletionResponse, ContentBlock, Message, ProviderError, Role, StopReason,
-    ToolDefinition,
+    CompletionRequest, CompletionResponse, ContentBlock, Message, ProviderError, ProviderFeature,
+    Role, StopReason, StreamEvent, ToolDefinition,
 };
 use freebird_traits::tool::{Tool, ToolContext, ToolOutput};
 use freebird_types::config::{RuntimeConfig, ToolsConfig};
@@ -28,6 +30,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::registry::ProviderRegistry;
+use crate::stream::StreamAccumulator;
 
 /// Error message sent to the user when model output injection is detected.
 const MODEL_OUTPUT_INJECTION_BLOCKED: &str =
@@ -288,16 +291,33 @@ impl AgentRuntime {
             return;
         };
 
-        // 3. Build user message and start the agentic loop
-        let current_turn = self
-            .run_agentic_loop(
+        // 3. Check streaming support and dispatch to appropriate loop
+        let use_streaming = self
+            .channel
+            .info()
+            .features
+            .contains(&ChannelFeature::Streaming)
+            && self.primary_provider_supports_streaming();
+
+        let current_turn = if use_streaming {
+            self.run_agentic_loop_streaming(
                 &safe_message,
                 &sender_id,
                 &session_id,
                 &conversation,
                 outbound,
             )
-            .await;
+            .await
+        } else {
+            self.run_agentic_loop(
+                &safe_message,
+                &sender_id,
+                &session_id,
+                &conversation,
+                outbound,
+            )
+            .await
+        };
 
         // 4. Persist conversation
         conversation.turns.push(current_turn);
@@ -374,15 +394,12 @@ impl AgentRuntime {
         }
     }
 
-    /// Run the agentic loop: call provider, handle tool use, deliver response.
-    async fn run_agentic_loop(
+    /// Build the initial state for an agentic loop: user message, turn, messages, tool defs.
+    fn prepare_agentic_loop(
         &self,
         safe_message: &SafeMessage,
-        sender_id: &str,
-        session_id: &SessionId,
         conversation: &Conversation,
-        outbound: &mpsc::Sender<OutboundEvent>,
-    ) -> Turn {
+    ) -> (Vec<Message>, Turn, Vec<ToolDefinition>) {
         let user_message = Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
@@ -397,13 +414,62 @@ impl AgentRuntime {
         let mut messages = conversation_to_messages(conversation);
         messages.push(user_message.clone());
 
-        let mut current_turn = Turn {
+        let current_turn = Turn {
             user_message,
             assistant_response: None,
             tool_invocations: Vec::new(),
             started_at: Utc::now(),
             completed_at: None,
         };
+
+        (messages, current_turn, tool_definitions)
+    }
+
+    /// Log and report max tool rounds exceeded.
+    async fn log_max_rounds_exceeded(
+        &self,
+        session_id: &SessionId,
+        current_turn: &mut Turn,
+        sender_id: &str,
+        outbound: &mpsc::Sender<OutboundEvent>,
+    ) {
+        if let Some(audit) = &self.audit {
+            let _ = audit
+                .record(
+                    session_id.as_str(),
+                    AuditEventType::PolicyViolation {
+                        rule: "max_tool_rounds".into(),
+                        context: format!(
+                            "agentic loop exhausted {} rounds without completing",
+                            self.config.max_tool_rounds
+                        ),
+                        severity: Severity::Medium,
+                    },
+                )
+                .await;
+        }
+        current_turn.completed_at = Some(Utc::now());
+        send_outbound(
+            outbound,
+            OutboundEvent::Error {
+                text: "Maximum tool rounds exceeded. Stopping.".into(),
+                recipient_id: sender_id.into(),
+            },
+        )
+        .await;
+    }
+
+    /// Run the agentic loop: call provider, handle tool use, deliver response.
+    async fn run_agentic_loop(
+        &self,
+        safe_message: &SafeMessage,
+        sender_id: &str,
+        session_id: &SessionId,
+        conversation: &Conversation,
+        outbound: &mpsc::Sender<OutboundEvent>,
+    ) -> Turn {
+        let (mut messages, mut current_turn, tool_definitions) =
+            self.prepare_agentic_loop(safe_message, conversation);
 
         for _round in 0..self.config.max_tool_rounds {
             let request = self.build_completion_request(conversation, &messages, &tool_definitions);
@@ -458,30 +524,8 @@ impl AgentRuntime {
             }
         }
 
-        // Max rounds exceeded — this is a policy-relevant event
-        if let Some(audit) = &self.audit {
-            let _ = audit
-                .record(
-                    session_id.as_str(),
-                    AuditEventType::PolicyViolation {
-                        rule: "max_tool_rounds".into(),
-                        context: format!(
-                            "agentic loop exhausted {} rounds without completing",
-                            self.config.max_tool_rounds
-                        ),
-                        severity: Severity::Medium,
-                    },
-                )
-                .await;
-        }
-        current_turn.completed_at = Some(Utc::now());
-        let _ = outbound
-            .send(OutboundEvent::Error {
-                text: "Maximum tool rounds exceeded. Stopping.".into(),
-                recipient_id: sender_id.into(),
-            })
+        self.log_max_rounds_exceeded(session_id, &mut current_turn, sender_id, outbound)
             .await;
-
         current_turn
     }
 
@@ -511,9 +555,25 @@ impl AgentRuntime {
         current_turn: &mut Turn,
         session_id: &SessionId,
     ) {
-        // Extract tool_use blocks from the response
-        let tool_uses: Vec<(String, String, serde_json::Value)> = response
-            .message
+        self.execute_tool_calls(&response.message, messages, current_turn, session_id)
+            .await;
+    }
+
+    /// Extract tool-use blocks from an assistant message, execute them, scan
+    /// outputs for injection, and append tool results to the message list.
+    ///
+    /// Shared between the non-streaming (`handle_tool_use_round`) and streaming
+    /// (`run_agentic_loop_streaming`) paths to avoid duplicating security-critical
+    /// tool execution code.
+    async fn execute_tool_calls(
+        &self,
+        assistant_message: &Message,
+        messages: &mut Vec<Message>,
+        current_turn: &mut Turn,
+        session_id: &SessionId,
+    ) {
+        // Extract tool_use blocks from the message
+        let tool_uses: Vec<(String, String, serde_json::Value)> = assistant_message
             .content
             .iter()
             .filter_map(|block| match block {
@@ -525,7 +585,7 @@ impl AgentRuntime {
             .collect();
 
         // Add assistant message with tool_use blocks to conversation
-        messages.push(response.message.clone());
+        messages.push(assistant_message.clone());
 
         // Execute each tool and collect results
         let mut tool_results = Vec::with_capacity(tool_uses.len());
@@ -766,6 +826,319 @@ impl AgentRuntime {
         }
     }
 
+    /// Check whether the primary provider supports streaming.
+    fn primary_provider_supports_streaming(&self) -> bool {
+        self.provider_registry
+            .primary_provider_id()
+            .and_then(|id| self.provider_registry.get(id))
+            .is_some_and(|p| p.info().supports(&ProviderFeature::Streaming))
+    }
+
+    /// Streaming variant of the agentic loop.
+    ///
+    /// Sends `StreamChunk` events for each text delta, `StreamEnd` between
+    /// tool-use rounds and at final response. Falls back to non-streaming
+    /// `complete_with_failover()` if stream setup fails.
+    ///
+    /// Injection scan on accumulated text is audit-only — the text has already
+    /// been delivered to the user via `StreamChunk` events.
+    async fn run_agentic_loop_streaming(
+        &self,
+        safe_message: &SafeMessage,
+        sender_id: &str,
+        session_id: &SessionId,
+        conversation: &Conversation,
+        outbound: &mpsc::Sender<OutboundEvent>,
+    ) -> Turn {
+        let (mut messages, mut current_turn, tool_definitions) =
+            self.prepare_agentic_loop(safe_message, conversation);
+
+        let Some(provider_id) = self.provider_registry.primary_provider_id().cloned() else {
+            send_outbound(
+                outbound,
+                OutboundEvent::Error {
+                    text: "Provider error: no provider configured".into(),
+                    recipient_id: sender_id.into(),
+                },
+            )
+            .await;
+            return current_turn;
+        };
+
+        for _round in 0..self.config.max_tool_rounds {
+            let request = self.build_completion_request(conversation, &messages, &tool_definitions);
+
+            let event_stream = match self
+                .provider_registry
+                .stream(&provider_id, request.clone())
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(error = %e, "stream setup failed, falling back to non-streaming");
+                    return self
+                        .fallback_to_non_streaming(
+                            request,
+                            messages,
+                            current_turn,
+                            sender_id,
+                            session_id,
+                            conversation,
+                            &tool_definitions,
+                            outbound,
+                        )
+                        .await;
+                }
+            };
+
+            let Some((accumulator, stop_reason)) =
+                Self::consume_stream(event_stream, sender_id, outbound).await
+            else {
+                return current_turn;
+            };
+
+            // Always send StreamEnd after a complete stream round
+            send_outbound(
+                outbound,
+                OutboundEvent::StreamEnd {
+                    recipient_id: sender_id.into(),
+                },
+            )
+            .await;
+
+            match stop_reason {
+                StopReason::ToolUse => {
+                    let assistant_message = accumulator.into_message();
+                    self.execute_tool_calls(
+                        &assistant_message,
+                        &mut messages,
+                        &mut current_turn,
+                        session_id,
+                    )
+                    .await;
+                }
+                StopReason::EndTurn | StopReason::StopSequence => {
+                    let msg = accumulator.into_message();
+                    self.audit_streaming_injection(session_id, &msg).await;
+                    current_turn.assistant_response = Some(msg);
+                    current_turn.completed_at = Some(Utc::now());
+                    return current_turn;
+                }
+                StopReason::MaxTokens => {
+                    let msg = accumulator.into_message();
+                    self.audit_streaming_injection(session_id, &msg).await;
+                    send_outbound(
+                        outbound,
+                        OutboundEvent::Message {
+                            text: "[response truncated — max tokens reached]".into(),
+                            recipient_id: sender_id.into(),
+                        },
+                    )
+                    .await;
+                    current_turn.assistant_response = Some(msg);
+                    current_turn.completed_at = Some(Utc::now());
+                    return current_turn;
+                }
+            }
+        }
+
+        self.log_max_rounds_exceeded(session_id, &mut current_turn, sender_id, outbound)
+            .await;
+        current_turn
+    }
+
+    /// Consume a provider stream, forwarding text deltas as `StreamChunk` events.
+    ///
+    /// Returns `Some((accumulator, stop_reason))` on success, `None` if a
+    /// mid-stream error occurred (error events are sent to the user).
+    async fn consume_stream(
+        mut event_stream: std::pin::Pin<
+            Box<dyn futures::Stream<Item = Result<StreamEvent, ProviderError>> + Send>,
+        >,
+        sender_id: &str,
+        outbound: &mpsc::Sender<OutboundEvent>,
+    ) -> Option<(StreamAccumulator, StopReason)> {
+        let mut accumulator = StreamAccumulator::new();
+
+        while let Some(event_result) = event_stream.next().await {
+            match event_result {
+                Ok(StreamEvent::TextDelta(text)) => {
+                    send_outbound(
+                        outbound,
+                        OutboundEvent::StreamChunk {
+                            text: text.clone(),
+                            recipient_id: sender_id.into(),
+                        },
+                    )
+                    .await;
+                    accumulator.push_text_delta(&text);
+                }
+                Ok(StreamEvent::ToolUse { id, name, input }) => {
+                    accumulator.push_tool_use(id, name, input);
+                }
+                Ok(StreamEvent::Done {
+                    stop_reason,
+                    usage: _,
+                }) => {
+                    return Some((accumulator, stop_reason));
+                }
+                Ok(StreamEvent::Error(e)) => {
+                    tracing::error!(error = %e, "stream error mid-response");
+                    send_outbound(
+                        outbound,
+                        OutboundEvent::StreamEnd {
+                            recipient_id: sender_id.into(),
+                        },
+                    )
+                    .await;
+                    send_outbound(
+                        outbound,
+                        OutboundEvent::Error {
+                            text: format!("Stream error: {e}"),
+                            recipient_id: sender_id.into(),
+                        },
+                    )
+                    .await;
+                    return None;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "provider error during streaming");
+                    send_outbound(
+                        outbound,
+                        OutboundEvent::StreamEnd {
+                            recipient_id: sender_id.into(),
+                        },
+                    )
+                    .await;
+                    send_outbound(
+                        outbound,
+                        OutboundEvent::Error {
+                            text: format!("Provider error: {e}"),
+                            recipient_id: sender_id.into(),
+                        },
+                    )
+                    .await;
+                    return None;
+                }
+            }
+        }
+
+        // Stream ended without a Done event
+        send_outbound(
+            outbound,
+            OutboundEvent::StreamEnd {
+                recipient_id: sender_id.into(),
+            },
+        )
+        .await;
+        send_outbound(
+            outbound,
+            OutboundEvent::Error {
+                text: "Stream ended unexpectedly without completion".into(),
+                recipient_id: sender_id.into(),
+            },
+        )
+        .await;
+        None
+    }
+
+    /// Audit-only injection scan for streaming responses.
+    ///
+    /// Text has already been delivered via `StreamChunk`, so we cannot block it.
+    /// We log the detection for forensics.
+    async fn audit_streaming_injection(&self, session_id: &SessionId, message: &Message) {
+        let response_text = extract_text(message);
+        if let Err(e) = ScannedModelResponse::from_raw(&response_text) {
+            self.log_model_output_injection(session_id, &e).await;
+        }
+    }
+
+    /// Fallback path when stream setup fails: resume with non-streaming
+    /// `complete_with_failover()` for the remaining rounds.
+    #[allow(clippy::too_many_arguments)]
+    async fn fallback_to_non_streaming(
+        &self,
+        initial_request: CompletionRequest,
+        mut messages: Vec<Message>,
+        mut current_turn: Turn,
+        sender_id: &str,
+        session_id: &SessionId,
+        conversation: &Conversation,
+        tool_definitions: &[ToolDefinition],
+        outbound: &mpsc::Sender<OutboundEvent>,
+    ) -> Turn {
+        // First round uses the already-built request
+        let mut first_round = true;
+
+        for _round in 0..self.config.max_tool_rounds {
+            let request = if first_round {
+                first_round = false;
+                initial_request.clone()
+            } else {
+                self.build_completion_request(conversation, &messages, tool_definitions)
+            };
+
+            let (_provider_id, response) =
+                match self.provider_registry.complete_with_failover(request).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::error!(error = %e, "all providers failed in fallback");
+                        let _ = outbound
+                            .send(OutboundEvent::Error {
+                                text: format!("Provider error: {e}"),
+                                recipient_id: sender_id.into(),
+                            })
+                            .await;
+                        return current_turn;
+                    }
+                };
+
+            match response.stop_reason {
+                StopReason::ToolUse => {
+                    self.handle_tool_use_round(
+                        &response,
+                        &mut messages,
+                        &mut current_turn,
+                        session_id,
+                    )
+                    .await;
+                }
+                StopReason::EndTurn | StopReason::StopSequence => {
+                    self.deliver_final_response(
+                        &response,
+                        sender_id,
+                        session_id,
+                        &mut current_turn,
+                        outbound,
+                    )
+                    .await;
+                    return current_turn;
+                }
+                StopReason::MaxTokens => {
+                    self.deliver_truncated_response(
+                        &response,
+                        sender_id,
+                        session_id,
+                        &mut current_turn,
+                        outbound,
+                    )
+                    .await;
+                    return current_turn;
+                }
+            }
+        }
+
+        current_turn.completed_at = Some(Utc::now());
+        let _ = outbound
+            .send(OutboundEvent::Error {
+                text: "Maximum tool rounds exceeded. Stopping.".into(),
+                recipient_id: sender_id.into(),
+            })
+            .await;
+
+        current_turn
+    }
+
     /// Look up a tool by name.
     fn find_tool(&self, name: &str) -> Option<&dyn Tool> {
         self.tools
@@ -773,6 +1146,11 @@ impl AgentRuntime {
             .find(|t| t.info().name == name)
             .map(AsRef::as_ref)
     }
+}
+
+/// Send an outbound event, ignoring channel-closed errors.
+async fn send_outbound(outbound: &mpsc::Sender<OutboundEvent>, event: OutboundEvent) {
+    let _ = outbound.send(event).await;
 }
 
 /// Join all `ContentBlock::Text` blocks in a message.

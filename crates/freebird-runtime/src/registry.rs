@@ -88,6 +88,15 @@ impl ProviderRegistry {
         self.providers.is_empty()
     }
 
+    /// Return the first provider ID in the failover chain (the "primary" provider).
+    ///
+    /// Used by the streaming path, which targets a specific provider rather than
+    /// iterating the failover chain.
+    #[must_use]
+    pub fn primary_provider_id(&self) -> Option<&ProviderId> {
+        self.failover_chain.first()
+    }
+
     /// Try the failover chain in order. Returns the responding provider's ID
     /// alongside the response.
     ///
