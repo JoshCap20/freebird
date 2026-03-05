@@ -899,8 +899,15 @@ impl AgentRuntime {
                 }
             };
 
-            let Some((accumulator, stop_reason, _usage)) =
-                Self::consume_stream(event_stream, sender_id, outbound).await
+            // TODO(#31): wire `usage` to TokenBudget for per-request enforcement
+            let Some((accumulator, stop_reason, _usage)) = Self::consume_stream(
+                event_stream,
+                sender_id,
+                session_id,
+                self.audit.as_ref(),
+                outbound,
+            )
+            .await
             else {
                 return current_turn;
             };
@@ -958,12 +965,15 @@ impl AgentRuntime {
     /// Consume a provider stream, forwarding text deltas as `StreamChunk` events.
     ///
     /// Returns `Some((accumulator, stop_reason, usage))` on success, `None` if a
-    /// mid-stream error occurred (error events are sent to the user).
+    /// mid-stream error occurred (error events are sent to the user and
+    /// audit-logged).
     async fn consume_stream(
         mut event_stream: std::pin::Pin<
             Box<dyn futures::Stream<Item = Result<StreamEvent, ProviderError>> + Send>,
         >,
         sender_id: &str,
+        session_id: &SessionId,
+        audit: Option<&AuditLogger>,
         outbound: &mpsc::Sender<OutboundEvent>,
     ) -> Option<(StreamAccumulator, StopReason, TokenUsage)> {
         let mut accumulator = StreamAccumulator::new();
@@ -989,62 +999,60 @@ impl AgentRuntime {
                 }
                 Ok(StreamEvent::Error(e)) => {
                     tracing::error!(error = %e, "stream error mid-response");
-                    send_outbound(
-                        outbound,
-                        OutboundEvent::StreamEnd {
-                            recipient_id: sender_id.into(),
-                        },
+                    Self::audit_stream_error(
+                        audit,
+                        session_id,
+                        "stream_error",
+                        &format!("mid-stream error: {e}"),
                     )
                     .await;
-                    send_outbound(
-                        outbound,
-                        OutboundEvent::Error {
-                            text: format!("Stream error: {e}"),
-                            recipient_id: sender_id.into(),
-                        },
-                    )
-                    .await;
+                    send_stream_error(outbound, sender_id, &format!("Stream error: {e}")).await;
                     return None;
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "provider error during streaming");
-                    send_outbound(
-                        outbound,
-                        OutboundEvent::StreamEnd {
-                            recipient_id: sender_id.into(),
-                        },
+                    Self::audit_stream_error(
+                        audit,
+                        session_id,
+                        "stream_provider_error",
+                        &format!("provider error during streaming: {e}"),
                     )
                     .await;
-                    send_outbound(
-                        outbound,
-                        OutboundEvent::Error {
-                            text: format!("Provider error: {e}"),
-                            recipient_id: sender_id.into(),
-                        },
-                    )
-                    .await;
+                    send_stream_error(outbound, sender_id, &format!("Provider error: {e}")).await;
                     return None;
                 }
             }
         }
 
         // Stream ended without a Done event
-        send_outbound(
+        send_stream_error(
             outbound,
-            OutboundEvent::StreamEnd {
-                recipient_id: sender_id.into(),
-            },
-        )
-        .await;
-        send_outbound(
-            outbound,
-            OutboundEvent::Error {
-                text: "Stream ended unexpectedly without completion".into(),
-                recipient_id: sender_id.into(),
-            },
+            sender_id,
+            "Stream ended unexpectedly without completion",
         )
         .await;
         None
+    }
+
+    /// Record an audit event for a stream error.
+    async fn audit_stream_error(
+        audit: Option<&AuditLogger>,
+        session_id: &SessionId,
+        rule: &str,
+        context: &str,
+    ) {
+        if let Some(a) = audit {
+            let _ = a
+                .record(
+                    session_id.as_str(),
+                    AuditEventType::PolicyViolation {
+                        rule: rule.into(),
+                        context: context.into(),
+                        severity: Severity::Medium,
+                    },
+                )
+                .await;
+        }
     }
 
     /// Audit-only injection scan for streaming responses.
@@ -1070,6 +1078,26 @@ impl AgentRuntime {
 /// Send an outbound event, ignoring channel-closed errors.
 async fn send_outbound(outbound: &mpsc::Sender<OutboundEvent>, event: OutboundEvent) {
     let _ = outbound.send(event).await;
+}
+
+/// Send a `StreamEnd` followed by an `Error` event — used by `consume_stream`
+/// error paths.
+async fn send_stream_error(outbound: &mpsc::Sender<OutboundEvent>, sender_id: &str, text: &str) {
+    send_outbound(
+        outbound,
+        OutboundEvent::StreamEnd {
+            recipient_id: sender_id.into(),
+        },
+    )
+    .await;
+    send_outbound(
+        outbound,
+        OutboundEvent::Error {
+            text: text.into(),
+            recipient_id: sender_id.into(),
+        },
+    )
+    .await;
 }
 
 /// Join all `ContentBlock::Text` blocks in a message.
