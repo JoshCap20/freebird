@@ -4,8 +4,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
 use freebird_traits::id::{ChannelId, ModelId, ProviderId};
-use serde::{Deserialize, Serialize};
 use freebird_traits::tool::RiskLevel;
+use serde::{Deserialize, Serialize};
 
 /// Top-level application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
