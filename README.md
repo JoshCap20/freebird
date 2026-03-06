@@ -98,19 +98,33 @@ Set your Anthropic API key:
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
+### Installation
+
+Install the `freebird` binary to `~/.cargo/bin/`:
+
+```bash
+cargo install --path crates/freebird-daemon
+```
+
 ### Running the Daemon
 
 Start the daemon:
 
 ```bash
-cargo run -p freebird-daemon -- serve
+freebird serve
 ```
 
 Connect with the chat client (in another terminal):
 
 ```bash
-cargo run -p freebird-daemon -- chat
+freebird chat
 ```
+
+> **During development**, you can skip installation and run directly:
+> ```bash
+> cargo run -p freebird-daemon -- serve
+> cargo run -p freebird-daemon -- chat
+> ```
 
 ### CLI Reference
 
@@ -130,13 +144,13 @@ freebird stop    Send graceful shutdown to the daemon
 By default, the agent can only access files within its sandbox directory (`~/.freebird/sandbox`). Use `--allow-dir` to grant access to additional directories — for example, to let the agent work on a project:
 
 ```bash
-cargo run -p freebird-daemon -- serve --allow-dir ~/Documents/myproject
+freebird serve --allow-dir ~/Documents/myproject
 ```
 
 Multiple directories can be allowed:
 
 ```bash
-cargo run -p freebird-daemon -- serve \
+freebird serve \
   --allow-dir ~/Documents/project-a \
   --allow-dir ~/src/project-b
 ```
