@@ -1,6 +1,8 @@
 //! Shared test infrastructure for `freebird-runtime` integration tests.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+// Each test binary compiles this module independently; not every binary uses
+// every helper, so unused-function warnings are expected and harmless.
+#![allow(clippy::unwrap_used, clippy::expect_used, dead_code)]
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
