@@ -53,7 +53,19 @@ impl ShellTool {
     /// * `max_output_bytes` — Maximum stdout+stderr bytes returned. Output
     ///   beyond this limit is truncated with a marker.
     fn new(allowed_commands: impl IntoIterator<Item = String>, max_output_bytes: usize) -> Self {
-        let allowed: BTreeSet<String> = allowed_commands.into_iter().collect();
+        let allowed: BTreeSet<String> = allowed_commands
+            .into_iter()
+            .filter(|cmd| {
+                let valid = !cmd.is_empty()
+                    && !cmd.contains('/')
+                    && !cmd.contains(' ')
+                    && !cmd.contains('\0');
+                if !valid {
+                    tracing::warn!(command = %cmd, "ignoring invalid allowlist entry");
+                }
+                valid
+            })
+            .collect();
         Self {
             info: ToolInfo {
                 name: Self::NAME.into(),
@@ -1050,6 +1062,39 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(output.outcome, ToolOutcome::Success));
+    }
+
+    #[test]
+    fn test_allowlist_rejects_path_entries() {
+        let tool = ShellTool::new(
+            ["/usr/bin/ls".to_string(), "cat".to_string()],
+            TEST_MAX_OUTPUT,
+        );
+        assert!(
+            !tool.allowed_commands.contains("/usr/bin/ls"),
+            "paths should be filtered out"
+        );
+        assert!(tool.allowed_commands.contains("cat"));
+    }
+
+    #[test]
+    fn test_allowlist_rejects_entries_with_spaces() {
+        let tool = ShellTool::new(["ls -la".to_string(), "cat".to_string()], TEST_MAX_OUTPUT);
+        assert!(
+            !tool.allowed_commands.contains("ls -la"),
+            "entries with spaces should be filtered out"
+        );
+        assert!(tool.allowed_commands.contains("cat"));
+    }
+
+    #[test]
+    fn test_allowlist_rejects_empty_entries() {
+        let tool = ShellTool::new([String::new(), "cat".to_string()], TEST_MAX_OUTPUT);
+        assert!(
+            !tool.allowed_commands.contains(""),
+            "empty entries should be filtered out"
+        );
+        assert!(tool.allowed_commands.contains("cat"));
     }
 
     #[test]
