@@ -741,16 +741,7 @@ impl AgentRuntime {
         // Scan model output for injection — BLOCK if detected
         let scanned = ScannedModelResponse::from_raw(&response_text);
         if scanned.injection_detected() {
-            tracing::warn!("injection detected in model output, blocking delivery");
-            self.audit(
-                session_id,
-                AuditEventType::InjectionDetected {
-                    pattern: "prompt injection in model output".to_owned(),
-                    source: InjectionSource::ModelResponse,
-                    severity: Severity::High,
-                },
-            )
-            .await;
+            self.audit_model_injection(session_id).await;
 
             let _ = outbound
                 .send(OutboundEvent::Error {
@@ -791,16 +782,7 @@ impl AgentRuntime {
         // Scan truncated output for injection — BLOCK if detected
         let scanned = ScannedModelResponse::from_raw(&partial_text);
         if scanned.injection_detected() {
-            tracing::warn!("injection detected in model output, blocking delivery");
-            self.audit(
-                session_id,
-                AuditEventType::InjectionDetected {
-                    pattern: "prompt injection in model output".to_owned(),
-                    source: InjectionSource::ModelResponse,
-                    severity: Severity::High,
-                },
-            )
-            .await;
+            self.audit_model_injection(session_id).await;
 
             let _ = outbound
                 .send(OutboundEvent::Error {
@@ -835,6 +817,20 @@ impl AgentRuntime {
         if let Some(audit) = &self.audit {
             let _ = audit.record(session_id.as_str(), event).await;
         }
+    }
+
+    /// Log and audit a model output injection detection.
+    async fn audit_model_injection(&self, session_id: &SessionId) {
+        tracing::warn!("injection detected in model output, blocking delivery");
+        self.audit(
+            session_id,
+            AuditEventType::InjectionDetected {
+                pattern: "prompt injection in model output".to_owned(),
+                source: InjectionSource::ModelResponse,
+                severity: Severity::High,
+            },
+        )
+        .await;
     }
 
     /// Execute a tool by name, with timeout. Returns `ToolOutput` unconditionally.
@@ -1108,16 +1104,7 @@ impl AgentRuntime {
         let response_text = extract_text(message);
         let scanned = ScannedModelResponse::from_raw(&response_text);
         if scanned.injection_detected() {
-            tracing::warn!("injection detected in model output, blocking delivery");
-            self.audit(
-                session_id,
-                AuditEventType::InjectionDetected {
-                    pattern: "prompt injection in model output".to_owned(),
-                    source: InjectionSource::ModelResponse,
-                    severity: Severity::High,
-                },
-            )
-            .await;
+            self.audit_model_injection(session_id).await;
         }
     }
 
