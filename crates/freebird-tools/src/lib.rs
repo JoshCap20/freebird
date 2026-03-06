@@ -6,5 +6,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod filesystem;
-pub mod network;
 pub mod shell;
+
+// network module intentionally omitted until implementation (tracked as #26).
+// Adding an empty `pub mod network` would expose a public module with zero exports.
