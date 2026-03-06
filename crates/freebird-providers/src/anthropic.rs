@@ -125,7 +125,7 @@ struct ApiResponse {
 
 /// Token usage from the API response.
 #[derive(Debug, Deserialize)]
-#[allow(clippy::struct_field_names)]
+#[allow(clippy::struct_field_names)] // API field names match Anthropic's wire format
 struct ApiUsage {
     input_tokens: u32,
     output_tokens: u32,
@@ -171,7 +171,7 @@ struct ApiStreamMessage {
 
 /// Cumulative usage from the `message_delta` SSE event.
 #[derive(Debug, Deserialize)]
-#[allow(clippy::struct_field_names)]
+#[allow(clippy::struct_field_names)] // API field names match Anthropic's wire format
 struct ApiStreamUsage {
     output_tokens: u32,
     #[serde(default)]
@@ -673,6 +673,7 @@ impl SseStreamState {
 
     /// Handle a `content_block_start` SSE event (sets up tool accumulator).
     fn process_content_block_start(&mut self, value: &serde_json::Value) {
+        // Content block indices are small non-negative integers from the API; truncation is safe.
         #[allow(clippy::cast_possible_truncation)]
         let index = value
             .get("index")
@@ -720,6 +721,7 @@ impl SseStreamState {
         &mut self,
         value: &serde_json::Value,
     ) -> Option<Result<StreamEvent, ProviderError>> {
+        // Content block indices are small non-negative integers from the API; truncation is safe.
         #[allow(clippy::cast_possible_truncation)]
         let index = value
             .get("index")
