@@ -5,15 +5,13 @@
 //! routes them to handlers, and shuts down gracefully when the
 //! cancellation token fires or the inbound stream closes.
 
-use std::time::Duration;
-
 use chrono::Utc;
-use freebird_security::audit::{
-    AuditEventType, AuditLogger, CapabilityCheckResult, InjectionSource,
-};
+use freebird_security::audit::{AuditEventType, AuditLogger, InjectionSource};
+use freebird_security::capability::CapabilityGrant;
+use freebird_security::consent::ConsentRequest;
 use freebird_security::error::Severity;
 use freebird_security::injection;
-use freebird_security::safe_types::{SafeMessage, ScannedModelResponse, ScannedToolOutput};
+use freebird_security::safe_types::{SafeMessage, ScannedModelResponse};
 use freebird_security::taint::Tainted;
 use freebird_traits::channel::{
     Channel, ChannelError, ChannelFeature, InboundEvent, OutboundEvent,
@@ -24,7 +22,7 @@ use freebird_traits::provider::{
     CompletionRequest, CompletionResponse, ContentBlock, Message, ProviderError, Role, StopReason,
     StreamEvent, TokenUsage, ToolDefinition,
 };
-use freebird_traits::tool::{Tool, ToolContext, ToolOutcome, ToolOutput};
+use freebird_traits::tool::{Capability, ToolOutcome};
 use freebird_types::config::{RuntimeConfig, ToolsConfig};
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -33,7 +31,6 @@ use tokio_util::sync::CancellationToken;
 use crate::history::conversation_to_messages;
 use crate::registry::ProviderRegistry;
 use crate::stream::StreamAccumulator;
-use crate::tool_registry::ToolRegistry;
 
 use crate::session::SessionManager;
 
@@ -71,7 +68,11 @@ pub enum RuntimeError {
 pub struct AgentRuntime {
     provider_registry: ProviderRegistry,
     channel: Box<dyn Channel>,
-    tools: ToolRegistry,
+    tool_executor: crate::tool_executor::ToolExecutor,
+    /// Receives consent requests from the `ToolExecutor`'s `ConsentGate`.
+    /// Wired into the `run()` select loop in a later task.
+    #[allow(dead_code)]
+    consent_rx: Option<tokio::sync::mpsc::Receiver<ConsentRequest>>,
     memory: Box<dyn Memory>,
     config: RuntimeConfig,
     tools_config: ToolsConfig,
@@ -85,10 +86,12 @@ impl AgentRuntime {
     /// The `SessionManager` is created internally — it's an implementation
     /// detail, not an external dependency.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider_registry: ProviderRegistry,
         channel: Box<dyn Channel>,
-        tools: ToolRegistry,
+        tool_executor: crate::tool_executor::ToolExecutor,
+        consent_rx: Option<tokio::sync::mpsc::Receiver<ConsentRequest>>,
         memory: Box<dyn Memory>,
         config: RuntimeConfig,
         tools_config: ToolsConfig,
@@ -97,7 +100,8 @@ impl AgentRuntime {
         Self {
             provider_registry,
             channel,
-            tools,
+            tool_executor,
+            consent_rx,
             memory,
             config,
             tools_config,
@@ -444,7 +448,7 @@ impl AgentRuntime {
             timestamp: Utc::now(),
         };
 
-        let tool_definitions: Vec<ToolDefinition> = self.tools.to_definitions();
+        let tool_definitions = self.tool_executor.tool_definitions();
 
         let mut messages = conversation_to_messages(conversation);
 
@@ -621,15 +625,14 @@ impl AgentRuntime {
         let mut prompt = base.to_owned();
         let _ = write!(prompt, "\n\nYou are running on model: {model_id}");
 
-        if self.tools.is_empty() {
+        if self.tool_executor.tool_count() == 0 {
             return prompt;
         }
 
         // List available tools by name and description.
         prompt.push_str("\n\nYou have the following tools available:\n");
-        for tool in self.tools.iter() {
-            let info = tool.info();
-            let _ = writeln!(prompt, "- **{}**: {}", info.name, info.description);
+        for def in &self.tool_executor.tool_definitions() {
+            let _ = writeln!(prompt, "- **{}**: {}", def.name, def.description);
         }
 
         // Filesystem access context.
@@ -710,6 +713,30 @@ impl AgentRuntime {
         // Add assistant message with tool_use blocks to conversation
         messages.push(assistant_message.clone());
 
+        // TODO(#27): Replace with per-session capability grants derived from session auth.
+        let grant = match CapabilityGrant::new(
+            [
+                Capability::FileRead,
+                Capability::FileWrite,
+                Capability::FileDelete,
+                Capability::ShellExecute,
+                Capability::ProcessSpawn,
+                Capability::NetworkOutbound,
+                Capability::NetworkListen,
+                Capability::EnvRead,
+            ]
+            .into_iter()
+            .collect(),
+            self.tools_config.sandbox_root.clone(),
+            None,
+        ) {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!(error = %e, "cannot create capability grant — skipping tool execution");
+                return;
+            }
+        };
+
         // Execute each tool and collect results
         let mut tool_results = Vec::with_capacity(tool_uses.len());
         for (tool_use_id, tool_name, input) in tool_uses {
@@ -724,27 +751,17 @@ impl AgentRuntime {
 
             let start = std::time::Instant::now();
 
-            let output = self.execute_tool(&tool_name, &input, session_id).await;
+            // ToolExecutor handles capability checks, consent gates, timeout,
+            // injection scanning, and audit logging. Output is already scanned.
+            let output = self
+                .tool_executor
+                .execute(&tool_name, input.clone(), &grant, session_id, sender_id)
+                .await;
 
             let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-            // Scan tool output for injection — BLOCK if detected
-            let scanned = ScannedToolOutput::from_raw(&output.content);
-            let (final_content, outcome) = if scanned.injection_detected() {
-                tracing::warn!(tool = %tool_name, "injection detected in tool output, blocking");
-                self.audit(
-                    session_id,
-                    AuditEventType::InjectionDetected {
-                        pattern: "prompt injection in tool output".to_owned(),
-                        source: InjectionSource::ToolOutput,
-                        severity: Severity::High,
-                    },
-                )
-                .await;
-                (scanned.into_content(), ToolOutcome::Error)
-            } else {
-                (scanned.into_content(), output.outcome)
-            };
+            let final_content = output.content;
+            let outcome = output.outcome;
 
             let is_error = outcome == ToolOutcome::Error;
 
@@ -903,65 +920,6 @@ impl AgentRuntime {
             },
         )
         .await;
-    }
-
-    /// Execute a tool by name, with timeout. Returns `ToolOutput` unconditionally.
-    async fn execute_tool(
-        &self,
-        tool_name: &str,
-        input: &serde_json::Value,
-        session_id: &SessionId,
-    ) -> ToolOutput {
-        let Some(tool) = self.find_tool(tool_name) else {
-            self.audit(
-                session_id,
-                AuditEventType::ToolInvocation {
-                    tool_name: tool_name.into(),
-                    capability_check: CapabilityCheckResult::Denied {
-                        reason: "tool not found".into(),
-                    },
-                },
-            )
-            .await;
-            return ToolOutput {
-                content: format!("Error: tool `{tool_name}` not found"),
-                outcome: ToolOutcome::Error,
-                metadata: None,
-            };
-        };
-
-        self.audit(
-            session_id,
-            AuditEventType::ToolInvocation {
-                tool_name: tool_name.into(),
-                capability_check: CapabilityCheckResult::Granted,
-            },
-        )
-        .await;
-
-        let context = ToolContext {
-            session_id,
-            sandbox_root: &self.tools_config.sandbox_root,
-            // TODO(#27): Use per-session capability grants instead of empty slice
-            granted_capabilities: &[],
-            allowed_directories: &self.tools_config.allowed_directories,
-        };
-
-        let timeout = Duration::from_secs(self.tools_config.default_timeout_secs);
-
-        match tokio::time::timeout(timeout, tool.execute(input.clone(), &context)).await {
-            Ok(Ok(output)) => output,
-            Ok(Err(e)) => ToolOutput {
-                content: format!("Error: {e}"),
-                outcome: ToolOutcome::Error,
-                metadata: None,
-            },
-            Err(_) => ToolOutput {
-                content: format!("Error: tool `{tool_name}` timed out"),
-                outcome: ToolOutcome::Error,
-                metadata: None,
-            },
-        }
     }
 
     /// Check whether any provider in the failover chain supports streaming.
@@ -1180,11 +1138,6 @@ impl AgentRuntime {
         if scanned.injection_detected() {
             self.audit_model_injection(session_id).await;
         }
-    }
-
-    /// Look up a tool by name.
-    fn find_tool(&self, name: &str) -> Option<&dyn Tool> {
-        self.tools.get(name)
     }
 }
 

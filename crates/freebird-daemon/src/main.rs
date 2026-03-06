@@ -153,18 +153,29 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         }
     });
 
-    // 9. AGENT RUNTIME
+    // 9. TOOL EXECUTOR — consumes the registry, adds security pipeline
+    let tool_executor = freebird_runtime::tool_executor::ToolExecutor::new(
+        tool_registry.into_tools(),
+        std::time::Duration::from_secs(tools_config.default_timeout_secs),
+        None, // audit logger — wired in a later issue
+        tools_config.allowed_directories.clone(),
+        None, // consent gate — wired in a later issue
+    )
+    .context("failed to construct ToolExecutor (duplicate tool names?)")?;
+
+    // 10. AGENT RUNTIME
     let runtime = AgentRuntime::new(
         registry,
         channel,
-        tool_registry,
+        tool_executor,
+        None, // consent_rx — wired in a later issue
         Box::new(memory),
         config.runtime,
         tools_config,
         None, // audit logger — wired in a later issue
     );
 
-    // 10. RUN
+    // 11. RUN
     let run_result = runtime.run(token).await;
     match &run_result {
         Ok(()) => tracing::info!("runtime exited cleanly"),

@@ -7,13 +7,13 @@
 
 mod helpers;
 
-use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use freebird_runtime::agent::AgentRuntime;
 use freebird_runtime::registry::ProviderRegistry;
-use freebird_runtime::tool_registry::ToolRegistry;
+use freebird_runtime::tool_executor::ToolExecutor;
+use freebird_traits::tool::Tool;
 use freebird_traits::channel::InboundEvent;
 use freebird_traits::id::{ModelId, ProviderId, SessionId};
 use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary};
@@ -47,11 +47,23 @@ impl Memory for NoopMemory {
     }
 }
 
+fn make_tool_executor(tools: Vec<Box<dyn Tool>>) -> ToolExecutor {
+    ToolExecutor::new(
+        tools,
+        Duration::from_secs(30),
+        None,
+        vec![],
+        None,
+    )
+    .expect("test tool executor construction should not fail")
+}
+
 fn make_runtime(channel: MockChannel) -> AgentRuntime {
     AgentRuntime::new(
         ProviderRegistry::new(),
         Box::new(channel),
-        ToolRegistry::new(),
+        make_tool_executor(vec![]),
+        None,
         Box::new(NoopMemory),
         RuntimeConfig {
             default_model: ModelId::from("test-model"),
@@ -64,7 +76,7 @@ fn make_runtime(channel: MockChannel) -> AgentRuntime {
             drain_timeout_secs: 1,
         },
         ToolsConfig {
-            sandbox_root: PathBuf::from("/tmp/test-sandbox"),
+            sandbox_root: std::env::temp_dir(),
             default_timeout_secs: 30,
             allowed_directories: vec![],
             allowed_shell_commands: vec![],
