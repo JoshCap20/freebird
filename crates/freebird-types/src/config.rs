@@ -118,7 +118,11 @@ pub struct ToolsConfig {
 }
 
 fn default_allowed_shell_commands() -> Vec<String> {
-    ["ls", "cat", "grep", "find", "git", "head", "tail", "wc"]
+    // Only read-only, single-file commands. Notably excluded:
+    // - `git`: can make network connections, bypassing EgressPolicy (CLAUDE.md §12)
+    // - `find`: `-delete` flag enables filesystem destruction outside sandbox
+    // Admins can add these via config if they accept the risks.
+    ["ls", "cat", "grep", "head", "tail", "wc"]
         .iter()
         .map(ToString::to_string)
         .collect()
@@ -241,7 +245,7 @@ kind = "cli"
 [tools]
 sandbox_root = "~/.freebird/sandbox"
 default_timeout_secs = 30
-allowed_shell_commands = ["ls", "cat", "grep", "find", "git", "head", "tail", "wc"]
+allowed_shell_commands = ["ls", "cat", "grep", "head", "tail", "wc"]
 max_shell_output_bytes = 1048576
 
 [memory]
@@ -492,7 +496,7 @@ drain_timeout_secs = 1"#,
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(
             config.tools.allowed_shell_commands,
-            vec!["ls", "cat", "grep", "find", "git", "head", "tail", "wc"]
+            vec!["ls", "cat", "grep", "head", "tail", "wc"]
         );
         assert_eq!(config.tools.max_shell_output_bytes, 1_048_576);
     }
@@ -504,7 +508,7 @@ drain_timeout_secs = 1"#,
         let config: AppConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(
             config.tools.allowed_shell_commands,
-            vec!["ls", "cat", "grep", "find", "git", "head", "tail", "wc"]
+            vec!["ls", "cat", "grep", "head", "tail", "wc"]
         );
         assert_eq!(config.tools.max_shell_output_bytes, 1_048_576);
     }
