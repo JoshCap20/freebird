@@ -1386,16 +1386,7 @@ mod tests {
         handle.await.unwrap();
 
         let events = read_audit_events(&log_path);
-        // Should have: ToolInvocation(Granted) + ConsentGranted + ToolInvocation(Granted)
-        // Wait — the flow is: capability check audit (Granted), then consent granted audit,
-        // then the main Granted audit at step 4. Actually step 4 is the same as step 2.
-        // Let me re-read the flow... The execute() method does:
-        // 2. capability check → audit Granted
-        // 3. consent check → audit ConsentGranted
-        // 4. audit Granted (this is the same audit as step 2 — it's only called once)
-        // Actually no — looking at the code: step 2 audits Denied on failure only.
-        // Step 4 is the only Granted audit. And consent Granted is between steps 2 and 4.
-        // So events should be: ConsentGranted, ToolInvocation(Granted)
+        // Flow: ConsentGranted (step 3), then ToolInvocation(Granted) (step 4)
         assert!(events.iter().any(|e| matches!(
             e,
             AuditEventType::ConsentGranted { tool_name } if tool_name == "shell"
@@ -1445,5 +1436,28 @@ mod tests {
             AuditEventType::ConsentDenied { tool_name, reason }
                 if tool_name == "shell" && reason.as_deref() == Some("nope")
         )));
+    }
+
+    #[tokio::test]
+    async fn test_consent_respond_unknown_request_returns_false() {
+        let (gate, _rx) = ConsentGate::new(RiskLevel::High, StdDuration::from_secs(60), 5);
+        let executor =
+            ToolExecutor::new(vec![], StdDuration::from_secs(5), None, vec![], Some(gate)).unwrap();
+
+        let result = executor
+            .consent_respond("nonexistent-id", ConsentResponse::Approved)
+            .await;
+        assert!(!result, "unknown request_id should return false");
+    }
+
+    #[tokio::test]
+    async fn test_consent_respond_no_gate_returns_false() {
+        let executor =
+            ToolExecutor::new(vec![], StdDuration::from_secs(5), None, vec![], None).unwrap();
+
+        let result = executor
+            .consent_respond("any-id", ConsentResponse::Approved)
+            .await;
+        assert!(!result, "no consent gate should return false");
     }
 }
