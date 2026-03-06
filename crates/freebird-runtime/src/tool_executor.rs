@@ -342,15 +342,29 @@ impl ToolExecutor {
         input: &serde_json::Value,
         session_id: &SessionId,
     ) -> Option<ToolOutput> {
+        // Truncate action summary to avoid leaking large tool inputs (e.g. file contents)
+        // through the consent channel. 512 chars is enough for a human to make a decision.
+        const MAX_SUMMARY_LEN: usize = 512;
+
         let consent = self.consent_gate.as_ref()?;
-        let action_summary =
+        let raw_summary =
             serde_json::to_string(input).unwrap_or_else(|_| "<unserializable input>".into());
+        let action_summary = if raw_summary.len() > MAX_SUMMARY_LEN {
+            format!(
+                "{}… ({} bytes total)",
+                &raw_summary[..MAX_SUMMARY_LEN],
+                raw_summary.len()
+            )
+        } else {
+            raw_summary
+        };
         match consent.check(tool_info, action_summary).await {
             Ok(()) => {
                 self.audit_consent_granted(session_id, tool_name).await;
                 None
             }
             Err(ConsentError::Denied { tool, reason }) => {
+                tracing::warn!(%tool, %reason, %session_id, "consent denied for tool");
                 self.audit_consent_denied(session_id, &tool, Some(&reason))
                     .await;
                 Some(ToolOutput {
@@ -360,6 +374,7 @@ impl ToolExecutor {
                 })
             }
             Err(ConsentError::Expired { tool, timeout_secs }) => {
+                tracing::warn!(%tool, timeout_secs, %session_id, "consent expired for tool");
                 self.audit_consent_expired(session_id, &tool).await;
                 Some(ToolOutput {
                     content: format!("Consent expired for tool `{tool}` after {timeout_secs}s"),
@@ -367,16 +382,22 @@ impl ToolExecutor {
                     metadata: None,
                 })
             }
-            Err(ConsentError::TooManyPending { tool, max }) => Some(ToolOutput {
-                content: format!("Too many pending consent requests ({max}); denying `{tool}`"),
-                outcome: ToolOutcome::Error,
-                metadata: None,
-            }),
-            Err(ConsentError::ChannelClosed) => Some(ToolOutput {
-                content: "Consent channel closed — cannot request approval".into(),
-                outcome: ToolOutcome::Error,
-                metadata: None,
-            }),
+            Err(ConsentError::TooManyPending { tool, max }) => {
+                tracing::warn!(%tool, max, %session_id, "too many pending consent requests");
+                Some(ToolOutput {
+                    content: format!("Too many pending consent requests ({max}); denying `{tool}`"),
+                    outcome: ToolOutcome::Error,
+                    metadata: None,
+                })
+            }
+            Err(ConsentError::ChannelClosed) => {
+                tracing::warn!(%session_id, "consent channel closed");
+                Some(ToolOutput {
+                    content: "Consent channel closed — cannot request approval".into(),
+                    outcome: ToolOutcome::Error,
+                    metadata: None,
+                })
+            }
         }
     }
 
