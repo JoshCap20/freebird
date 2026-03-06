@@ -9,18 +9,55 @@ use tokio::net::TcpStream;
 
 use freebird_types::protocol::{ClientMessage, ServerMessage};
 
-/// Parse a line of user input into a [`ClientMessage`].
+// ── Help text ────────────────────────────────────────────────────────────────
+
+/// Client-side help text printed by `/help` without a daemon round-trip.
+const HELP_TEXT: &str = "\
+Available commands:
+  /help            Show this help message
+  /new             Start a new conversation
+  /quit, /exit     Disconnect from the daemon
+";
+
+// ── Input parsing ─────────────────────────────────────────────────────────────
+
+/// The result of parsing a line of user input.
 ///
-/// Returns `None` for `/quit` and `/exit` (signals the caller to disconnect).
+/// Separating local-only actions from network messages lets the loop decide
+/// what to do without needing out-of-band return values.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ParseResult {
+    /// Send this message to the daemon.
+    Send(ClientMessage),
+    /// Print this text locally and do nothing else.
+    LocalOutput(String),
+    /// Disconnect gracefully.
+    Quit,
+}
+
+/// Parse a line of user input into a [`ParseResult`].
+///
+/// - `/quit` and `/exit`  → [`ParseResult::Quit`]
+/// - `/help`              → [`ParseResult::LocalOutput`] (no round-trip)
+/// - `/`  (bare slash)    → [`ParseResult::LocalOutput`] with a usage hint
+/// - `/cmd [args…]`       → [`ParseResult::Send`] with a `Command` message
+/// - anything else        → [`ParseResult::Send`] with a `Message`
 #[must_use]
-pub fn parse_user_input(line: &str) -> Option<ClientMessage> {
-    if line == "/quit" || line == "/exit" {
-        return None;
+pub fn parse_user_input(line: &str) -> ParseResult {
+    match line {
+        "/quit" | "/exit" => return ParseResult::Quit,
+        "/help" => return ParseResult::LocalOutput(HELP_TEXT.to_string()),
+        "/" => {
+            return ParseResult::LocalOutput(
+                "Unknown command '/'. Type /help for available commands.\n".to_string(),
+            );
+        }
+        _ => {}
     }
 
     line.strip_prefix('/').map_or_else(
         || {
-            Some(ClientMessage::Message {
+            ParseResult::Send(ClientMessage::Message {
                 text: line.to_string(),
             })
         },
@@ -32,12 +69,18 @@ pub fn parse_user_input(line: &str) -> Option<ClientMessage> {
                 .next()
                 .map(|a| a.split_whitespace().map(String::from).collect())
                 .unwrap_or_default();
-            Some(ClientMessage::Command { name, args })
+            ParseResult::Send(ClientMessage::Command { name, args })
         },
     )
 }
 
+// ── Rendering ─────────────────────────────────────────────────────────────────
+
 /// Render a [`ServerMessage`] as user-facing text.
+///
+/// Streaming chunks are returned as-is (no trailing newline) so they can be
+/// printed incrementally. The caller is responsible for printing the
+/// `FreeBird: ` prefix before the first chunk of each response.
 #[must_use]
 pub fn render_server_message(msg: &ServerMessage) -> String {
     match msg {
@@ -50,15 +93,23 @@ pub fn render_server_message(msg: &ServerMessage) -> String {
     }
 }
 
+// ── Chat loop ─────────────────────────────────────────────────────────────────
+
 /// Run the chat client loop with injectable I/O (for testing).
 ///
 /// Reads lines from `user_input`, sends them as JSON-line [`ClientMessage`]s
 /// to the daemon via `stream`, reads JSON-line [`ServerMessage`]s from the
 /// daemon, and renders them to `user_output`.
+///
+/// The `is_tty` flag controls whether interactive prompts (`You: `,
+/// `FreeBird: `) are written. Pass `true` when connected to a real terminal
+/// and `false` in tests / piped usage so assertions on `user_output` remain
+/// deterministic.
 pub async fn run_chat_with_io<I, O>(
     stream: TcpStream,
     user_input: I,
     mut user_output: O,
+    is_tty: bool,
 ) -> Result<()>
 where
     I: AsyncBufRead + Unpin,
@@ -70,21 +121,51 @@ where
     let mut input_lines = user_input.lines();
     let mut socket_lines = socket_reader.lines();
 
+    // True while we are mid-stream (between first StreamChunk and StreamEnd).
+    // Used to suppress the "FreeBird: " prefix on every chunk after the first.
+    let mut in_stream = false;
+
+    // Print the first prompt before the loop so the user sees it immediately.
+    if is_tty {
+        user_output
+            .write_all(b"You: ")
+            .await
+            .context("writing prompt")?;
+        user_output.flush().await.context("flushing prompt")?;
+    }
+
     loop {
         tokio::select! {
             line = input_lines.next_line() => {
                 if let Some(line) = line.context("reading user input")? {
                     let trimmed = line.trim().to_string();
                     if trimmed.is_empty() {
+                        // Re-print prompt on blank input
+                        if is_tty {
+                            user_output.write_all(b"You: ").await.context("writing prompt")?;
+                            user_output.flush().await.context("flushing prompt")?;
+                        }
                         continue;
                     }
 
-                    let Some(client_msg) = parse_user_input(&trimmed) else {
-                        send_client_message(&mut socket_write, &ClientMessage::Disconnect).await?;
-                        return Ok(());
-                    };
-
-                    send_client_message(&mut socket_write, &client_msg).await?;
+                    match parse_user_input(&trimmed) {
+                        ParseResult::Quit => {
+                            send_client_message(&mut socket_write, &ClientMessage::Disconnect).await?;
+                            return Ok(());
+                        }
+                        ParseResult::LocalOutput(text) => {
+                            user_output.write_all(text.as_bytes()).await.context("writing local output")?;
+                            user_output.flush().await.context("flushing local output")?;
+                            // Re-print prompt after local output
+                            if is_tty {
+                                user_output.write_all(b"You: ").await.context("writing prompt")?;
+                                user_output.flush().await.context("flushing prompt")?;
+                            }
+                        }
+                        ParseResult::Send(client_msg) => {
+                            send_client_message(&mut socket_write, &client_msg).await?;
+                        }
+                    }
                 } else {
                     // stdin EOF — disconnect gracefully
                     send_client_message(&mut socket_write, &ClientMessage::Disconnect).await?;
@@ -93,29 +174,102 @@ where
             }
             line = socket_lines.next_line() => {
                 if let Some(line) = line.context("reading from daemon")? {
-                    match serde_json::from_str::<ServerMessage>(&line) {
-                        Ok(msg) => {
-                            let rendered = render_server_message(&msg);
-                            user_output.write_all(rendered.as_bytes()).await
-                                .context("writing to output")?;
-                            user_output.flush().await
-                                .context("flushing output")?;
-                        }
-                        Err(e) => {
-                            let err_msg = format!("[protocol error: {e}]\n");
-                            user_output.write_all(err_msg.as_bytes()).await?;
-                            user_output.flush().await?;
-                        }
-                    }
+                    in_stream = handle_daemon_line(
+                        &line, &mut user_output, is_tty, in_stream,
+                    ).await?;
                 } else {
-                    // Server disconnected
-                    user_output.write_all(b"[daemon disconnected]\n").await?;
+                    // Server disconnected — tell the user and suggest next steps.
+                    user_output
+                        .write_all(
+                            b"[daemon disconnected]\nRun 'freebird serve' to start the daemon.\n",
+                        )
+                        .await?;
                     user_output.flush().await?;
                     return Ok(());
                 }
             }
         }
     }
+}
+
+// ── Wire helpers ──────────────────────────────────────────────────────────────
+
+/// Process a single JSON-line from the daemon.
+///
+/// Returns the updated `in_stream` flag so the caller can track streaming state.
+async fn handle_daemon_line<O: AsyncWrite + Unpin>(
+    line: &str,
+    user_output: &mut O,
+    is_tty: bool,
+    in_stream: bool,
+) -> Result<bool> {
+    let msg = match serde_json::from_str::<ServerMessage>(line) {
+        Ok(msg) => msg,
+        Err(e) => {
+            let err_msg = format!("[protocol error: {e}]\n");
+            user_output.write_all(err_msg.as_bytes()).await?;
+            user_output.flush().await?;
+            return Ok(in_stream);
+        }
+    };
+
+    // Print "FreeBird: " prefix before the first token of each response.
+    let needs_prefix = is_tty
+        && match &msg {
+            ServerMessage::StreamChunk { .. } if !in_stream => true,
+            ServerMessage::Message { .. }
+            | ServerMessage::CommandResponse { .. }
+            | ServerMessage::Error { .. } => true,
+            _ => false,
+        };
+
+    if needs_prefix {
+        user_output
+            .write_all(b"FreeBird: ")
+            .await
+            .context("writing response prefix")?;
+    }
+
+    // Track streaming state and write prompt after stream ends.
+    let new_in_stream = match &msg {
+        ServerMessage::StreamChunk { .. } => true,
+        ServerMessage::StreamEnd => {
+            // After stream ends, print the next prompt.
+            if is_tty {
+                user_output
+                    .write_all(b"You: ")
+                    .await
+                    .context("writing prompt")?;
+            }
+            false
+        }
+        _ => false,
+    };
+
+    let rendered = render_server_message(&msg);
+    user_output
+        .write_all(rendered.as_bytes())
+        .await
+        .context("writing to output")?;
+    user_output.flush().await.context("flushing output")?;
+
+    // For non-streaming complete responses, print the next prompt now.
+    if is_tty {
+        match &msg {
+            ServerMessage::Message { .. }
+            | ServerMessage::CommandResponse { .. }
+            | ServerMessage::Error { .. } => {
+                user_output
+                    .write_all(b"You: ")
+                    .await
+                    .context("writing prompt")?;
+                user_output.flush().await.context("flushing prompt")?;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(new_in_stream)
 }
 
 /// Send a [`ClientMessage`] as a JSON line over the socket.
@@ -133,12 +287,14 @@ pub async fn send_client_message<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
     use std::time::Duration;
-    use tokio::io::{AsyncReadExt, duplex};
+    use tokio::io::{AsyncReadExt, BufReader, duplex};
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
     use tokio::time::timeout;
@@ -157,7 +313,7 @@ mod tests {
     fn parse_plain_message() {
         assert_eq!(
             parse_user_input("hello world"),
-            Some(ClientMessage::Message {
+            ParseResult::Send(ClientMessage::Message {
                 text: "hello world".into()
             })
         );
@@ -167,7 +323,7 @@ mod tests {
     fn parse_command_no_args() {
         assert_eq!(
             parse_user_input("/new"),
-            Some(ClientMessage::Command {
+            ParseResult::Send(ClientMessage::Command {
                 name: "new".into(),
                 args: vec![]
             })
@@ -178,7 +334,7 @@ mod tests {
     fn parse_command_with_args() {
         assert_eq!(
             parse_user_input("/model opus fast"),
-            Some(ClientMessage::Command {
+            ParseResult::Send(ClientMessage::Command {
                 name: "model".into(),
                 args: vec!["opus".into(), "fast".into()]
             })
@@ -186,20 +342,39 @@ mod tests {
     }
 
     #[test]
-    fn parse_quit_and_exit() {
-        assert_eq!(parse_user_input("/quit"), None);
-        assert_eq!(parse_user_input("/exit"), None);
+    fn parse_quit_returns_quit() {
+        assert_eq!(parse_user_input("/quit"), ParseResult::Quit);
+        assert_eq!(parse_user_input("/exit"), ParseResult::Quit);
+    }
+
+    /// Bare `/` used to produce `Command { name: "", args: [] }` — now it
+    /// returns a local usage hint instead of sending a malformed command.
+    #[test]
+    fn parse_bare_slash_returns_local_output() {
+        let result = parse_user_input("/");
+        assert!(
+            matches!(result, ParseResult::LocalOutput(_)),
+            "bare '/' should produce LocalOutput, got {result:?}"
+        );
+        if let ParseResult::LocalOutput(text) = result {
+            assert!(
+                text.contains("/help"),
+                "usage hint should mention /help, got: {text}"
+            );
+        }
     }
 
     #[test]
-    fn parse_slash_alone_is_empty_command() {
-        assert_eq!(
-            parse_user_input("/"),
-            Some(ClientMessage::Command {
-                name: String::new(),
-                args: vec![]
-            })
+    fn parse_help_returns_local_output() {
+        let result = parse_user_input("/help");
+        assert!(
+            matches!(result, ParseResult::LocalOutput(_)),
+            "/help should produce LocalOutput, got {result:?}"
         );
+        if let ParseResult::LocalOutput(text) = result {
+            assert!(text.contains("/quit"), "help text should mention /quit");
+            assert!(text.contains("/new"), "help text should mention /new");
+        }
     }
 
     // ── render_server_message unit tests ───────────────────────────────
@@ -237,14 +412,16 @@ mod tests {
         assert_eq!(render_server_message(&msg), "ok\n");
     }
 
-    // ── Integration tests ──────────────────────────────────────────────
+    // ── Integration tests (is_tty = false) ────────────────────────────
+    //
+    // All integration tests pass `is_tty = false` so prompts are never written
+    // to `user_output`, keeping assertions on output content deterministic.
 
     #[tokio::test]
     async fn stdin_eof_sends_disconnect() {
         let (listener, port) = bind_random().await;
         let (received_tx, mut received_rx) = mpsc::channel::<ClientMessage>(16);
 
-        // Mock daemon: read and record client messages
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let (read_half, _write_half) = stream.into_split();
@@ -260,11 +437,10 @@ mod tests {
             .await
             .unwrap();
 
-        // Empty stdin (immediate EOF)
         let input = BufReader::new(&b""[..]);
         let (output_writer, _output_reader) = duplex(4096);
 
-        run_chat_with_io(stream, input, output_writer)
+        run_chat_with_io(stream, input, output_writer, false)
             .await
             .unwrap();
 
@@ -298,7 +474,7 @@ mod tests {
         let input = BufReader::new(&b"/quit\n"[..]);
         let (output_writer, _output_reader) = duplex(4096);
 
-        run_chat_with_io(stream, input, output_writer)
+        run_chat_with_io(stream, input, output_writer, false)
             .await
             .unwrap();
 
@@ -329,11 +505,10 @@ mod tests {
             .await
             .unwrap();
 
-        // User types "hello" then stdin EOF triggers disconnect
         let input = BufReader::new(&b"hello\n"[..]);
         let (output_writer, _output_reader) = duplex(4096);
 
-        run_chat_with_io(stream, input, output_writer)
+        run_chat_with_io(stream, input, output_writer, false)
             .await
             .unwrap();
 
@@ -359,7 +534,6 @@ mod tests {
     async fn server_message_rendered_to_output() {
         let (listener, port) = bind_random().await;
 
-        // Mock daemon: send a message then close connection
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let (_read_half, mut write_half) = stream.into_split();
@@ -379,12 +553,11 @@ mod tests {
             .await
             .unwrap();
 
-        // Stdin: open but empty (won't send anything)
         let (_stdin_write, stdin_read) = duplex(1024);
         let input = BufReader::new(stdin_read);
         let (output_writer, mut output_reader) = duplex(4096);
 
-        run_chat_with_io(stream, input, output_writer)
+        run_chat_with_io(stream, input, output_writer, false)
             .await
             .unwrap();
 
@@ -397,6 +570,183 @@ mod tests {
         assert!(
             output.contains("[daemon disconnected]"),
             "expected disconnect notice in output, got: {output}"
+        );
+    }
+
+    /// Daemon disconnect message must now include the 'freebird serve' hint.
+    #[tokio::test]
+    async fn daemon_disconnect_includes_serve_hint() {
+        let (listener, port) = bind_random().await;
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            // Close immediately without sending anything.
+            drop(stream);
+        });
+
+        let stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+
+        let (_stdin_write, stdin_read) = duplex(1024);
+        let input = BufReader::new(stdin_read);
+        let (output_writer, mut output_reader) = duplex(4096);
+
+        run_chat_with_io(stream, input, output_writer, false)
+            .await
+            .unwrap();
+
+        let mut output = String::new();
+        output_reader.read_to_string(&mut output).await.unwrap();
+        assert!(
+            output.contains("freebird serve"),
+            "disconnect message should mention 'freebird serve', got: {output}"
+        );
+    }
+
+    /// `/help` must be handled locally — no message should be sent to the daemon.
+    #[tokio::test]
+    async fn help_command_is_local_no_daemon_message() {
+        let (listener, port) = bind_random().await;
+        let (received_tx, mut received_rx) = mpsc::channel::<ClientMessage>(16);
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, _write_half) = stream.into_split();
+            let mut lines = BufReader::new(read_half).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Ok(msg) = serde_json::from_str::<ClientMessage>(&line) {
+                    let _ = received_tx.send(msg).await;
+                }
+            }
+        });
+
+        let stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+
+        // /help then /quit
+        let input = BufReader::new(&b"/help\n/quit\n"[..]);
+        let (output_writer, mut output_reader) = duplex(4096);
+
+        run_chat_with_io(stream, input, output_writer, false)
+            .await
+            .unwrap();
+
+        // Only message the daemon should have received is Disconnect
+        let msg = timeout(TEST_TIMEOUT, received_rx.recv())
+            .await
+            .expect("timed out")
+            .expect("channel closed");
+        assert_eq!(
+            msg,
+            ClientMessage::Disconnect,
+            "/help should not send anything to the daemon"
+        );
+
+        // Help text should appear in local output
+        let mut output = String::new();
+        output_reader.read_to_string(&mut output).await.unwrap();
+        assert!(
+            output.contains("/quit"),
+            "help output should contain /quit, got: {output}"
+        );
+    }
+
+    /// Bare `/` must produce a local usage hint, not send a command to the daemon.
+    #[tokio::test]
+    async fn bare_slash_is_local_no_daemon_message() {
+        let (listener, port) = bind_random().await;
+        let (received_tx, mut received_rx) = mpsc::channel::<ClientMessage>(16);
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, _write_half) = stream.into_split();
+            let mut lines = BufReader::new(read_half).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Ok(msg) = serde_json::from_str::<ClientMessage>(&line) {
+                    let _ = received_tx.send(msg).await;
+                }
+            }
+        });
+
+        let stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+
+        let input = BufReader::new(&b"/\n/quit\n"[..]);
+        let (output_writer, mut output_reader) = duplex(4096);
+
+        run_chat_with_io(stream, input, output_writer, false)
+            .await
+            .unwrap();
+
+        // Only Disconnect should reach the daemon
+        let msg = timeout(TEST_TIMEOUT, received_rx.recv())
+            .await
+            .expect("timed out")
+            .expect("channel closed");
+        assert_eq!(
+            msg,
+            ClientMessage::Disconnect,
+            "bare '/' should not send a command to the daemon"
+        );
+
+        // Local output should contain the usage hint
+        let mut output = String::new();
+        output_reader.read_to_string(&mut output).await.unwrap();
+        assert!(
+            output.contains("/help"),
+            "bare '/' output should mention /help, got: {output}"
+        );
+    }
+
+    /// With `is_tty` = true, prompts appear in output; content is still correct.
+    #[tokio::test]
+    async fn tty_mode_writes_prompts_to_output() {
+        let (listener, port) = bind_random().await;
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (_read_half, mut write_half) = stream.into_split();
+            let msg = ServerMessage::Message {
+                text: "pong".into(),
+            };
+            let json = serde_json::to_string(&msg).unwrap();
+            write_half
+                .write_all(format!("{json}\n").as_bytes())
+                .await
+                .unwrap();
+            write_half.flush().await.unwrap();
+            drop(write_half);
+        });
+
+        let stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+
+        let (_stdin_write, stdin_read) = duplex(1024);
+        let input = BufReader::new(stdin_read);
+        let (output_writer, mut output_reader) = duplex(4096);
+
+        run_chat_with_io(stream, input, output_writer, true)
+            .await
+            .unwrap();
+
+        let mut output = String::new();
+        output_reader.read_to_string(&mut output).await.unwrap();
+
+        assert!(
+            output.contains("You: "),
+            "tty mode should write 'You: ' prompt, got: {output}"
+        );
+        assert!(
+            output.contains("FreeBird: "),
+            "tty mode should write 'FreeBird: ' prefix, got: {output}"
+        );
+        assert!(
+            output.contains("pong"),
+            "response text should still appear, got: {output}"
         );
     }
 }
