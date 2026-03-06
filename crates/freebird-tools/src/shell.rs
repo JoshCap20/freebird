@@ -268,6 +268,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let output = tool
@@ -294,6 +295,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -326,6 +328,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -344,6 +347,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -368,14 +372,15 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
-        // Empty string passes SafeShellArg (no forbidden chars) but fails allowlist
+        // Empty string is rejected by SafeShellArg (empty/whitespace-only check)
         let err = tool
             .execute(serde_json::json!({"command": ""}), &ctx)
             .await
             .unwrap_err();
-        assert!(matches!(err, ToolError::SecurityViolation { .. }));
+        assert!(matches!(err, ToolError::InvalidInput { .. }));
     }
 
     #[tokio::test]
@@ -387,6 +392,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -405,6 +411,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -423,6 +430,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -449,6 +457,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -470,6 +479,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -491,6 +501,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -512,6 +523,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -533,6 +545,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -556,6 +569,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let output = tool
@@ -574,6 +588,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let output = tool
@@ -594,6 +609,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let output = tool
@@ -616,6 +632,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let output = tool
@@ -642,6 +659,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let output = tool
@@ -665,6 +683,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         // ls on a nonexistent path produces stderr
@@ -692,6 +711,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let output = tool
@@ -715,6 +735,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -738,6 +759,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let output = tool
@@ -767,6 +789,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let output = tool
@@ -793,6 +816,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let output = tool
@@ -820,6 +844,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let output = tool
@@ -846,6 +871,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         // cat with no args reads from stdin — should exit immediately
@@ -877,11 +903,13 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp1.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
         let ctx2 = ToolContext {
             session_id: &sid,
             sandbox_root: tmp2.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let (out1, out2) = tokio::join!(
@@ -906,6 +934,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let long_arg = "a".repeat(5000); // > 4096 SafeShellArg limit
@@ -928,6 +957,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         // Unicode passes SafeShellArg (no forbidden chars) but fails allowlist
@@ -947,6 +977,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let output = tool
@@ -999,6 +1030,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let output = tool
@@ -1036,6 +1068,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         // ".." doesn't contain shell metacharacters, so SafeShellArg allows it.
