@@ -865,6 +865,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_zero_max_output_truncates_everything() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = ShellTool::new(["echo".to_string()], 0);
+        let (sid, caps) = make_context();
+        let ctx = ToolContext {
+            session_id: &sid,
+            sandbox_root: tmp.path(),
+            granted_capabilities: &caps,
+            allowed_directories: &[],
+        };
+
+        let output = tool
+            .execute(
+                serde_json::json!({"command": "echo", "args": ["hello"]}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(output.content.contains("[output truncated]"));
+        let meta = output.metadata.unwrap();
+        assert_eq!(meta["truncated"], true);
+    }
+
+    #[tokio::test]
     async fn test_output_not_truncated_when_under_limit() {
         let tmp = tempfile::tempdir().unwrap();
         let tool = ShellTool::new(["echo".to_string()], 1000);

@@ -225,6 +225,14 @@ format = "pretty""#,
             |(_, v)| v,
         );
 
+        let tools = overrides.iter().find(|(k, _)| *k == "tools").map_or(
+            r#"sandbox_root = "~/.freebird/sandbox"
+default_timeout_secs = 30
+allowed_shell_commands = ["ls", "cat", "grep", "head", "tail", "wc"]
+max_shell_output_bytes = 1048576"#,
+            |(_, v)| v,
+        );
+
         let daemon = overrides.iter().find(|(k, _)| *k == "daemon");
 
         let daemon_section = daemon.map_or(String::new(), |(_, v)| format!("\n[daemon]\n{v}\n"));
@@ -243,10 +251,7 @@ id = "cli"
 kind = "cli"
 
 [tools]
-sandbox_root = "~/.freebird/sandbox"
-default_timeout_secs = 30
-allowed_shell_commands = ["ls", "cat", "grep", "head", "tail", "wc"]
-max_shell_output_bytes = 1048576
+{tools}
 
 [memory]
 kind = "file"
@@ -503,8 +508,11 @@ drain_timeout_secs = 1"#,
 
     #[test]
     fn test_shell_config_serde_defaults_when_absent() {
-        // Config TOML without the new shell fields — serde defaults apply
-        let toml_str = config_toml(&[]);
+        // Use a tools override that omits shell fields to verify serde defaults apply
+        let toml_str = config_toml(&[(
+            "tools",
+            "sandbox_root = \"/tmp\"\ndefault_timeout_secs = 10",
+        )]);
         let config: AppConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(
             config.tools.allowed_shell_commands,
