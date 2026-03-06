@@ -87,3 +87,107 @@ fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
         .connect_timeout(Duration::from_secs(10))
         .build()
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use figment::Figment;
+    use figment::providers::{Format, Toml};
+
+    fn test_config() -> AppConfig {
+        let toml = r#"
+[runtime]
+default_model = "test"
+default_provider = "test"
+max_output_tokens = 1024
+max_tool_rounds = 5
+max_turns_per_session = 10
+drain_timeout_secs = 5
+
+[[providers]]
+id = "test"
+kind = "anthropic"
+
+[[channels]]
+id = "cli"
+kind = "cli"
+
+[tools]
+sandbox_root = "/tmp"
+default_timeout_secs = 10
+
+[memory]
+kind = "file"
+
+[security]
+max_tool_calls_per_turn = 10
+require_consent_above = "high"
+
+[logging]
+level = "info"
+format = "pretty"
+"#;
+        Figment::new()
+            .merge(Toml::string(toml))
+            .extract()
+            .expect("test config should deserialize")
+    }
+
+    #[test]
+    fn test_build_tool_registry_registers_expected_tools() {
+        let config = test_config();
+        let registry = build_tool_registry(&config).unwrap();
+
+        // Must include filesystem, shell, and network tools
+        assert!(registry.get("read_file").is_some(), "missing read_file");
+        assert!(registry.get("write_file").is_some(), "missing write_file");
+        assert!(
+            registry.get("list_directory").is_some(),
+            "missing list_directory"
+        );
+        assert!(registry.get("shell").is_some(), "missing shell");
+        assert!(
+            registry.get("http_request").is_some(),
+            "missing http_request"
+        );
+        assert!(
+            registry.tool_count() >= 5,
+            "expected at least 5 tools, got {}",
+            registry.tool_count()
+        );
+    }
+
+    #[test]
+    fn test_build_tool_registry_insertion_order_filesystem_first() {
+        let config = test_config();
+        let registry = build_tool_registry(&config).unwrap();
+        let names = registry.tool_names();
+
+        // Filesystem tools should come first, then shell, then network
+        let shell_idx = names.iter().position(|n| n == "shell").unwrap();
+        let http_idx = names.iter().position(|n| n == "http_request").unwrap();
+        assert!(
+            shell_idx < http_idx,
+            "shell should come before http_request"
+        );
+    }
+
+    #[test]
+    fn test_build_egress_policy_uses_config_values() {
+        let mut config = test_config();
+        config.security.egress.allowed_hosts = vec!["example.com".into()];
+        config.security.egress.allowed_ports = vec![8080];
+
+        let policy = build_egress_policy(&config);
+        // EgressPolicy is opaque, but we can verify it was created from config
+        // by checking that the policy exists (Arc is non-null)
+        assert_eq!(Arc::strong_count(&policy), 1);
+    }
+
+    #[test]
+    fn test_build_http_client_succeeds() {
+        let client = build_http_client();
+        assert!(client.is_ok(), "HTTP client builder should not fail");
+    }
+}

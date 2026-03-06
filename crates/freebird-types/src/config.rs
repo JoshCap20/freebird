@@ -618,4 +618,65 @@ drain_timeout_secs = 1"#,
         assert_eq!(config.security.consent_timeout_secs, 60);
         assert_eq!(config.security.max_pending_consent_requests, 5);
     }
+
+    // ── Egress config tests ───────────────────────────────────────
+
+    #[test]
+    fn test_egress_config_defaults_when_absent() {
+        // Config TOML without egress section — serde defaults should apply.
+        let toml_str = config_toml(&[(
+            "security",
+            "max_tool_calls_per_turn = 25\nrequire_consent_above = \"high\"",
+        )]);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(
+            config.security.egress.allowed_hosts,
+            vec!["api.anthropic.com", "api.openai.com"]
+        );
+        assert_eq!(config.security.egress.allowed_ports, vec![443]);
+        assert_eq!(config.security.egress.max_response_bytes, 1_048_576);
+        assert_eq!(config.security.egress.request_timeout_secs, 30);
+    }
+
+    #[test]
+    fn test_egress_config_explicit_values() {
+        let toml_str = config_toml(&[(
+            "security",
+            "max_tool_calls_per_turn = 25\nrequire_consent_above = \"high\"\n\n[security.egress]\nallowed_hosts = [\"custom.api.com\"]\nallowed_ports = [443, 8443]\nmax_response_bytes = 2097152\nrequest_timeout_secs = 60",
+        )]);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(config.security.egress.allowed_hosts, vec!["custom.api.com"]);
+        assert_eq!(config.security.egress.allowed_ports, vec![443, 8443]);
+        assert_eq!(config.security.egress.max_response_bytes, 2_097_152);
+        assert_eq!(config.security.egress.request_timeout_secs, 60);
+    }
+
+    #[test]
+    fn test_default_toml_deserializes_egress() {
+        let toml_str = include_str!("../../../config/default.toml");
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.security.egress.allowed_hosts,
+            vec!["api.anthropic.com", "api.openai.com"]
+        );
+        assert_eq!(config.security.egress.allowed_ports, vec![443]);
+        assert_eq!(config.security.egress.max_response_bytes, 1_048_576);
+        assert_eq!(config.security.egress.request_timeout_secs, 30);
+    }
+
+    #[test]
+    fn test_egress_config_serde_roundtrip() {
+        let egress = EgressConfig {
+            allowed_hosts: vec!["example.com".into()],
+            allowed_ports: vec![443, 8080],
+            max_response_bytes: 512_000,
+            request_timeout_secs: 15,
+        };
+        let json = serde_json::to_string(&egress).unwrap();
+        let back: EgressConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.allowed_hosts, vec!["example.com"]);
+        assert_eq!(back.allowed_ports, vec![443, 8080]);
+        assert_eq!(back.max_response_bytes, 512_000);
+        assert_eq!(back.request_timeout_secs, 15);
+    }
 }
