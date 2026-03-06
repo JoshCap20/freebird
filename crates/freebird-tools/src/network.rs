@@ -180,7 +180,8 @@ impl HttpRequestTool {
 
         // 2. Headers — block sensitive headers, reject non-string values
         let mut headers = HashMap::new();
-        if let Some(obj) = input.get("headers").and_then(|v| v.as_object()) {
+        if let Some(obj) = input.get("headers").and_then(serde_json::Value::as_object) {
+            headers.reserve(obj.len());
             for (key, value) in obj {
                 let key_lower = key.to_lowercase();
                 if BLOCKED_HEADERS.contains(&key_lower.as_str()) {
@@ -310,9 +311,9 @@ impl HttpRequestTool {
             }
 
             let take = chunk.len().min(remaining);
-            // SAFETY invariant: `take = chunk.len().min(remaining)` ≤ `chunk.len()`
-            // so `get(..take)` always returns `Some`. Fallback to full chunk
-            // is unreachable but avoids a panic path.
+            // Invariant: `take = chunk.len().min(remaining)` ≤ `chunk.len()`,
+            // so `get(..take)` always returns `Some`. The `if let` avoids an
+            // indexing panic path that clippy's `indexing_slicing` lint rejects.
             if let Some(slice) = chunk.get(..take) {
                 body.extend_from_slice(slice);
             }
