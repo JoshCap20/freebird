@@ -35,6 +35,14 @@ const MAX_ARG_COUNT: usize = 64;
 /// - All execution goes through `tokio::process::Command` (no shell expansion).
 /// - Sandbox root comes from `ToolContext` (the verified `CapabilityGrant`),
 ///   not from this struct — the struct does not store `sandbox_root`.
+///
+/// # Path traversal via arguments
+///
+/// `SafeShellArg` blocks shell metacharacters but intentionally allows `..`
+/// in arguments. Blocking `..` would break legitimate use (e.g. `ls ../sibling`)
+/// and the real containment is `cwd=sandbox_root` + no shell expansion. For
+/// full filesystem containment, rely on `ToolExecutor`'s capability system and
+/// future OS-level sandboxing (e.g. `landlock`, `sandbox_init`).
 struct ShellTool {
     allowed_commands: BTreeSet<String>,
     max_output_bytes: usize,
