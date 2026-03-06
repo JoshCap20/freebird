@@ -36,6 +36,12 @@ require_consent_above = "high"
 consent_timeout_secs = 60
 max_pending_consent_requests = 5
 
+[security.egress]
+allowed_hosts = ["api.anthropic.com", "api.openai.com"]
+allowed_ports = [443]
+max_response_bytes = 1048576
+request_timeout_secs = 30
+
 [daemon]
 host = "127.0.0.1"
 port = 7531

@@ -13,3 +13,4 @@ pub mod session;
 pub mod shutdown;
 pub mod stream;
 pub mod tool_executor;
+pub mod tool_registry;

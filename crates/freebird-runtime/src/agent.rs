@@ -33,6 +33,7 @@ use tokio_util::sync::CancellationToken;
 use crate::history::conversation_to_messages;
 use crate::registry::ProviderRegistry;
 use crate::stream::StreamAccumulator;
+use crate::tool_registry::ToolRegistry;
 
 use crate::session::SessionManager;
 
@@ -70,7 +71,7 @@ pub enum RuntimeError {
 pub struct AgentRuntime {
     provider_registry: ProviderRegistry,
     channel: Box<dyn Channel>,
-    tools: Vec<Box<dyn Tool>>,
+    tools: ToolRegistry,
     memory: Box<dyn Memory>,
     config: RuntimeConfig,
     tools_config: ToolsConfig,
@@ -87,7 +88,7 @@ impl AgentRuntime {
     pub fn new(
         provider_registry: ProviderRegistry,
         channel: Box<dyn Channel>,
-        tools: Vec<Box<dyn Tool>>,
+        tools: ToolRegistry,
         memory: Box<dyn Memory>,
         config: RuntimeConfig,
         tools_config: ToolsConfig,
@@ -443,8 +444,7 @@ impl AgentRuntime {
             timestamp: Utc::now(),
         };
 
-        let tool_definitions: Vec<ToolDefinition> =
-            self.tools.iter().map(|t| t.to_definition()).collect();
+        let tool_definitions: Vec<ToolDefinition> = self.tools.to_definitions();
 
         let mut messages = conversation_to_messages(conversation);
 
@@ -627,7 +627,7 @@ impl AgentRuntime {
 
         // List available tools by name and description.
         prompt.push_str("\n\nYou have the following tools available:\n");
-        for tool in &self.tools {
+        for tool in self.tools.iter() {
             let info = tool.info();
             let _ = writeln!(prompt, "- **{}**: {}", info.name, info.description);
         }
@@ -1184,10 +1184,7 @@ impl AgentRuntime {
 
     /// Look up a tool by name.
     fn find_tool(&self, name: &str) -> Option<&dyn Tool> {
-        self.tools
-            .iter()
-            .find(|t| t.info().name == name)
-            .map(AsRef::as_ref)
+        self.tools.get(name)
     }
 }
 

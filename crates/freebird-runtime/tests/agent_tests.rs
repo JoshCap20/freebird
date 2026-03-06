@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use freebird_runtime::agent::AgentRuntime;
 use freebird_runtime::registry::ProviderRegistry;
+use freebird_runtime::tool_registry::ToolRegistry;
 use freebird_traits::channel::InboundEvent;
 use freebird_traits::id::{ModelId, ProviderId, SessionId};
 use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary};
@@ -50,7 +51,7 @@ fn make_runtime(channel: MockChannel) -> AgentRuntime {
     AgentRuntime::new(
         ProviderRegistry::new(),
         Box::new(channel),
-        vec![],
+        ToolRegistry::new(),
         Box::new(NoopMemory),
         RuntimeConfig {
             default_model: ModelId::from("test-model"),

@@ -162,6 +162,55 @@ pub struct SecurityConfig {
     /// Prevents LLM flooding attacks. Default: 5.
     #[serde(default = "default_max_pending_consent")]
     pub max_pending_consent_requests: usize,
+    /// Network egress policy. Controls which hosts the agent can contact.
+    #[serde(default)]
+    pub egress: EgressConfig,
+}
+
+/// Network egress allowlist configuration (CLAUDE.md §12 — ASI01).
+///
+/// Default is deny-all with only provider API hosts permitted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EgressConfig {
+    /// Hosts the agent is allowed to contact (e.g., `["api.anthropic.com"]`).
+    #[serde(default = "default_egress_allowed_hosts")]
+    pub allowed_hosts: Vec<String>,
+    /// Ports the agent is allowed to contact. Default: `[443]`.
+    #[serde(default = "default_egress_allowed_ports")]
+    pub allowed_ports: Vec<u16>,
+    /// Maximum response body bytes the network tool will read. Default: 1 MiB.
+    #[serde(default = "default_egress_max_response_bytes")]
+    pub max_response_bytes: usize,
+    /// Per-request timeout in seconds for outbound HTTP. Default: 30.
+    #[serde(default = "default_egress_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+}
+
+impl Default for EgressConfig {
+    fn default() -> Self {
+        Self {
+            allowed_hosts: default_egress_allowed_hosts(),
+            allowed_ports: default_egress_allowed_ports(),
+            max_response_bytes: default_egress_max_response_bytes(),
+            request_timeout_secs: default_egress_request_timeout_secs(),
+        }
+    }
+}
+
+fn default_egress_allowed_hosts() -> Vec<String> {
+    vec!["api.anthropic.com".into(), "api.openai.com".into()]
+}
+
+fn default_egress_allowed_ports() -> Vec<u16> {
+    vec![443]
+}
+
+const fn default_egress_max_response_bytes() -> usize {
+    1_048_576 // 1 MiB
+}
+
+const fn default_egress_request_timeout_secs() -> u64 {
+    30
 }
 
 const fn default_consent_timeout_secs() -> u64 {

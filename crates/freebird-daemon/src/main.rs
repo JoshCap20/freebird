@@ -28,6 +28,7 @@ use freebird_types::config::AppConfig;
 
 mod chat;
 mod providers;
+mod tools;
 
 /// `Freebird` AI agent daemon.
 #[derive(Parser)]
@@ -107,7 +108,10 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         .context("file memory init task panicked")?
         .context("failed to initialize file memory backend")?;
 
-    // 7. TOOLS
+    // 7. TOOLS — build registry before moving config.tools
+    let tool_registry =
+        tools::build_tool_registry(&config).context("failed to build tool registry")?;
+
     let mut tools_config = config.tools;
     tools_config.sandbox_root = expand_tilde(&tools_config.sandbox_root)?;
     tokio::fs::create_dir_all(&tools_config.sandbox_root)
@@ -134,13 +138,6 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         }
     }
 
-    let mut tools: Vec<Box<dyn freebird_traits::tool::Tool>> =
-        freebird_tools::filesystem::filesystem_tools();
-    tools.push(freebird_tools::shell::shell_tool(
-        tools_config.allowed_shell_commands.clone(),
-        tools_config.max_shell_output_bytes,
-    ));
-
     // 8. SHUTDOWN COORDINATOR
     let shutdown = ShutdownCoordinator::new(Duration::from_secs(config.runtime.drain_timeout_secs));
     let token = shutdown.token();
@@ -160,7 +157,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
     let runtime = AgentRuntime::new(
         registry,
         channel,
-        tools,
+        tool_registry,
         Box::new(memory),
         config.runtime,
         tools_config,

@@ -17,6 +17,7 @@ freebird-runtime = { workspace = true }
 freebird-providers = { workspace = true }
 freebird-channels = { workspace = true }
 freebird-memory = { workspace = true }
+freebird-security = { workspace = true }
 freebird-tools = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -26,6 +27,7 @@ anyhow = { workspace = true }
 secrecy = { workspace = true }
 home = { workspace = true }
 clap = { workspace = true }
+reqwest = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
