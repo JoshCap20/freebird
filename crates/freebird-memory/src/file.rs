@@ -66,6 +66,46 @@ impl FileMemory {
         Ok(self.base_dir.join(format!("{id_str}.json")))
     }
 
+    /// Iterate all conversation files, apply a filter, sort by recency, and truncate.
+    ///
+    /// Shared implementation for `list_sessions` (filter = `|_| true`) and
+    /// `search` (filter = content match). Skips corrupt or unreadable files
+    /// with a warning log rather than failing the entire scan.
+    async fn scan_conversations(
+        &self,
+        filter: impl Fn(&Conversation) -> bool,
+        limit: usize,
+    ) -> Result<Vec<SessionSummary>, MemoryError> {
+        let mut summaries = Vec::new();
+        let mut entries = tokio::fs::read_dir(&self.base_dir).await?;
+
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            match tokio::fs::read_to_string(&path).await {
+                Ok(data) => match serde_json::from_str::<Conversation>(&data) {
+                    Ok(conv) => {
+                        if filter(&conv) {
+                            summaries.push(conversation_to_summary(&conv));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(?path, error = %e, "skipping corrupt conversation file");
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(?path, error = %e, "failed to read conversation file");
+                }
+            }
+        }
+
+        summaries.sort_unstable_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        summaries.truncate(limit);
+        Ok(summaries)
+    }
+
     /// Remove orphaned `.json.tmp` files left from prior crashes.
     fn cleanup_orphaned_tmp_files(&self) {
         if let Ok(entries) = std::fs::read_dir(&self.base_dir) {
@@ -110,30 +150,7 @@ impl Memory for FileMemory {
     }
 
     async fn list_sessions(&self, limit: usize) -> Result<Vec<SessionSummary>, MemoryError> {
-        let mut summaries = Vec::new();
-        let mut entries = tokio::fs::read_dir(&self.base_dir).await?;
-
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            if path.extension().is_none_or(|e| e != "json") {
-                continue;
-            }
-            match tokio::fs::read_to_string(&path).await {
-                Ok(data) => match serde_json::from_str::<Conversation>(&data) {
-                    Ok(conv) => summaries.push(conversation_to_summary(&conv)),
-                    Err(e) => {
-                        tracing::warn!(?path, error = %e, "skipping corrupt conversation file");
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(?path, error = %e, "failed to read conversation file");
-                }
-            }
-        }
-
-        summaries.sort_unstable_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        summaries.truncate(limit);
-        Ok(summaries)
+        self.scan_conversations(|_| true, limit).await
     }
 
     async fn delete(&self, session_id: &SessionId) -> Result<(), MemoryError> {
@@ -152,33 +169,7 @@ impl Memory for FileMemory {
             return Ok(vec![]);
         }
         let query_lower = query.to_lowercase();
-        let mut results = Vec::new();
-        let mut entries = tokio::fs::read_dir(&self.base_dir).await?;
-
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            if path.extension().is_none_or(|e| e != "json") {
-                continue;
-            }
-            match tokio::fs::read_to_string(&path).await {
-                Ok(data) => match serde_json::from_str::<Conversation>(&data) {
-                    Ok(conv) => {
-                        if conversation_contains(&conv, &query_lower) {
-                            results.push(conversation_to_summary(&conv));
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(?path, error = %e, "skipping corrupt conversation file");
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(?path, error = %e, "failed to read conversation file");
-                }
-            }
-        }
-
-        results.sort_unstable_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        results.truncate(limit);
-        Ok(results)
+        self.scan_conversations(|conv| conversation_contains(conv, &query_lower), limit)
+            .await
     }
 }
