@@ -296,7 +296,7 @@ kind = "file"
         assert_eq!(config.runtime.default_provider.as_str(), "anthropic");
         assert_eq!(
             config.runtime.system_prompt.as_deref(),
-            Some("You are FreeBird, a helpful AI assistant.")
+            Some("You are Freebird, a helpful AI assistant.")
         );
         assert_eq!(config.runtime.max_output_tokens, 8192);
         assert_eq!(config.runtime.max_tool_rounds, 10);

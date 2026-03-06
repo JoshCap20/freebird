@@ -29,7 +29,7 @@ use freebird_types::config::AppConfig;
 mod chat;
 mod providers;
 
-/// `FreeBird` AI agent daemon.
+/// `Freebird` AI agent daemon.
 #[derive(Parser)]
 #[command(name = "freebird", version, about)]
 struct Cli {
@@ -195,7 +195,7 @@ async fn cmd_chat() -> Result<()> {
         .await
         .with_context(|| format!("failed to connect to daemon at {addr}"))?;
 
-    eprintln!("\x1b[1m\x1b[32mFreeBird\x1b[0m connected to {addr}");
+    eprintln!("\x1b[1m\x1b[32mFreebird\x1b[0m connected to {addr}");
     eprintln!("\x1b[2mType /quit to disconnect, /help for commands.\x1b[0m\n");
 
     let stdin = tokio::io::BufReader::new(tokio::io::stdin());
