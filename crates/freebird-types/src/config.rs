@@ -120,7 +120,7 @@ pub struct ToolsConfig {
 fn default_allowed_shell_commands() -> Vec<String> {
     ["ls", "cat", "grep", "find", "git", "head", "tail", "wc"]
         .iter()
-        .map(|s| (*s).to_string())
+        .map(ToString::to_string)
         .collect()
 }
 

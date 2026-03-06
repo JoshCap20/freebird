@@ -29,7 +29,7 @@ const SANDBOXED_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 /// - All execution goes through `tokio::process::Command` (no shell expansion).
 /// - Sandbox root comes from `ToolContext` (the verified `CapabilityGrant`),
 ///   not from this struct — the struct does not store `sandbox_root`.
-pub struct ShellTool {
+struct ShellTool {
     allowed_commands: BTreeSet<String>,
     max_output_bytes: usize,
     info: ToolInfo,
@@ -46,11 +46,7 @@ impl ShellTool {
     ///   all commands are rejected (deny-by-default).
     /// * `max_output_bytes` — Maximum stdout+stderr bytes returned. Output
     ///   beyond this limit is truncated with a marker.
-    #[must_use]
-    pub fn new(
-        allowed_commands: impl IntoIterator<Item = String>,
-        max_output_bytes: usize,
-    ) -> Self {
+    fn new(allowed_commands: impl IntoIterator<Item = String>, max_output_bytes: usize) -> Self {
         let allowed: BTreeSet<String> = allowed_commands.into_iter().collect();
         Self {
             info: ToolInfo {
@@ -58,7 +54,11 @@ impl ShellTool {
                 description: format!(
                     "Execute a shell command. Only these commands are permitted: {}. \
                      No shell expansion, pipes, or redirection.",
-                    allowed.iter().cloned().collect::<Vec<_>>().join(", ")
+                    allowed
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -135,6 +135,10 @@ impl Tool for ShellTool {
 
         // 2. Check allowlist — error does NOT reveal which commands are allowed
         if !self.allowed_commands.contains(command.as_str()) {
+            tracing::warn!(
+                command = command.as_str(),
+                "shell tool: rejected non-allowlisted command"
+            );
             return Err(ToolError::SecurityViolation {
                 tool: Self::NAME.into(),
                 reason: format!("command `{}` is not permitted", command.as_str()),
@@ -171,11 +175,20 @@ impl Tool for ShellTool {
             format!("{stdout}\n--- stderr ---\n{stderr}")
         };
 
-        // Truncate if over limit
+        // Truncate if over limit — find nearest char boundary to avoid panic
         let truncated = combined.len() > self.max_output_bytes;
         if truncated {
-            combined.truncate(self.max_output_bytes);
+            let mut truncate_at = self.max_output_bytes;
+            while truncate_at > 0 && !combined.is_char_boundary(truncate_at) {
+                truncate_at -= 1;
+            }
+            combined.truncate(truncate_at);
             combined.push_str("\n\n[output truncated]");
+            tracing::warn!(
+                command = command.as_str(),
+                limit = self.max_output_bytes,
+                "shell tool: output truncated"
+            );
         }
 
         // 6. Build metadata with exit status details
@@ -191,6 +204,13 @@ impl Tool for ShellTool {
         } else {
             ToolOutcome::Error
         };
+
+        tracing::info!(
+            command = command.as_str(),
+            exit_code = ?exit_code,
+            truncated,
+            "shell tool: command executed"
+        );
 
         Ok(ToolOutput {
             content: combined,
@@ -963,5 +983,70 @@ mod tests {
         assert_eq!(tool.info().name, "shell");
         assert!(tool.info().description.contains("ls"));
         assert!(tool.info().description.contains("cat"));
+    }
+
+    #[tokio::test]
+    async fn test_truncation_at_multibyte_char_boundary() {
+        let tmp = tempfile::tempdir().unwrap();
+        // "日" is 3 bytes in UTF-8 (E6 97 A5). Write 10 of them = 30 bytes.
+        let content = "日".repeat(10);
+        std::fs::write(tmp.path().join("mb.txt"), &content).unwrap();
+
+        // Set limit to 8 — falls mid-character (3rd char starts at byte 6, ends at 9).
+        let tool = ShellTool::new(["cat".to_string()], 8);
+        let (sid, caps) = make_context();
+        let ctx = ToolContext {
+            session_id: &sid,
+            sandbox_root: tmp.path(),
+            granted_capabilities: &caps,
+        };
+
+        let output = tool
+            .execute(
+                serde_json::json!({"command": "cat", "args": ["mb.txt"]}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(
+            output.content.contains("[output truncated]"),
+            "should have truncation marker"
+        );
+        // Content before marker should be valid UTF-8 (truncated to char boundary)
+        let before_marker = output
+            .content
+            .split("\n\n[output truncated]")
+            .next()
+            .unwrap();
+        assert!(
+            before_marker.len() <= 8,
+            "truncated content should be at most max_output_bytes: {}",
+            before_marker.len()
+        );
+        // Should have truncated to byte 6 (2 full 3-byte chars)
+        assert_eq!(before_marker, "日日");
+    }
+
+    #[tokio::test]
+    async fn test_path_traversal_in_args_constrained_by_sandbox_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = ls_tool();
+        let (sid, caps) = make_context();
+        let ctx = ToolContext {
+            session_id: &sid,
+            sandbox_root: tmp.path(),
+            granted_capabilities: &caps,
+        };
+
+        // ".." doesn't contain shell metacharacters, so SafeShellArg allows it.
+        // But the command runs with cwd=sandbox_root, so ls sees sandbox parent.
+        // This documents that path traversal via args is limited by the sandbox cwd,
+        // not by SafeShellArg. Full containment is the ToolExecutor's responsibility.
+        let output = tool
+            .execute(serde_json::json!({"command": "ls", "args": [".."] }), &ctx)
+            .await
+            .unwrap();
+        // Command succeeds — SafeShellArg does not block ".."
+        assert!(matches!(output.outcome, ToolOutcome::Success));
     }
 }
