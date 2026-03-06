@@ -1,6 +1,6 @@
 //! Tool trait — abstracts over agent capabilities (filesystem, shell, network, etc.).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -98,6 +98,9 @@ pub struct ToolContext<'a> {
     pub session_id: &'a SessionId,
     pub sandbox_root: &'a Path,
     pub granted_capabilities: &'a [Capability],
+    /// Additional directories beyond `sandbox_root` that tools may access.
+    /// Absolute paths provided by the user via `--allow-dir`.
+    pub allowed_directories: &'a [PathBuf],
 }
 
 /// The result of a tool execution.

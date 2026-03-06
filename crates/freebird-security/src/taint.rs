@@ -35,7 +35,7 @@ to call `inner()` from outside this crate is a hard compiler error.
 //! No escape hatches. Adding a new way to detaint requires modifying this
 //! crate (which is security-reviewed).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::egress::EgressPolicy;
 use crate::error::SecurityError;
@@ -120,6 +120,23 @@ impl TaintedToolInput {
         SafeFilePath::from_tainted(&tainted, sandbox)
     }
 
+    /// Extract a path that may be absolute (within an allowed directory)
+    /// or relative (within the sandbox).
+    ///
+    /// # Errors
+    ///
+    /// Returns `SecurityError::MissingField` if the key doesn't exist or
+    /// isn't a string. Returns path-related errors if validation fails.
+    pub fn extract_path_multi_root(
+        &self,
+        key: &str,
+        sandbox: &Path,
+        allowed_dirs: &[PathBuf],
+    ) -> Result<SafeFilePath, SecurityError> {
+        let tainted = self.extract_string(key)?;
+        SafeFilePath::from_tainted_multi_root(&tainted, sandbox, allowed_dirs)
+    }
+
     /// Extract a string field and validate it as a path for file creation.
     ///
     /// # Errors
@@ -133,6 +150,23 @@ impl TaintedToolInput {
     ) -> Result<SafeFilePath, SecurityError> {
         let tainted = self.extract_string(key)?;
         SafeFilePath::from_tainted_for_creation(&tainted, sandbox)
+    }
+
+    /// Extract a path for file creation that may be absolute (within an
+    /// allowed directory) or relative (within the sandbox).
+    ///
+    /// # Errors
+    ///
+    /// Returns `SecurityError::MissingField` if the key doesn't exist or
+    /// isn't a string. Returns path-related errors if validation fails.
+    pub fn extract_path_for_creation_multi_root(
+        &self,
+        key: &str,
+        sandbox: &Path,
+        allowed_dirs: &[PathBuf],
+    ) -> Result<SafeFilePath, SecurityError> {
+        let tainted = self.extract_string(key)?;
+        SafeFilePath::from_tainted_for_creation_multi_root(&tainted, sandbox, allowed_dirs)
     }
 
     /// Extract a string field and validate it as a shell argument.

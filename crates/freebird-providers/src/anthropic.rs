@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 
 /// Anthropic API version header value.
 const API_VERSION: &str = "2023-06-01";
+/// Beta feature flag required for OAuth token authentication.
+const OAUTH_BETA_FLAG: &str = "oauth-2025-04-20";
 /// Default base URL for the Anthropic API.
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 /// Default model ID.
@@ -327,7 +329,7 @@ impl AnthropicProvider {
                     "authorization",
                     format!("Bearer {}", self.api_key.expose_secret()),
                 )
-                .header("anthropic-beta", "oauth-2025-04-20"),
+                .header("anthropic-beta", OAUTH_BETA_FLAG),
         }
     }
 }
@@ -1000,8 +1002,15 @@ mod tests {
     // Test helpers
     // -----------------------------------------------------------------------
 
+    /// OAuth-prefix key prefix for testing.
+    const OAUTH_KEY_PREFIX: &str = "sk-ant-oat01-test-oauth-token-12345";
+
     fn test_api_key() -> SecretString {
         SecretString::from("test-api-key-12345")
+    }
+
+    fn test_oauth_key() -> SecretString {
+        SecretString::from(OAUTH_KEY_PREFIX)
     }
 
     fn make_provider(base_url: &str) -> AnthropicProvider {
@@ -1067,6 +1076,173 @@ mod tests {
                 "message": message
             }
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // Unit tests: AuthKind detection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_auth_kind_detects_api_key() {
+        let provider = make_provider("http://localhost:1234");
+        assert_eq!(provider.auth_kind, AuthKind::ApiKey);
+    }
+
+    #[test]
+    fn test_auth_kind_detects_oauth_token() {
+        let provider = AnthropicProvider::new(
+            test_oauth_key(),
+            AnthropicConfig {
+                base_url: Some("http://localhost:1234".to_string()),
+                default_model: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(provider.auth_kind, AuthKind::OAuthToken);
+    }
+
+    #[test]
+    fn test_auth_kind_detects_oat_variants() {
+        // Any key starting with "sk-ant-oat" should be detected as OAuth,
+        // regardless of the version suffix (oat01, oat02, etc.).
+        for prefix in ["sk-ant-oat01-abc", "sk-ant-oat02-xyz", "sk-ant-oat-test"] {
+            let provider = AnthropicProvider::new(
+                SecretString::from(prefix),
+                AnthropicConfig {
+                    base_url: Some("http://localhost:1234".to_string()),
+                    default_model: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                provider.auth_kind,
+                AuthKind::OAuthToken,
+                "key prefix '{prefix}' should be detected as OAuthToken"
+            );
+        }
+    }
+
+    #[test]
+    fn test_auth_kind_api_key_variants() {
+        // Keys NOT starting with "sk-ant-oat" should be ApiKey.
+        for prefix in ["sk-ant-api03-abc", "sk-ant-sid01-xyz", "some-other-key", ""] {
+            let provider = AnthropicProvider::new(
+                SecretString::from(prefix),
+                AnthropicConfig {
+                    base_url: Some("http://localhost:1234".to_string()),
+                    default_model: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                provider.auth_kind,
+                AuthKind::ApiKey,
+                "key prefix '{prefix}' should be detected as ApiKey"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration tests: auth headers via wiremock
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_api_key_sends_x_api_key_header() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(wiremock::matchers::header(
+                "x-api-key",
+                "test-api-key-12345",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(success_response_json()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = make_provider(&server.uri());
+        let result = provider.complete(simple_completion_request()).await;
+        assert!(
+            result.is_ok(),
+            "request should succeed with x-api-key header"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_oauth_token_sends_bearer_and_beta_headers() {
+        let server = MockServer::start().await;
+        let bearer_value = format!("Bearer {OAUTH_KEY_PREFIX}");
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                bearer_value.as_str(),
+            ))
+            .and(wiremock::matchers::header(
+                "anthropic-beta",
+                OAUTH_BETA_FLAG,
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(success_response_json()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = AnthropicProvider::new(
+            test_oauth_key(),
+            AnthropicConfig {
+                base_url: Some(server.uri()),
+                default_model: None,
+            },
+        )
+        .unwrap();
+
+        let result = provider.complete(simple_completion_request()).await;
+        assert!(
+            result.is_ok(),
+            "request should succeed with Bearer + beta headers"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_oauth_token_does_not_send_x_api_key() {
+        let server = MockServer::start().await;
+
+        // Mount a mock that requires x-api-key — this should NOT be matched
+        // by an OAuth provider.
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(wiremock::matchers::header_exists("x-api-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(success_response_json()))
+            .expect(0)
+            .named("should-not-match-x-api-key")
+            .mount(&server)
+            .await;
+
+        // Mount the correct Bearer mock
+        let bearer_value = format!("Bearer {OAUTH_KEY_PREFIX}");
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                bearer_value.as_str(),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(success_response_json()))
+            .mount(&server)
+            .await;
+
+        let provider = AnthropicProvider::new(
+            test_oauth_key(),
+            AnthropicConfig {
+                base_url: Some(server.uri()),
+                default_model: None,
+            },
+        )
+        .unwrap();
+
+        let _ = provider.complete(simple_completion_request()).await;
+        // wiremock verifies the expect(0) constraint on drop
     }
 
     // -----------------------------------------------------------------------

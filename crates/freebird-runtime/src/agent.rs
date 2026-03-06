@@ -851,6 +851,7 @@ impl AgentRuntime {
             sandbox_root: &self.tools_config.sandbox_root,
             // TODO(#27): Use per-session capability grants instead of empty slice
             granted_capabilities: &[],
+            allowed_directories: &self.tools_config.allowed_directories,
         };
 
         let timeout = Duration::from_secs(self.tools_config.default_timeout_secs);

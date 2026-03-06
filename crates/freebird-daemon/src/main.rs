@@ -41,7 +41,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Start the daemon, listen on TCP for client connections.
-    Serve,
+    Serve {
+        /// Additional directories the agent may access (repeatable).
+        /// Accepts absolute paths or ~ paths (e.g., ~/Documents/myproject).
+        #[arg(long = "allow-dir", short = 'a')]
+        allow_dirs: Vec<PathBuf>,
+    },
     /// Connect to a running daemon for interactive chat.
     Chat,
     /// Check if the daemon is running (probes TCP port).
@@ -55,7 +60,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Serve => cmd_serve().await,
+        Commands::Serve { allow_dirs } => cmd_serve(allow_dirs).await,
         Commands::Chat => cmd_chat().await,
         Commands::Status => cmd_status().await,
         Commands::Stop => cmd_stop().await,
@@ -63,7 +68,7 @@ async fn main() -> Result<()> {
 }
 
 /// `freebird serve` — start daemon with TCP channel.
-async fn cmd_serve() -> Result<()> {
+async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
     // 1. LOGGING — before anything else, so config errors are visible.
     // Intentional silent fallback: if RUST_LOG is absent or unparseable, default
     // to "info". We can't log the parse error because tracing isn't initialized yet.
@@ -113,6 +118,22 @@ async fn cmd_serve() -> Result<()> {
                 tools_config.sandbox_root.display()
             )
         })?;
+
+    // Merge CLI --allow-dir flags with any configured allowed_directories.
+    for dir in allow_dirs {
+        let expanded = expand_tilde(&dir)?;
+        let canonical = expanded.canonicalize().with_context(|| {
+            format!(
+                "--allow-dir path `{}` does not exist or cannot be resolved",
+                dir.display()
+            )
+        })?;
+        if !tools_config.allowed_directories.contains(&canonical) {
+            tracing::info!(dir = %canonical.display(), "allowing additional directory");
+            tools_config.allowed_directories.push(canonical);
+        }
+    }
+
     let tools: Vec<Box<dyn freebird_traits::tool::Tool>> =
         freebird_tools::filesystem::filesystem_tools(tools_config.sandbox_root.clone());
 

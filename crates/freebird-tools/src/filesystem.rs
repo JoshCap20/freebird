@@ -59,7 +59,7 @@ impl ReadFileTool {
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Relative path within the sandbox"
+                            "description": "Relative path within the sandbox, or absolute path within an allowed directory"
                         }
                     },
                     "required": ["path"]
@@ -85,7 +85,7 @@ impl Tool for ReadFileTool {
     ) -> Result<ToolOutput, ToolError> {
         let tainted = TaintedToolInput::new(input);
         let safe_path = tainted
-            .extract_path("path", context.sandbox_root)
+            .extract_path_multi_root("path", context.sandbox_root, context.allowed_directories)
             .map_err(|e| ToolError::InvalidInput {
                 tool: Self::NAME.into(),
                 reason: e.to_string(),
@@ -151,7 +151,7 @@ impl WriteFileTool {
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Relative path within the sandbox"
+                            "description": "Relative path within the sandbox, or absolute path within an allowed directory"
                         },
                         "content": {
                             "type": "string",
@@ -181,7 +181,11 @@ impl Tool for WriteFileTool {
     ) -> Result<ToolOutput, ToolError> {
         let tainted = TaintedToolInput::new(input);
         let safe_path = tainted
-            .extract_path_for_creation("path", context.sandbox_root)
+            .extract_path_for_creation_multi_root(
+                "path",
+                context.sandbox_root,
+                context.allowed_directories,
+            )
             .map_err(|e| ToolError::InvalidInput {
                 tool: Self::NAME.into(),
                 reason: e.to_string(),
@@ -288,7 +292,7 @@ impl Tool for ListDirectoryTool {
     ) -> Result<ToolOutput, ToolError> {
         let tainted = TaintedToolInput::new(input);
         let safe_path = tainted
-            .extract_path("path", context.sandbox_root)
+            .extract_path_multi_root("path", context.sandbox_root, context.allowed_directories)
             .map_err(|e| ToolError::InvalidInput {
                 tool: Self::NAME.into(),
                 reason: e.to_string(),
@@ -370,6 +374,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let output = tool
@@ -389,6 +394,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -414,6 +420,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -435,6 +442,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool.execute(serde_json::json!({}), &ctx).await.unwrap_err();
@@ -459,6 +467,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -487,6 +496,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -515,6 +525,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let output = tool
@@ -534,6 +545,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -557,6 +569,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let output = tool
@@ -583,6 +596,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let output = tool
@@ -607,6 +621,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -631,6 +646,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -652,6 +668,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -673,6 +690,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -697,6 +715,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let output = tool
@@ -728,6 +747,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         tool.execute(
@@ -764,6 +784,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let output = tool
@@ -789,6 +810,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -814,6 +836,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -835,6 +858,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -858,6 +882,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let output = tool
@@ -877,6 +902,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let output = tool
@@ -902,6 +928,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let err = tool
@@ -933,6 +960,7 @@ mod tests {
             session_id: &sid,
             sandbox_root: tmp.path(),
             granted_capabilities: &caps,
+            allowed_directories: &[],
         };
 
         let output = tool

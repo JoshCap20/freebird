@@ -252,6 +252,197 @@ impl SafeFilePath {
         }
     }
 
+    /// Validate an untrusted path that may be absolute (within an allowed
+    /// directory) or relative (within the sandbox).
+    ///
+    /// Allowed roots extend the sandbox: an absolute path that resolves
+    /// within any root is accepted. Relative paths are always resolved
+    /// against `sandbox` (the primary root).
+    ///
+    /// # Errors
+    ///
+    /// Returns `SecurityError::PathTraversal` if the path escapes all roots.
+    /// Returns `SecurityError::PathResolution` if canonicalization fails.
+    pub fn from_tainted_multi_root(
+        t: &Tainted,
+        sandbox: &Path,
+        allowed_dirs: &[PathBuf],
+    ) -> Result<Self, SecurityError> {
+        let raw = t.inner();
+
+        // If it's not absolute, delegate to the standard sandbox-relative path.
+        if !raw.starts_with('/') && !raw.starts_with('\\') {
+            return Self::from_tainted(t, sandbox);
+        }
+
+        // Absolute path — validate against sandbox + all allowed dirs.
+        Self::resolve_absolute(raw, sandbox, allowed_dirs)
+    }
+
+    /// Like `from_tainted_multi_root` but for file creation (target may not
+    /// exist yet).
+    ///
+    /// # Errors
+    ///
+    /// Returns path-related errors if the absolute path escapes all roots,
+    /// or delegates to `from_tainted_for_creation` for relative paths.
+    pub fn from_tainted_for_creation_multi_root(
+        t: &Tainted,
+        sandbox: &Path,
+        allowed_dirs: &[PathBuf],
+    ) -> Result<Self, SecurityError> {
+        let raw = t.inner();
+
+        if !raw.starts_with('/') && !raw.starts_with('\\') {
+            return Self::from_tainted_for_creation(t, sandbox);
+        }
+
+        // Absolute creation path — parent must exist and resolve within a root.
+        Self::resolve_absolute_for_creation(raw, sandbox, allowed_dirs)
+    }
+
+    /// Resolve an absolute path against sandbox + allowed directories.
+    fn resolve_absolute(
+        raw: &str,
+        sandbox: &Path,
+        allowed_dirs: &[PathBuf],
+    ) -> Result<Self, SecurityError> {
+        if raw.trim().is_empty() || raw.contains('\0') {
+            return Err(SecurityError::PathTraversal {
+                attempted: PathBuf::from(raw),
+                sandbox: sandbox.to_owned(),
+            });
+        }
+
+        let candidate = PathBuf::from(raw);
+        let resolved = candidate
+            .canonicalize()
+            .map_err(|e| SecurityError::PathResolution {
+                path: candidate,
+                source: e,
+            })?;
+
+        // Try sandbox first, then allowed dirs.
+        let sandbox_root = sandbox
+            .canonicalize()
+            .map_err(|e| SecurityError::PathResolution {
+                path: sandbox.to_owned(),
+                source: e,
+            })?;
+
+        if resolved.starts_with(&sandbox_root) {
+            return Ok(Self {
+                resolved,
+                root: sandbox_root,
+            });
+        }
+
+        for dir in allowed_dirs {
+            if let Ok(root) = dir.canonicalize() {
+                if resolved.starts_with(&root) {
+                    return Ok(Self { resolved, root });
+                }
+            }
+        }
+
+        Err(SecurityError::PathTraversal {
+            attempted: resolved,
+            sandbox: sandbox_root,
+        })
+    }
+
+    /// Resolve an absolute path for creation against sandbox + allowed dirs.
+    fn resolve_absolute_for_creation(
+        raw: &str,
+        sandbox: &Path,
+        allowed_dirs: &[PathBuf],
+    ) -> Result<Self, SecurityError> {
+        if raw.trim().is_empty() || raw.contains('\0') {
+            return Err(SecurityError::PathTraversal {
+                attempted: PathBuf::from(raw),
+                sandbox: sandbox.to_owned(),
+            });
+        }
+
+        let traversal = || SecurityError::PathTraversal {
+            attempted: PathBuf::from(raw),
+            sandbox: sandbox.to_owned(),
+        };
+
+        if raw.ends_with('/') || raw.ends_with('\\') {
+            return Err(traversal());
+        }
+
+        let path = Path::new(raw);
+        let filename = path.file_name().ok_or_else(traversal)?;
+
+        let parent = path.parent().ok_or_else(traversal)?;
+
+        let canonical_parent =
+            parent
+                .canonicalize()
+                .map_err(|e| SecurityError::PathResolution {
+                    path: parent.to_owned(),
+                    source: e,
+                })?;
+
+        let resolved = canonical_parent.join(filename);
+
+        // Collect all canonical roots.
+        let sandbox_root = sandbox
+            .canonicalize()
+            .map_err(|e| SecurityError::PathResolution {
+                path: sandbox.to_owned(),
+                source: e,
+            })?;
+
+        // Check parent is within any root.
+        if canonical_parent.starts_with(&sandbox_root) {
+            // Overwrite-safe check
+            return Self::overwrite_safe_check(resolved, sandbox_root, raw);
+        }
+
+        for dir in allowed_dirs {
+            if let Ok(root) = dir.canonicalize() {
+                if canonical_parent.starts_with(&root) {
+                    return Self::overwrite_safe_check(resolved, root, raw);
+                }
+            }
+        }
+
+        Err(SecurityError::PathTraversal {
+            attempted: resolved,
+            sandbox: sandbox_root,
+        })
+    }
+
+    /// Symlink escape check for creation paths that already exist.
+    fn overwrite_safe_check(
+        resolved: PathBuf,
+        root: PathBuf,
+        raw: &str,
+    ) -> Result<Self, SecurityError> {
+        match resolved.canonicalize() {
+            Ok(actual) => {
+                if !actual.starts_with(&root) {
+                    return Err(SecurityError::PathTraversal {
+                        attempted: actual,
+                        sandbox: root,
+                    });
+                }
+                Ok(Self {
+                    resolved: actual,
+                    root,
+                })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self { resolved, root }),
+            Err(e) => Err(SecurityError::PathResolution {
+                path: PathBuf::from(raw),
+                source: e,
+            }),
+        }
+    }
+
     /// Access the validated, canonicalized path.
     #[must_use]
     pub fn as_path(&self) -> &Path {

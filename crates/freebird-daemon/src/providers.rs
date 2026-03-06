@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use secrecy::SecretString;
 
 use freebird_providers::anthropic::{AnthropicConfig, AnthropicProvider};
@@ -51,6 +51,16 @@ pub async fn build_provider_registry(config: &AppConfig) -> Result<ProviderRegis
                 );
             }
         }
+    }
+
+    // Fail fast if no providers were successfully initialized. Without this,
+    // the daemon would accept TCP connections but fail on every message with
+    // a confusing error from `complete_with_failover()`.
+    if registry.provider_ids().is_empty() {
+        bail!(
+            "no providers were successfully initialized \
+             (check ANTHROPIC_API_KEY and provider configuration)"
+        );
     }
 
     // Build failover chain from config order, but only include providers

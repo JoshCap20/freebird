@@ -104,6 +104,10 @@ pub struct ChannelConfig {
 pub struct ToolsConfig {
     pub sandbox_root: PathBuf,
     pub default_timeout_secs: u64,
+    /// Additional directories the agent is allowed to access beyond the
+    /// sandbox root. Typically set via the `--allow-dir` CLI flag.
+    #[serde(default)]
+    pub allowed_directories: Vec<PathBuf>,
 }
 
 /// Which memory storage backend to use.

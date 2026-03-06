@@ -440,6 +440,7 @@ fn default_tools_config() -> ToolsConfig {
     ToolsConfig {
         sandbox_root: PathBuf::from("/tmp/test-sandbox"),
         default_timeout_secs: 30,
+        allowed_directories: vec![],
     }
 }
 
@@ -725,6 +726,7 @@ async fn test_tool_use_timeout() {
     let tools_config = ToolsConfig {
         sandbox_root: PathBuf::from("/tmp/test-sandbox"),
         default_timeout_secs: 1, // 1 second timeout
+        allowed_directories: vec![],
     };
 
     let runtime = AgentRuntime::new(
