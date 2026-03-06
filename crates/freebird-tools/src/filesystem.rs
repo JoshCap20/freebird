@@ -956,4 +956,112 @@ mod tests {
         names.sort();
         assert_eq!(names, vec!["list_directory", "read_file", "write_file"]);
     }
+
+    // ── Property-based tests ────────────────────────────────────
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Strategy that generates safe filenames (alphanumeric + limited punctuation).
+        fn safe_filename() -> impl Strategy<Value = String> {
+            "[a-zA-Z0-9_-]{1,64}\\.(txt|dat|log)"
+        }
+
+        /// Strategy that generates arbitrary UTF-8 content for file writes.
+        fn file_content() -> impl Strategy<Value = String> {
+            proptest::string::string_regex("[\\x20-\\x7E\\n\\t]{0,4096}").unwrap()
+        }
+
+        proptest! {
+            /// Write then read roundtrip: arbitrary content survives intact.
+            #[test]
+            fn write_read_roundtrip(
+                name in safe_filename(),
+                content in file_content(),
+            ) {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    let h = TestHarness::new();
+                    let write_tool = WriteFileTool::new();
+                    let read_tool = ReadFileTool::new();
+
+                    let write_result = write_tool
+                        .execute(
+                            serde_json::json!({"path": &name, "content": &content}),
+                            &h.context(),
+                        )
+                        .await;
+                    // Write should succeed for valid filenames
+                    let output = write_result.unwrap();
+                    prop_assert!(matches!(output.outcome, ToolOutcome::Success));
+
+                    // Read it back
+                    let read_output = read_tool
+                        .execute(serde_json::json!({"path": &name}), &h.context())
+                        .await
+                        .unwrap();
+                    prop_assert_eq!(&read_output.content, &content);
+                    Ok(())
+                })?;
+            }
+
+            /// Path traversal with arbitrary depth never succeeds.
+            #[test]
+            fn path_traversal_always_rejected(
+                depth in 1usize..20,
+                suffix in "[a-z]{1,10}",
+            ) {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    let h = TestHarness::new();
+                    let tool = ReadFileTool::new();
+
+                    let traversal = format!("{}{}", "../".repeat(depth), suffix);
+                    let result = tool
+                        .execute(serde_json::json!({"path": &traversal}), &h.context())
+                        .await;
+                    // Must always fail — never read outside sandbox
+                    prop_assert!(result.is_err());
+                    Ok(())
+                })?;
+            }
+
+            /// Write output never leaks the sandbox root path.
+            #[test]
+            fn write_never_leaks_sandbox_root(
+                name in safe_filename(),
+            ) {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    let h = TestHarness::new();
+                    let tool = WriteFileTool::new();
+
+                    let output = tool
+                        .execute(
+                            serde_json::json!({"path": &name, "content": "x"}),
+                            &h.context(),
+                        )
+                        .await
+                        .unwrap();
+                    let sandbox_str = h.path().to_string_lossy();
+                    prop_assert!(
+                        !output.content.contains(sandbox_str.as_ref()),
+                        "output leaked sandbox root: {}",
+                        output.content
+                    );
+                    Ok(())
+                })?;
+            }
+        }
+    }
 }
