@@ -466,11 +466,15 @@ dependencies = [
  "freebird-security",
  "freebird-traits",
  "freebird-types",
+ "futures",
  "proptest",
+ "reqwest",
  "serde_json",
  "tempfile",
  "tokio",
  "tracing",
+ "url",
+ "wiremock",
 ]
 
 [[package]]
