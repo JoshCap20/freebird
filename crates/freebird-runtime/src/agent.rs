@@ -567,15 +567,58 @@ impl AgentRuntime {
         messages: &[Message],
         tool_definitions: &[ToolDefinition],
     ) -> CompletionRequest {
+        let base = conversation.system_prompt.as_deref().unwrap_or("");
+        let system_prompt = self.build_effective_system_prompt(base);
+
         CompletionRequest {
             model: conversation.model_id.clone(),
-            system_prompt: conversation.system_prompt.clone(),
+            system_prompt: Some(system_prompt),
             messages: messages.to_vec(),
             tools: tool_definitions.to_vec(),
             max_tokens: self.config.max_output_tokens,
             temperature: self.config.temperature,
             stop_sequences: Vec::new(),
         }
+    }
+
+    /// Augment the base system prompt with tool and filesystem access
+    /// information so the model knows what it can do.
+    fn build_effective_system_prompt(&self, base: &str) -> String {
+        use std::fmt::Write;
+
+        let mut prompt = base.to_owned();
+
+        if self.tools.is_empty() {
+            return prompt;
+        }
+
+        // List available tools by name and description.
+        prompt.push_str("\n\nYou have the following tools available:\n");
+        for tool in &self.tools {
+            let info = tool.info();
+            let _ = writeln!(prompt, "- **{}**: {}", info.name, info.description);
+        }
+
+        // Filesystem access context.
+        let sandbox = &self.tools_config.sandbox_root;
+        let allowed = &self.tools_config.allowed_directories;
+
+        let _ = write!(
+            prompt,
+            "\nYour sandbox directory is: {}\n",
+            sandbox.display()
+        );
+
+        if allowed.is_empty() {
+            prompt.push_str("You can only access files within the sandbox directory.");
+        } else {
+            prompt.push_str("You can also access files in these additional directories:\n");
+            for dir in allowed {
+                let _ = writeln!(prompt, "- {}", dir.display());
+            }
+        }
+
+        prompt
     }
 
     /// Execute tool calls from a `ToolUse` response and append results to the message list.
