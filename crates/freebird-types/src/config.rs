@@ -108,6 +108,24 @@ pub struct ToolsConfig {
     /// sandbox root. Typically set via the `--allow-dir` CLI flag.
     #[serde(default)]
     pub allowed_directories: Vec<PathBuf>,
+    /// Commands the shell tool is permitted to execute. Empty = deny all.
+    #[serde(default = "default_allowed_shell_commands")]
+    pub allowed_shell_commands: Vec<String>,
+    /// Maximum stdout+stderr bytes the shell tool returns. Output beyond
+    /// this limit is truncated with a `[output truncated]` marker.
+    #[serde(default = "default_max_shell_output_bytes")]
+    pub max_shell_output_bytes: usize,
+}
+
+fn default_allowed_shell_commands() -> Vec<String> {
+    ["ls", "cat", "grep", "find", "git", "head", "tail", "wc"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+const fn default_max_shell_output_bytes() -> usize {
+    1_048_576 // 1 MiB
 }
 
 /// Which memory storage backend to use.
@@ -223,6 +241,8 @@ kind = "cli"
 [tools]
 sandbox_root = "~/.freebird/sandbox"
 default_timeout_secs = 30
+allowed_shell_commands = ["ls", "cat", "grep", "find", "git", "head", "tail", "wc"]
+max_shell_output_bytes = 1048576
 
 [memory]
 kind = "file"
@@ -462,5 +482,30 @@ drain_timeout_secs = 1"#,
         let json = serde_json::to_string(&daemon).unwrap();
         let back: DaemonConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(daemon, back);
+    }
+
+    // ── Shell config tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_shell_config_from_default_toml() {
+        let toml_str = include_str!("../../../config/default.toml");
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.tools.allowed_shell_commands,
+            vec!["ls", "cat", "grep", "find", "git", "head", "tail", "wc"]
+        );
+        assert_eq!(config.tools.max_shell_output_bytes, 1_048_576);
+    }
+
+    #[test]
+    fn test_shell_config_serde_defaults_when_absent() {
+        // Config TOML without the new shell fields — serde defaults apply
+        let toml_str = config_toml(&[]);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(
+            config.tools.allowed_shell_commands,
+            vec!["ls", "cat", "grep", "find", "git", "head", "tail", "wc"]
+        );
+        assert_eq!(config.tools.max_shell_output_bytes, 1_048_576);
     }
 }
