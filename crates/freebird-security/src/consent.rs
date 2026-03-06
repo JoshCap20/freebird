@@ -103,7 +103,7 @@ impl ConsentGate {
             threshold,
             consent_ttl,
             request_tx,
-            pending: Arc::new(Mutex::new(HashMap::new())),
+            pending: Arc::new(Mutex::new(HashMap::with_capacity(max_pending))),
             max_pending,
         };
         (gate, request_rx)
@@ -134,6 +134,7 @@ impl ConsentGate {
             return Ok(());
         }
 
+        let tool_name = tool_info.name.clone();
         let request_id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
         let ttl_delta =
@@ -141,7 +142,7 @@ impl ConsentGate {
 
         let request = ConsentRequest {
             id: request_id.clone(),
-            tool_name: tool_info.name.clone(),
+            tool_name: tool_name.clone(),
             description: tool_info.description.clone(),
             risk_level: tool_info.risk_level.clone(),
             action_summary,
@@ -155,7 +156,7 @@ impl ConsentGate {
             let mut pending = self.pending.lock().await;
             if pending.len() >= self.max_pending {
                 return Err(ConsentError::TooManyPending {
-                    tool: tool_info.name.clone(),
+                    tool: tool_name,
                     max: self.max_pending,
                 });
             }
@@ -169,7 +170,6 @@ impl ConsentGate {
         }
 
         // Wait for response with timeout.
-        let tool_name = tool_info.name.clone();
         let timeout_secs = self.consent_ttl.as_secs();
 
         match tokio::time::timeout(self.consent_ttl, response_rx).await {
