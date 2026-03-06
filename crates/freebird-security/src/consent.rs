@@ -178,16 +178,8 @@ impl ConsentGate {
                 tool: tool_name,
                 reason: reason.unwrap_or_else(|| "user denied".into()),
             }),
-            Ok(Err(_)) => {
-                // Oneshot sender dropped without responding.
-                self.pending.lock().await.remove(&request_id);
-                Err(ConsentError::Expired {
-                    tool: tool_name,
-                    timeout_secs,
-                })
-            }
-            Err(_) => {
-                // Timeout elapsed.
+            // Oneshot sender dropped (Ok(Err)) or timeout elapsed (Err).
+            Ok(Err(_)) | Err(_) => {
                 self.pending.lock().await.remove(&request_id);
                 Err(ConsentError::Expired {
                     tool: tool_name,
@@ -523,7 +515,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_pending_enforced() {
-        let (gate, _rx) = ConsentGate::new(RiskLevel::High, Duration::from_secs(600), 2);
+        let (gate, mut rx) = ConsentGate::new(RiskLevel::High, Duration::from_secs(600), 2);
         let gate = Arc::new(gate);
         let tool = make_tool_info("shell", RiskLevel::High);
 
@@ -536,9 +528,9 @@ mod tests {
         let t2 = tool.clone();
         let _h2 = tokio::spawn(async move { gate2.check(&t2, "a2".into()).await });
 
-        // Give spawned tasks time to register.
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
+        // Wait for both requests to arrive (proves they registered in pending).
+        let _r1 = rx.recv().await.unwrap();
+        let _r2 = rx.recv().await.unwrap();
 
         // 3rd should fail with TooManyPending.
         let result = gate.check(&tool, "a3".into()).await;
