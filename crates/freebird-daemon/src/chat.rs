@@ -288,28 +288,19 @@ async fn handle_daemon_line<O: AsyncWrite + Unpin>(
         };
 
     if needs_prefix {
-        let prefix = if is_tty {
-            style::bot_prefix()
-        } else {
-            "FreeBird: ".to_string()
-        };
+        // needs_prefix is only true when is_tty is true, so always use styled.
+        let prefix = style::bot_prefix();
         user_output
             .write_all(prefix.as_bytes())
             .await
             .context("writing response prefix")?;
     }
 
-    // Track streaming state and write prompt after stream ends.
-    let new_in_stream = match &msg {
-        ServerMessage::StreamChunk { .. } => true,
-        ServerMessage::StreamEnd => {
-            // After stream ends, print the next prompt.
-            write_prompt(user_output, is_tty).await?;
-            false
-        }
-        _ => false,
-    };
+    // Track streaming state.
+    let new_in_stream = matches!(&msg, ServerMessage::StreamChunk { .. });
 
+    // Write rendered content first, then prompt — order matters for StreamEnd
+    // so the newline terminates the response before the next prompt appears.
     let rendered = render_server_message(&msg, is_tty);
     user_output
         .write_all(rendered.as_bytes())
@@ -317,13 +308,14 @@ async fn handle_daemon_line<O: AsyncWrite + Unpin>(
         .context("writing to output")?;
     user_output.flush().await.context("flushing output")?;
 
-    // For non-streaming complete responses, print the next prompt now.
+    // Print next prompt after complete responses and stream end.
     // Tool events do NOT trigger a prompt — more messages follow.
     if is_tty {
         match &msg {
             ServerMessage::Message { .. }
             | ServerMessage::CommandResponse { .. }
-            | ServerMessage::Error { .. } => {
+            | ServerMessage::Error { .. }
+            | ServerMessage::StreamEnd => {
                 write_prompt(user_output, is_tty).await?;
             }
             _ => {}
@@ -535,6 +527,22 @@ mod tests {
             "tty error should contain ANSI codes"
         );
         assert!(rendered.contains("boom"), "should contain error text");
+    }
+
+    #[test]
+    fn render_tool_end_tty_has_ansi() {
+        let msg = ServerMessage::ToolEnd {
+            tool_name: "read_file".into(),
+            outcome: "success".into(),
+            duration_ms: 42,
+        };
+        let rendered = render_server_message(&msg, true);
+        assert!(
+            rendered.contains("\x1b["),
+            "tty tool_end should contain ANSI codes"
+        );
+        assert!(rendered.contains("read_file"), "should contain tool name");
+        assert!(rendered.contains("42ms"), "should contain duration");
     }
 
     // ── Integration tests (is_tty = false) ────────────────────────────
