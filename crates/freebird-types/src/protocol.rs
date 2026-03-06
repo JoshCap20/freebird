@@ -31,6 +31,14 @@ pub enum ServerMessage {
     Error { text: String },
     /// Command response (e.g., /help output).
     CommandResponse { text: String },
+    /// Tool execution started.
+    ToolStart { tool_name: String },
+    /// Tool execution completed.
+    ToolEnd {
+        tool_name: String,
+        outcome: String,
+        duration_ms: u64,
+    },
 }
 
 #[cfg(test)]
@@ -128,6 +136,29 @@ mod tests {
     }
 
     #[test]
+    fn server_tool_start_serializes() {
+        let msg = ServerMessage::ToolStart {
+            tool_name: "read_file".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"tool_start","tool_name":"read_file"}"#);
+    }
+
+    #[test]
+    fn server_tool_end_serializes() {
+        let msg = ServerMessage::ToolEnd {
+            tool_name: "read_file".into(),
+            outcome: "success".into(),
+            duration_ms: 42,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"tool_end","tool_name":"read_file","outcome":"success","duration_ms":42}"#
+        );
+    }
+
+    #[test]
     fn server_message_roundtrips() {
         for msg in [
             ServerMessage::Message {
@@ -139,6 +170,14 @@ mod tests {
             ServerMessage::StreamEnd,
             ServerMessage::Error { text: "err".into() },
             ServerMessage::CommandResponse { text: "ok".into() },
+            ServerMessage::ToolStart {
+                tool_name: "shell".into(),
+            },
+            ServerMessage::ToolEnd {
+                tool_name: "shell".into(),
+                outcome: "error".into(),
+                duration_ms: 100,
+            },
         ] {
             let json = serde_json::to_string(&msg).unwrap();
             let back: ServerMessage = serde_json::from_str(&json).unwrap();

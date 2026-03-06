@@ -349,6 +349,23 @@ fn outbound_to_server_message(event: OutboundEvent) -> (String, ServerMessage) {
         OutboundEvent::Error { text, recipient_id } => {
             (recipient_id, ServerMessage::Error { text })
         }
+        OutboundEvent::ToolStart {
+            tool_name,
+            recipient_id,
+        } => (recipient_id, ServerMessage::ToolStart { tool_name }),
+        OutboundEvent::ToolEnd {
+            tool_name,
+            outcome,
+            duration_ms,
+            recipient_id,
+        } => (
+            recipient_id,
+            ServerMessage::ToolEnd {
+                tool_name,
+                outcome,
+                duration_ms,
+            },
+        ),
     }
 }
 
@@ -730,6 +747,34 @@ mod tests {
                 (
                     "tcp-3".to_string(),
                     ServerMessage::Error { text: "err".into() },
+                ),
+            ),
+            (
+                OutboundEvent::ToolStart {
+                    tool_name: "read_file".into(),
+                    recipient_id: "tcp-4".into(),
+                },
+                (
+                    "tcp-4".to_string(),
+                    ServerMessage::ToolStart {
+                        tool_name: "read_file".into(),
+                    },
+                ),
+            ),
+            (
+                OutboundEvent::ToolEnd {
+                    tool_name: "read_file".into(),
+                    outcome: "success".into(),
+                    duration_ms: 42,
+                    recipient_id: "tcp-5".into(),
+                },
+                (
+                    "tcp-5".to_string(),
+                    ServerMessage::ToolEnd {
+                        tool_name: "read_file".into(),
+                        outcome: "success".into(),
+                        duration_ms: 42,
+                    },
                 ),
             ),
         ];

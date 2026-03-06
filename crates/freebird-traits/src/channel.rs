@@ -81,10 +81,31 @@ pub enum InboundEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OutboundEvent {
-    Message { text: String, recipient_id: String },
-    StreamChunk { text: String, recipient_id: String },
-    StreamEnd { recipient_id: String },
-    Error { text: String, recipient_id: String },
+    Message {
+        text: String,
+        recipient_id: String,
+    },
+    StreamChunk {
+        text: String,
+        recipient_id: String,
+    },
+    StreamEnd {
+        recipient_id: String,
+    },
+    Error {
+        text: String,
+        recipient_id: String,
+    },
+    ToolStart {
+        tool_name: String,
+        recipient_id: String,
+    },
+    ToolEnd {
+        tool_name: String,
+        outcome: String,
+        duration_ms: u64,
+        recipient_id: String,
+    },
 }
 
 /// A media attachment.
