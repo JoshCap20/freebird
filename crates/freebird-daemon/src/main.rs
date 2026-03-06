@@ -197,7 +197,7 @@ async fn cmd_chat() -> Result<()> {
     let stdin = tokio::io::BufReader::new(tokio::io::stdin());
     let stdout = tokio::io::stdout();
 
-    chat::run_chat_with_io(stream, stdin, stdout).await
+    chat::run_chat_with_io(stream, stdin, stdout, true).await
 }
 
 /// `freebird status` — check if daemon is running by probing the TCP port.
