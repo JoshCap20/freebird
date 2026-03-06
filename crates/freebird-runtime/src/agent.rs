@@ -633,27 +633,24 @@ impl AgentRuntime {
             let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
             // Scan tool output for injection — BLOCK if detected
-            let (final_content, outcome) = match ScannedToolOutput::from_raw(&output.content) {
-                Ok(scanned) => (scanned.into_inner(), output.outcome),
-                Err(e) => {
-                    tracing::warn!(tool = %tool_name, "injection detected in tool output, blocking");
-                    if let Some(audit) = &self.audit {
-                        let _ = audit
-                            .record(
-                                session_id.as_str(),
-                                AuditEventType::InjectionDetected {
-                                    pattern: format!("{e}"),
-                                    source: InjectionSource::ToolOutput,
-                                    severity: Severity::High,
-                                },
-                            )
-                            .await;
-                    }
-                    (
-                        "Tool output blocked: potential prompt injection detected".to_owned(),
-                        ToolOutcome::Error,
-                    )
+            let scanned = ScannedToolOutput::from_raw(&output.content);
+            let (final_content, outcome) = if scanned.injection_detected() {
+                tracing::warn!(tool = %tool_name, "injection detected in tool output, blocking");
+                if let Some(audit) = &self.audit {
+                    let _ = audit
+                        .record(
+                            session_id.as_str(),
+                            AuditEventType::InjectionDetected {
+                                pattern: "prompt injection in tool output".to_owned(),
+                                source: InjectionSource::ToolOutput,
+                                severity: Severity::High,
+                            },
+                        )
+                        .await;
                 }
+                (scanned.content().to_owned(), ToolOutcome::Error)
+            } else {
+                (scanned.content().to_owned(), output.outcome)
             };
 
             let is_error = outcome == ToolOutcome::Error;
@@ -709,34 +706,32 @@ impl AgentRuntime {
         }
 
         // Scan model output for injection — BLOCK if detected
-        match ScannedModelResponse::from_raw(&response_text) {
-            Ok(scanned) => {
-                let _ = outbound
-                    .send(OutboundEvent::Message {
-                        text: scanned.into_inner(),
-                        recipient_id: sender_id.into(),
-                    })
-                    .await;
+        let scanned = ScannedModelResponse::from_raw(&response_text);
+        if scanned.injection_detected() {
+            self.log_model_output_injection(session_id, "prompt injection in model output")
+                .await;
 
-                current_turn
-                    .assistant_messages
-                    .push(response.message.clone());
-                current_turn.completed_at = Some(Utc::now());
-            }
-            Err(e) => {
-                self.log_model_output_injection(session_id, &e).await;
+            let _ = outbound
+                .send(OutboundEvent::Error {
+                    text: MODEL_OUTPUT_INJECTION_BLOCKED.into(),
+                    recipient_id: sender_id.into(),
+                })
+                .await;
 
-                let _ = outbound
-                    .send(OutboundEvent::Error {
-                        text: MODEL_OUTPUT_INJECTION_BLOCKED.into(),
-                        recipient_id: sender_id.into(),
-                    })
-                    .await;
+            // Do NOT persist the tainted response — prevents memory poisoning
+        } else {
+            let _ = outbound
+                .send(OutboundEvent::Message {
+                    text: scanned.content().to_owned(),
+                    recipient_id: sender_id.into(),
+                })
+                .await;
 
-                // Do NOT persist the tainted response — prevents memory poisoning
-                current_turn.completed_at = Some(Utc::now());
-            }
+            current_turn
+                .assistant_messages
+                .push(response.message.clone());
         }
+        current_turn.completed_at = Some(Utc::now());
     }
 
     /// Deliver a truncated response (max tokens reached).
@@ -753,51 +748,44 @@ impl AgentRuntime {
         let partial_text = extract_text(&response.message);
 
         // Scan truncated output for injection — BLOCK if detected
-        match ScannedModelResponse::from_raw(&partial_text) {
-            Ok(scanned) => {
-                let _ = outbound
-                    .send(OutboundEvent::Message {
-                        text: format!(
-                            "{}\n\n[response truncated — max tokens reached]",
-                            scanned.into_inner()
-                        ),
-                        recipient_id: sender_id.into(),
-                    })
-                    .await;
+        let scanned = ScannedModelResponse::from_raw(&partial_text);
+        if scanned.injection_detected() {
+            self.log_model_output_injection(session_id, "prompt injection in model output")
+                .await;
 
-                current_turn
-                    .assistant_messages
-                    .push(response.message.clone());
-                current_turn.completed_at = Some(Utc::now());
-            }
-            Err(e) => {
-                self.log_model_output_injection(session_id, &e).await;
+            let _ = outbound
+                .send(OutboundEvent::Error {
+                    text: MODEL_OUTPUT_INJECTION_BLOCKED.into(),
+                    recipient_id: sender_id.into(),
+                })
+                .await;
+        } else {
+            let _ = outbound
+                .send(OutboundEvent::Message {
+                    text: format!(
+                        "{}\n\n[response truncated — max tokens reached]",
+                        scanned.content()
+                    ),
+                    recipient_id: sender_id.into(),
+                })
+                .await;
 
-                let _ = outbound
-                    .send(OutboundEvent::Error {
-                        text: MODEL_OUTPUT_INJECTION_BLOCKED.into(),
-                        recipient_id: sender_id.into(),
-                    })
-                    .await;
-
-                current_turn.completed_at = Some(Utc::now());
-            }
+            current_turn
+                .assistant_messages
+                .push(response.message.clone());
         }
+        current_turn.completed_at = Some(Utc::now());
     }
 
     /// Log a model output injection detection to audit.
-    async fn log_model_output_injection(
-        &self,
-        session_id: &SessionId,
-        error: &freebird_security::error::SecurityError,
-    ) {
+    async fn log_model_output_injection(&self, session_id: &SessionId, description: &str) {
         tracing::warn!("injection detected in model output, blocking delivery");
         if let Some(audit) = &self.audit {
             let _ = audit
                 .record(
                     session_id.as_str(),
                     AuditEventType::InjectionDetected {
-                        pattern: format!("{error}"),
+                        pattern: description.to_owned(),
                         source: InjectionSource::ModelResponse,
                         severity: Severity::High,
                     },
@@ -1081,8 +1069,10 @@ impl AgentRuntime {
     /// We log the detection for forensics.
     async fn audit_streaming_injection(&self, session_id: &SessionId, message: &Message) {
         let response_text = extract_text(message);
-        if let Err(e) = ScannedModelResponse::from_raw(&response_text) {
-            self.log_model_output_injection(session_id, &e).await;
+        let scanned = ScannedModelResponse::from_raw(&response_text);
+        if scanned.injection_detected() {
+            self.log_model_output_injection(session_id, "prompt injection in model output")
+                .await;
         }
     }
 

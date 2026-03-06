@@ -241,23 +241,22 @@ impl ToolExecutor {
             return output;
         }
 
-        match ScannedToolOutput::from_raw(&output.content) {
-            Ok(_scanned) => output,
-            Err(e) => {
-                tracing::warn!(
-                    tool = %tool_name,
-                    session_id = %session_id,
-                    error = %e,
-                    "injection detected in tool output, blocking"
-                );
-                self.audit_injection_detected(session_id, &format!("{e}"))
-                    .await;
-                ToolOutput {
-                    content: "Tool output blocked: potential prompt injection detected".into(),
-                    outcome: ToolOutcome::Error,
-                    metadata: None,
-                }
+        let scanned = ScannedToolOutput::from_raw(&output.content);
+        if scanned.injection_detected() {
+            tracing::warn!(
+                tool = %tool_name,
+                session_id = %session_id,
+                "injection detected in tool output, blocking"
+            );
+            self.audit_injection_detected(session_id, "prompt injection in tool output")
+                .await;
+            ToolOutput {
+                content: scanned.content().to_string(),
+                outcome: ToolOutcome::Error,
+                metadata: None,
             }
+        } else {
+            output
         }
     }
 

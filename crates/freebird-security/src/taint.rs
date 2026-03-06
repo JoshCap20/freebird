@@ -191,7 +191,7 @@ impl TaintedToolInput {
     /// the value is not a string.
     pub fn extract_file_content(&self, key: &str) -> Result<SafeFileContent, SecurityError> {
         let tainted = self.extract_string(key)?;
-        Ok(SafeFileContent::from_tainted(&tainted))
+        Ok(SafeFileContent::new(tainted.inner().to_string()))
     }
 
     /// Extract a string field and validate it as a URL.
