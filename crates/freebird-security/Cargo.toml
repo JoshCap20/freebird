@@ -18,8 +18,10 @@ url = { workspace = true }
 ring = { workspace = true }
 hex = { workspace = true }
 secrecy = { workspace = true }
-tokio = { version = "1", default-features = false, features = ["sync"] }
+uuid = { workspace = true }
+tokio = { version = "1", default-features = false, features = ["sync", "time"] }
 
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }
+tokio = { version = "1", features = ["full", "test-util"] }

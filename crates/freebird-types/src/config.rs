@@ -154,6 +154,22 @@ pub struct SecurityConfig {
     /// Minimum risk level that requires explicit human consent before tool
     /// execution. Tools at this level or above trigger the consent gate.
     pub require_consent_above: RiskLevel,
+    /// How long (in seconds) to wait for a user to respond to a consent
+    /// request before auto-denying. Default: 60.
+    #[serde(default = "default_consent_timeout_secs")]
+    pub consent_timeout_secs: u64,
+    /// Maximum number of simultaneous pending consent requests.
+    /// Prevents LLM flooding attacks. Default: 5.
+    #[serde(default = "default_max_pending_consent")]
+    pub max_pending_consent_requests: usize,
+}
+
+const fn default_consent_timeout_secs() -> u64 {
+    60
+}
+
+const fn default_max_pending_consent() -> usize {
+    5
 }
 
 /// Log severity level.
@@ -519,5 +535,38 @@ drain_timeout_secs = 1"#,
             vec!["ls", "cat", "grep", "head", "tail", "wc"]
         );
         assert_eq!(config.tools.max_shell_output_bytes, 1_048_576);
+    }
+
+    // ── Consent config tests ───────────────────────────────────────
+
+    #[test]
+    fn test_security_config_consent_defaults() {
+        // Config TOML without consent fields — serde defaults should apply.
+        let toml_str = config_toml(&[(
+            "security",
+            "max_tool_calls_per_turn = 25\nrequire_consent_above = \"high\"",
+        )]);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(config.security.consent_timeout_secs, 60);
+        assert_eq!(config.security.max_pending_consent_requests, 5);
+    }
+
+    #[test]
+    fn test_security_config_consent_explicit() {
+        let toml_str = config_toml(&[(
+            "security",
+            "max_tool_calls_per_turn = 25\nrequire_consent_above = \"high\"\nconsent_timeout_secs = 120\nmax_pending_consent_requests = 10",
+        )]);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(config.security.consent_timeout_secs, 120);
+        assert_eq!(config.security.max_pending_consent_requests, 10);
+    }
+
+    #[test]
+    fn test_default_toml_deserializes_with_consent() {
+        let toml_str = include_str!("../../../config/default.toml");
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.security.consent_timeout_secs, 60);
+        assert_eq!(config.security.max_pending_consent_requests, 5);
     }
 }

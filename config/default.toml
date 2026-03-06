@@ -33,6 +33,8 @@ base_dir = "~/.freebird/conversations"
 [security]
 max_tool_calls_per_turn = 25
 require_consent_above = "high"
+consent_timeout_secs = 60
+max_pending_consent_requests = 5
 
 [daemon]
 host = "127.0.0.1"
