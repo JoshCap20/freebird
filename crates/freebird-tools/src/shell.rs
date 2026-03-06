@@ -265,6 +265,8 @@ pub fn shell_tool(allowed_commands: Vec<String>, max_output_bytes: usize) -> Box
     clippy::needless_pass_by_value
 )]
 mod tests {
+    use std::path::PathBuf;
+
     use freebird_traits::id::SessionId;
     use freebird_traits::tool::{Capability, Tool, ToolContext, ToolError, ToolOutcome};
 
@@ -272,10 +274,39 @@ mod tests {
 
     const TEST_MAX_OUTPUT: usize = 1_048_576;
 
-    fn make_context() -> (SessionId, Vec<Capability>) {
-        let session_id = SessionId::from_string("test-session");
-        let caps = vec![Capability::ShellExecute];
-        (session_id, caps)
+    /// Test harness that owns the temp directory, session ID, and capabilities,
+    /// providing a zero-boilerplate `context()` method for tool tests.
+    struct TestHarness {
+        _tmp: tempfile::TempDir,
+        sandbox: PathBuf,
+        session_id: SessionId,
+        capabilities: Vec<Capability>,
+    }
+
+    impl TestHarness {
+        fn new() -> Self {
+            let tmp = tempfile::tempdir().unwrap();
+            let sandbox = tmp.path().to_path_buf();
+            Self {
+                _tmp: tmp,
+                sandbox,
+                session_id: SessionId::from_string("test-session"),
+                capabilities: vec![Capability::ShellExecute],
+            }
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.sandbox
+        }
+
+        fn context(&self) -> ToolContext<'_> {
+            ToolContext {
+                session_id: &self.session_id,
+                sandbox_root: &self.sandbox,
+                granted_capabilities: &self.capabilities,
+                allowed_directories: &[],
+            }
+        }
     }
 
     fn echo_tool() -> ShellTool {
@@ -290,20 +321,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_allowlisted_command_succeeds() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = echo_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let output = tool
             .execute(
                 serde_json::json!({"command": "echo", "args": ["hello"]}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap();
@@ -317,20 +341,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_allowlisted_command_returns_security_violation() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = ls_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let err = tool
             .execute(
                 serde_json::json!({"command": "rm", "args": ["-rf", "/"]}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap_err();
@@ -350,18 +367,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_allowlist_rejects_all() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = ShellTool::new(Vec::<String>::new(), TEST_MAX_OUTPUT);
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let err = tool
-            .execute(serde_json::json!({"command": "ls"}), &ctx)
+            .execute(serde_json::json!({"command": "ls"}), &h.context())
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::SecurityViolation { .. }));
@@ -369,18 +379,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_command_field_returns_invalid_input() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = echo_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let err = tool
-            .execute(serde_json::json!({"args": ["hello"]}), &ctx)
+            .execute(serde_json::json!({"args": ["hello"]}), &h.context())
             .await
             .unwrap_err();
         match &err {
@@ -394,19 +397,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_command_name_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = echo_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         // Empty string is rejected by SafeShellArg (empty/whitespace-only check)
         let err = tool
-            .execute(serde_json::json!({"command": ""}), &ctx)
+            .execute(serde_json::json!({"command": ""}), &h.context())
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidInput { .. }));
@@ -414,18 +410,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_with_pipe_returns_invalid_input() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = echo_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let err = tool
-            .execute(serde_json::json!({"command": "ls | cat"}), &ctx)
+            .execute(serde_json::json!({"command": "ls | cat"}), &h.context())
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidInput { .. }));
@@ -433,18 +422,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_with_semicolon_returns_invalid_input() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = echo_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let err = tool
-            .execute(serde_json::json!({"command": "ls; rm"}), &ctx)
+            .execute(serde_json::json!({"command": "ls; rm"}), &h.context())
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidInput { .. }));
@@ -452,20 +434,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_arg_with_pipe_returns_invalid_input() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = echo_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let err = tool
             .execute(
                 serde_json::json!({"command": "echo", "args": ["hello | rm -rf /"]}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap_err();
@@ -479,20 +454,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_arg_with_semicolon_returns_invalid_input() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = echo_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let err = tool
             .execute(
                 serde_json::json!({"command": "echo", "args": ["hello; rm"]}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap_err();
@@ -501,20 +469,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_arg_with_backtick_returns_invalid_input() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = echo_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let err = tool
             .execute(
                 serde_json::json!({"command": "echo", "args": ["`whoami`"]}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap_err();
@@ -523,20 +484,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_arg_with_dollar_sign_returns_invalid_input() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = echo_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let err = tool
             .execute(
                 serde_json::json!({"command": "echo", "args": ["$HOME"]}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap_err();
@@ -545,20 +499,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_array_args_returns_invalid_input() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = echo_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let err = tool
             .execute(
                 serde_json::json!({"command": "echo", "args": "hello"}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap_err();
@@ -567,18 +514,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_string_array_element_returns_invalid_input() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = echo_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let err = tool
-            .execute(serde_json::json!({"command": "echo", "args": [42]}), &ctx)
+            .execute(
+                serde_json::json!({"command": "echo", "args": [42]}),
+                &h.context(),
+            )
             .await
             .unwrap_err();
         match &err {
@@ -591,18 +534,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_args_defaults_to_empty() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = echo_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let output = tool
-            .execute(serde_json::json!({"command": "echo"}), &ctx)
+            .execute(serde_json::json!({"command": "echo"}), &h.context())
             .await
             .unwrap();
         assert!(matches!(output.outcome, ToolOutcome::Success));
@@ -610,18 +546,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_args_array_is_valid() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = echo_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let output = tool
-            .execute(serde_json::json!({"command": "echo", "args": []}), &ctx)
+            .execute(
+                serde_json::json!({"command": "echo", "args": []}),
+                &h.context(),
+            )
             .await
             .unwrap();
         assert!(matches!(output.outcome, ToolOutcome::Success));
@@ -631,20 +563,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_successful_command_returns_stdout() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = echo_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let output = tool
             .execute(
                 serde_json::json!({"command": "echo", "args": ["hello"]}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap();
@@ -654,20 +579,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_failed_command_returns_stderr_and_is_error() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = ls_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let output = tool
             .execute(
                 serde_json::json!({"command": "ls", "args": ["nonexistent_dir_xxxxx"]}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap();
@@ -681,20 +599,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_exit_code_in_metadata() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = echo_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let output = tool
             .execute(
                 serde_json::json!({"command": "echo", "args": ["hello"]}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap();
@@ -705,21 +616,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_stderr_separated_by_marker() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = ls_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         // ls on a nonexistent path produces stderr
         let output = tool
             .execute(
                 serde_json::json!({"command": "ls", "args": ["nonexistent_dir_xxxxx"]}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap();
@@ -732,19 +636,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_runs_in_sandbox_root_cwd() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("test_marker.txt"), "marker").unwrap();
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("test_marker.txt"), "marker").unwrap();
         let tool = ls_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let output = tool
-            .execute(serde_json::json!({"command": "ls"}), &ctx)
+            .execute(serde_json::json!({"command": "ls"}), &h.context())
             .await
             .unwrap();
         assert!(matches!(output.outcome, ToolOutcome::Success));
@@ -757,20 +654,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_not_found_returns_execution_failed() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = ShellTool::new(["nonexistent_cmd_xyz_12345".to_string()], TEST_MAX_OUTPUT);
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let err = tool
             .execute(
                 serde_json::json!({"command": "nonexistent_cmd_xyz_12345"}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap_err();
@@ -781,18 +671,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_environment_is_clean() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = ShellTool::new(["env".to_string()], TEST_MAX_OUTPUT);
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let output = tool
-            .execute(serde_json::json!({"command": "env"}), &ctx)
+            .execute(serde_json::json!({"command": "env"}), &h.context())
             .await
             .unwrap();
 
@@ -811,20 +694,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_path_is_restricted() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = ShellTool::new(["printenv".to_string()], TEST_MAX_OUTPUT);
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let output = tool
             .execute(
                 serde_json::json!({"command": "printenv", "args": ["PATH"]}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap();
@@ -834,24 +710,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_output_truncated_at_limit() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         // Create a file with known content > 100 bytes
         let content = "x".repeat(200);
-        std::fs::write(tmp.path().join("big.txt"), &content).unwrap();
+        std::fs::write(h.path().join("big.txt"), &content).unwrap();
 
         let tool = ShellTool::new(["cat".to_string()], 100);
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let output = tool
             .execute(
                 serde_json::json!({"command": "cat", "args": ["big.txt"]}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap();
@@ -866,20 +735,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_zero_max_output_truncates_everything() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = ShellTool::new(["echo".to_string()], 0);
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let output = tool
             .execute(
                 serde_json::json!({"command": "echo", "args": ["hello"]}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap();
@@ -890,20 +752,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_output_not_truncated_when_under_limit() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = ShellTool::new(["echo".to_string()], 1000);
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let output = tool
             .execute(
                 serde_json::json!({"command": "echo", "args": ["short"]}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap();
@@ -917,20 +772,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_stdin_is_closed() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = ShellTool::new(["cat".to_string()], TEST_MAX_OUTPUT);
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         // cat with no args reads from stdin — should exit immediately
         // because stdin is /dev/null
         let output = tool
-            .execute(serde_json::json!({"command": "cat"}), &ctx)
+            .execute(serde_json::json!({"command": "cat"}), &h.context())
             .await
             .unwrap();
         assert!(matches!(output.outcome, ToolOutcome::Success));
@@ -944,13 +792,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_shell_calls_dont_interfere() {
+        // Concurrency test needs two separate sandboxes — can't use single TestHarness
         let tmp1 = tempfile::tempdir().unwrap();
         let tmp2 = tempfile::tempdir().unwrap();
         std::fs::write(tmp1.path().join("file1.txt"), "content1").unwrap();
         std::fs::write(tmp2.path().join("file2.txt"), "content2").unwrap();
 
         let tool = ls_tool();
-        let (sid, caps) = make_context();
+        let sid = SessionId::from_string("test-session");
+        let caps = vec![Capability::ShellExecute];
 
         let ctx1 = ToolContext {
             session_id: &sid,
@@ -980,19 +830,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_too_many_args_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = echo_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let args: Vec<String> = (0..=MAX_ARG_COUNT).map(|i| format!("arg{i}")).collect();
         let err = tool
-            .execute(serde_json::json!({"command": "echo", "args": args}), &ctx)
+            .execute(
+                serde_json::json!({"command": "echo", "args": args}),
+                &h.context(),
+            )
             .await
             .unwrap_err();
         match &err {
@@ -1005,19 +851,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_args_at_limit_succeeds() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = echo_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let args: Vec<String> = (0..MAX_ARG_COUNT).map(|i| format!("arg{i}")).collect();
         let output = tool
-            .execute(serde_json::json!({"command": "echo", "args": args}), &ctx)
+            .execute(
+                serde_json::json!({"command": "echo", "args": args}),
+                &h.context(),
+            )
             .await
             .unwrap();
         assert!(matches!(output.outcome, ToolOutcome::Success));
@@ -1025,21 +867,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_very_long_arg_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = echo_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let long_arg = "a".repeat(5000); // > 4096 SafeShellArg limit
         let err = tool
             .execute(
                 serde_json::json!({"command": "echo", "args": [long_arg]}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap_err();
@@ -1048,19 +883,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_unicode_command_name() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = echo_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         // Unicode passes SafeShellArg (no forbidden chars) but fails allowlist
         let err = tool
-            .execute(serde_json::json!({"command": "\u{1F600}"}), &ctx)
+            .execute(serde_json::json!({"command": "\u{1F600}"}), &h.context())
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::SecurityViolation { .. }));
@@ -1068,20 +896,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_unicode_args_pass_validation() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = echo_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let output = tool
             .execute(
                 serde_json::json!({"command": "echo", "args": ["\u{00E9}\u{00F1}\u{00FC}"]}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap();
@@ -1149,25 +970,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_truncation_at_multibyte_char_boundary() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         // "日" is 3 bytes in UTF-8 (E6 97 A5). Write 10 of them = 30 bytes.
         let content = "日".repeat(10);
-        std::fs::write(tmp.path().join("mb.txt"), &content).unwrap();
+        std::fs::write(h.path().join("mb.txt"), &content).unwrap();
 
         // Set limit to 8 — falls mid-character (3rd char starts at byte 6, ends at 9).
         let tool = ShellTool::new(["cat".to_string()], 8);
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let output = tool
             .execute(
                 serde_json::json!({"command": "cat", "args": ["mb.txt"]}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap();
@@ -1192,22 +1006,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_path_traversal_in_args_constrained_by_sandbox_cwd() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = ls_tool();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         // ".." doesn't contain shell metacharacters, so SafeShellArg allows it.
         // But the command runs with cwd=sandbox_root, so ls sees sandbox parent.
         // This documents that path traversal via args is limited by the sandbox cwd,
         // not by SafeShellArg. Full containment is the ToolExecutor's responsibility.
         let output = tool
-            .execute(serde_json::json!({"command": "ls", "args": [".."] }), &ctx)
+            .execute(
+                serde_json::json!({"command": "ls", "args": [".."] }),
+                &h.context(),
+            )
             .await
             .unwrap();
         // Command succeeds — SafeShellArg does not block ".."

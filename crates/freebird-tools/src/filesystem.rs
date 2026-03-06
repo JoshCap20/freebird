@@ -355,30 +355,58 @@ mod tests {
 
     use super::*;
 
-    fn make_context() -> (SessionId, Vec<Capability>) {
-        let session_id = SessionId::from_string("test-session");
-        let caps = vec![Capability::FileRead, Capability::FileWrite];
-        (session_id, caps)
+    /// Test harness that owns the temp directory, session ID, and capabilities,
+    /// providing a zero-boilerplate `context()` method for tool tests.
+    struct TestHarness {
+        _tmp: tempfile::TempDir,
+        sandbox: PathBuf,
+        session_id: SessionId,
+        capabilities: Vec<Capability>,
+        allowed_directories: Vec<PathBuf>,
+    }
+
+    impl TestHarness {
+        fn new() -> Self {
+            let tmp = tempfile::tempdir().unwrap();
+            let sandbox = tmp.path().to_path_buf();
+            Self {
+                _tmp: tmp,
+                sandbox,
+                session_id: SessionId::from_string("test-session"),
+                capabilities: vec![Capability::FileRead, Capability::FileWrite],
+                allowed_directories: vec![],
+            }
+        }
+
+        fn with_allowed_directories(mut self, dirs: Vec<PathBuf>) -> Self {
+            self.allowed_directories = dirs;
+            self
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.sandbox
+        }
+
+        fn context(&self) -> ToolContext<'_> {
+            ToolContext {
+                session_id: &self.session_id,
+                sandbox_root: &self.sandbox,
+                granted_capabilities: &self.capabilities,
+                allowed_directories: &self.allowed_directories,
+            }
+        }
     }
 
     // ── read_file tests ─────────────────────────────────────────
 
     #[tokio::test]
     async fn test_read_existing_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("hello.txt"), "Hello, world!").unwrap();
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("hello.txt"), "Hello, world!").unwrap();
 
         let tool = ReadFileTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
-
         let output = tool
-            .execute(serde_json::json!({"path": "hello.txt"}), &ctx)
+            .execute(serde_json::json!({"path": "hello.txt"}), &h.context())
             .await
             .unwrap();
         assert_eq!(output.content, "Hello, world!");
@@ -387,18 +415,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_nonexistent_file() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = ReadFileTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let err = tool
-            .execute(serde_json::json!({"path": "nope.txt"}), &ctx)
+            .execute(serde_json::json!({"path": "nope.txt"}), &h.context())
             .await
             .unwrap_err();
         // extract_path calls SafeFilePath::from_tainted which requires the file to exist
@@ -413,18 +434,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_path_traversal_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = ReadFileTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let err = tool
-            .execute(serde_json::json!({"path": "../../../etc/passwd"}), &ctx)
+            .execute(
+                serde_json::json!({"path": "../../../etc/passwd"}),
+                &h.context(),
+            )
             .await
             .unwrap_err();
         match err {
@@ -435,17 +452,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_missing_path_field() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = ReadFileTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
-        let err = tool.execute(serde_json::json!({}), &ctx).await.unwrap_err();
+        let err = tool
+            .execute(serde_json::json!({}), &h.context())
+            .await
+            .unwrap_err();
         match err {
             ToolError::InvalidInput { tool, .. } => assert_eq!(tool, "read_file"),
             other => panic!("expected InvalidInput, got: {other:?}"),
@@ -454,24 +467,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_non_utf8_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let file_path = tmp.path().join("binary.bin");
+        let h = TestHarness::new();
+        let file_path = h.path().join("binary.bin");
         {
             let mut f = std::fs::File::create(&file_path).unwrap();
             f.write_all(&[0xFF, 0xFE, 0x00, 0x01]).unwrap();
         }
 
         let tool = ReadFileTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
-
         let err = tool
-            .execute(serde_json::json!({"path": "binary.bin"}), &ctx)
+            .execute(serde_json::json!({"path": "binary.bin"}), &h.context())
             .await
             .unwrap_err();
         match err {
@@ -482,8 +487,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_file_exceeds_size_limit() {
-        let tmp = tempfile::tempdir().unwrap();
-        let file_path = tmp.path().join("huge.txt");
+        let h = TestHarness::new();
+        let file_path = h.path().join("huge.txt");
         {
             let f = std::fs::File::create(&file_path).unwrap();
             // Set file size to just over the limit without writing all bytes
@@ -491,16 +496,8 @@ mod tests {
         }
 
         let tool = ReadFileTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
-
         let err = tool
-            .execute(serde_json::json!({"path": "huge.txt"}), &ctx)
+            .execute(serde_json::json!({"path": "huge.txt"}), &h.context())
             .await
             .unwrap_err();
         match &err {
@@ -516,20 +513,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_empty_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("empty.txt"), "").unwrap();
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("empty.txt"), "").unwrap();
 
         let tool = ReadFileTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
-
         let output = tool
-            .execute(serde_json::json!({"path": "empty.txt"}), &ctx)
+            .execute(serde_json::json!({"path": "empty.txt"}), &h.context())
             .await
             .unwrap();
         assert_eq!(output.content, "");
@@ -538,18 +527,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_absolute_path_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = ReadFileTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let err = tool
-            .execute(serde_json::json!({"path": "/etc/passwd"}), &ctx)
+            .execute(serde_json::json!({"path": "/etc/passwd"}), &h.context())
             .await
             .unwrap_err();
         match err {
@@ -562,72 +544,50 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_new_file() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = WriteFileTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let output = tool
             .execute(
                 serde_json::json!({"path": "new.txt", "content": "hello"}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap();
         assert!(matches!(output.outcome, ToolOutcome::Success));
 
-        let written = std::fs::read_to_string(tmp.path().join("new.txt")).unwrap();
+        let written = std::fs::read_to_string(h.path().join("new.txt")).unwrap();
         assert_eq!(written, "hello");
     }
 
     #[tokio::test]
     async fn test_write_overwrites_existing() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("existing.txt"), "old content").unwrap();
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("existing.txt"), "old content").unwrap();
 
         let tool = WriteFileTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
-
         let output = tool
             .execute(
                 serde_json::json!({"path": "existing.txt", "content": "new content"}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap();
         assert!(matches!(output.outcome, ToolOutcome::Success));
 
-        let written = std::fs::read_to_string(tmp.path().join("existing.txt")).unwrap();
+        let written = std::fs::read_to_string(h.path().join("existing.txt")).unwrap();
         assert_eq!(written, "new content");
     }
 
     #[tokio::test]
     async fn test_write_path_traversal_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = WriteFileTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let err = tool
             .execute(
                 serde_json::json!({"path": "../../etc/evil", "content": "x"}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap_err();
@@ -639,18 +599,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_missing_path_field() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = WriteFileTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let err = tool
-            .execute(serde_json::json!({"content": "x"}), &ctx)
+            .execute(serde_json::json!({"content": "x"}), &h.context())
             .await
             .unwrap_err();
         match err {
@@ -661,18 +614,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_missing_content_field() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = WriteFileTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let err = tool
-            .execute(serde_json::json!({"path": "file.txt"}), &ctx)
+            .execute(serde_json::json!({"path": "file.txt"}), &h.context())
             .await
             .unwrap_err();
         match err {
@@ -683,20 +629,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_nonexistent_parent_dir() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = WriteFileTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let err = tool
             .execute(
                 serde_json::json!({"path": "nodir/file.txt", "content": "x"}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap_err();
@@ -708,20 +647,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_output_reports_relative_path() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = WriteFileTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let output = tool
             .execute(
                 serde_json::json!({"path": "report.txt", "content": "data"}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap();
@@ -730,7 +662,7 @@ mod tests {
             "output should contain relative path: {}",
             output.content
         );
-        let sandbox_str = tmp.path().to_string_lossy();
+        let sandbox_str = h.path().to_string_lossy();
         assert!(
             !output.content.contains(sandbox_str.as_ref()),
             "output should NOT contain sandbox root: {}",
@@ -740,25 +672,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_no_orphaned_temp_on_success() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = WriteFileTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         tool.execute(
             serde_json::json!({"path": "clean.txt", "content": "data"}),
-            &ctx,
+            &h.context(),
         )
         .await
         .unwrap();
 
         // No .tmp files should remain
-        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+        let entries: Vec<_> = std::fs::read_dir(h.path())
             .unwrap()
             .filter_map(Result::ok)
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
@@ -773,22 +698,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_directory_returns_sorted_entries() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("banana.txt"), "").unwrap();
-        std::fs::write(tmp.path().join("apple.txt"), "").unwrap();
-        std::fs::create_dir(tmp.path().join("cherry_dir")).unwrap();
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("banana.txt"), "").unwrap();
+        std::fs::write(h.path().join("apple.txt"), "").unwrap();
+        std::fs::create_dir(h.path().join("cherry_dir")).unwrap();
 
         let tool = ListDirectoryTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
-
         let output = tool
-            .execute(serde_json::json!({"path": "."}), &ctx)
+            .execute(serde_json::json!({"path": "."}), &h.context())
             .await
             .unwrap();
         assert!(matches!(output.outcome, ToolOutcome::Success));
@@ -803,18 +720,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_nonexistent_directory() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = ListDirectoryTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let err = tool
-            .execute(serde_json::json!({"path": "nonexistent"}), &ctx)
+            .execute(serde_json::json!({"path": "nonexistent"}), &h.context())
             .await
             .unwrap_err();
         match err {
@@ -827,20 +737,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_file_not_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("afile.txt"), "content").unwrap();
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("afile.txt"), "content").unwrap();
 
         let tool = ListDirectoryTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
-
         let err = tool
-            .execute(serde_json::json!({"path": "afile.txt"}), &ctx)
+            .execute(serde_json::json!({"path": "afile.txt"}), &h.context())
             .await
             .unwrap_err();
         match err {
@@ -851,18 +753,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_path_traversal_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = ListDirectoryTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let err = tool
-            .execute(serde_json::json!({"path": "../../"}), &ctx)
+            .execute(serde_json::json!({"path": "../../"}), &h.context())
             .await
             .unwrap_err();
         match err {
@@ -873,20 +768,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_empty_directory() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir(tmp.path().join("empty")).unwrap();
+        let h = TestHarness::new();
+        std::fs::create_dir(h.path().join("empty")).unwrap();
 
         let tool = ListDirectoryTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
-
         let output = tool
-            .execute(serde_json::json!({"path": "empty"}), &ctx)
+            .execute(serde_json::json!({"path": "empty"}), &h.context())
             .await
             .unwrap();
         assert_eq!(output.content, "(empty directory)");
@@ -895,46 +782,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_empty_content() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = WriteFileTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let output = tool
             .execute(
                 serde_json::json!({"path": "empty.txt", "content": ""}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap();
         assert!(matches!(output.outcome, ToolOutcome::Success));
         assert!(output.content.contains("0 bytes"));
 
-        let written = std::fs::read_to_string(tmp.path().join("empty.txt")).unwrap();
+        let written = std::fs::read_to_string(h.path().join("empty.txt")).unwrap();
         assert_eq!(written, "");
     }
 
     #[tokio::test]
     async fn test_write_absolute_path_rejected() {
-        let tmp = tempfile::tempdir().unwrap();
+        let h = TestHarness::new();
         let tool = WriteFileTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
 
         let err = tool
             .execute(
                 serde_json::json!({"path": "/etc/evil", "content": "x"}),
-                &ctx,
+                &h.context(),
             )
             .await
             .unwrap_err();
@@ -946,8 +819,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_directory_truncates_at_limit() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("big");
+        let h = TestHarness::new();
+        let dir = h.path().join("big");
         std::fs::create_dir(&dir).unwrap();
         // Create MAX_DIR_ENTRIES + 5 files to exceed the cap
         for i in 0..MAX_DIR_ENTRIES + 5 {
@@ -955,16 +828,8 @@ mod tests {
         }
 
         let tool = ListDirectoryTool::new();
-        let (sid, caps) = make_context();
-        let ctx = ToolContext {
-            session_id: &sid,
-            sandbox_root: tmp.path(),
-            granted_capabilities: &caps,
-            allowed_directories: &[],
-        };
-
         let output = tool
-            .execute(serde_json::json!({"path": "big"}), &ctx)
+            .execute(serde_json::json!({"path": "big"}), &h.context())
             .await
             .unwrap();
         assert!(matches!(output.outcome, ToolOutcome::Success));
