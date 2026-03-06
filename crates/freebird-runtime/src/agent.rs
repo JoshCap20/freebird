@@ -201,6 +201,12 @@ impl AgentRuntime {
                 tracing::info!(%sender_id, "user disconnected");
                 LoopAction::Continue
             }
+            InboundEvent::ConsentResponse { .. } => {
+                // Consent responses are handled by the consent bridge task,
+                // not the main event loop. Log and continue if one arrives here.
+                tracing::debug!("consent response received in main event loop — ignoring");
+                LoopAction::Continue
+            }
         }
     }
 

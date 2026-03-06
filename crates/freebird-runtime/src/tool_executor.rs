@@ -5,7 +5,7 @@
 //!
 //! 1. Tool lookup
 //! 2. Capability + expiration check via [`CapabilityGrant::check`]
-//! 3. Consent gate (TODO #29)
+//! 3. Consent gate for high-risk tools (ASI09)
 //! 4. Audit logging
 //! 5. Execution with timeout
 //! 6. Injection scan on output via [`ScannedToolOutput::from_raw`]
@@ -19,6 +19,7 @@ use freebird_security::audit::{
     AuditEventType, AuditLogger, CapabilityCheckResult, InjectionSource,
 };
 use freebird_security::capability::CapabilityGrant;
+use freebird_security::consent::{ConsentError, ConsentGate};
 use freebird_security::error::Severity;
 use freebird_security::safe_types::ScannedToolOutput;
 use freebird_traits::id::SessionId;
@@ -47,6 +48,7 @@ pub struct ToolExecutor {
     default_timeout: Duration,
     audit: Option<AuditLogger>,
     allowed_directories: Vec<PathBuf>,
+    consent_gate: Option<ConsentGate>,
 }
 
 impl std::fmt::Debug for ToolExecutor {
@@ -56,6 +58,7 @@ impl std::fmt::Debug for ToolExecutor {
             .field("default_timeout", &self.default_timeout)
             .field("has_audit", &self.audit.is_some())
             .field("allowed_directories", &self.allowed_directories)
+            .field("has_consent_gate", &self.consent_gate.is_some())
             .finish()
     }
 }
@@ -74,6 +77,7 @@ impl ToolExecutor {
         default_timeout: Duration,
         audit: Option<AuditLogger>,
         allowed_directories: Vec<PathBuf>,
+        consent_gate: Option<ConsentGate>,
     ) -> Result<Self, ToolExecutorError> {
         let mut map = HashMap::with_capacity(tools.len());
         for tool in tools {
@@ -94,6 +98,7 @@ impl ToolExecutor {
             default_timeout,
             audit,
             allowed_directories,
+            consent_gate,
         })
     }
 
@@ -136,12 +141,28 @@ impl ToolExecutor {
         self.tools.len()
     }
 
+    /// Forward a user's consent response to the internal consent gate.
+    ///
+    /// Returns `true` if the response was delivered, `false` if the request
+    /// was not found (already expired, already responded, or no consent gate).
+    pub async fn consent_respond(
+        &self,
+        request_id: &str,
+        response: freebird_security::consent::ConsentResponse,
+    ) -> bool {
+        if let Some(ref gate) = self.consent_gate {
+            gate.respond(request_id, response).await
+        } else {
+            false
+        }
+    }
+
     /// Execute a tool by name. This is the ONLY entry point for tool execution.
     ///
     /// Enforces the mandatory security sequence from CLAUDE.md §11.2:
     /// 1. Tool lookup → error if not found (audit: Denied)
     /// 2. Capability check via `CapabilityGrant::check()` (audit: Denied)
-    /// 3. TODO #29: consent gate for High/Critical risk tools
+    /// 3. Consent gate for High/Critical risk tools (ASI09)
     /// 4. Audit: Granted
     /// 5. Build `ToolContext` from grant data and execute with timeout
     /// 6. Injection scan on non-error output via `ScannedToolOutput::from_raw()`
@@ -188,9 +209,13 @@ impl ToolExecutor {
             };
         }
 
-        // 3. TODO #29: consent gate for High/Critical risk tools
-        //    When consent gates land, High/Critical risk tools will block
-        //    here until the user approves or the request times out.
+        // 3. Consent gate for High/Critical risk tools (ASI09)
+        if let Some(output) = self
+            .check_consent(tool_name, tool.info(), &input, session_id)
+            .await
+        {
+            return output;
+        }
 
         // 4. Audit: capability check passed
         self.audit_tool_invocation(session_id, tool_name, CapabilityCheckResult::Granted)
@@ -308,6 +333,128 @@ impl ToolExecutor {
         }
     }
 
+    /// Check consent for a tool invocation. Returns `Some(ToolOutput)` to abort
+    /// execution (denied/expired/error), or `None` to proceed.
+    async fn check_consent(
+        &self,
+        tool_name: &str,
+        tool_info: &freebird_traits::tool::ToolInfo,
+        input: &serde_json::Value,
+        session_id: &SessionId,
+    ) -> Option<ToolOutput> {
+        // Truncate action summary to avoid leaking large tool inputs (e.g. file contents)
+        // through the consent channel. 512 chars is enough for a human to make a decision.
+        const MAX_SUMMARY_LEN: usize = 512;
+
+        let consent = self.consent_gate.as_ref()?;
+        let raw_summary =
+            serde_json::to_string(input).unwrap_or_else(|_| "<unserializable input>".into());
+        let action_summary = if raw_summary.len() > MAX_SUMMARY_LEN {
+            format!(
+                "{}… ({} bytes total)",
+                &raw_summary[..MAX_SUMMARY_LEN],
+                raw_summary.len()
+            )
+        } else {
+            raw_summary
+        };
+        match consent.check(tool_info, action_summary).await {
+            Ok(()) => {
+                self.audit_consent_granted(session_id, tool_name).await;
+                None
+            }
+            Err(ConsentError::Denied { tool, reason }) => {
+                tracing::warn!(%tool, %reason, %session_id, "consent denied for tool");
+                self.audit_consent_denied(session_id, &tool, Some(&reason))
+                    .await;
+                Some(ToolOutput {
+                    content: format!("Consent denied for tool `{tool}`: {reason}"),
+                    outcome: ToolOutcome::Error,
+                    metadata: None,
+                })
+            }
+            Err(ConsentError::Expired { tool, timeout_secs }) => {
+                tracing::warn!(%tool, timeout_secs, %session_id, "consent expired for tool");
+                self.audit_consent_expired(session_id, &tool).await;
+                Some(ToolOutput {
+                    content: format!("Consent expired for tool `{tool}` after {timeout_secs}s"),
+                    outcome: ToolOutcome::Error,
+                    metadata: None,
+                })
+            }
+            Err(ConsentError::TooManyPending { tool, max }) => {
+                tracing::warn!(%tool, max, %session_id, "too many pending consent requests");
+                Some(ToolOutput {
+                    content: format!("Too many pending consent requests ({max}); denying `{tool}`"),
+                    outcome: ToolOutcome::Error,
+                    metadata: None,
+                })
+            }
+            Err(ConsentError::ChannelClosed) => {
+                tracing::warn!(%session_id, "consent channel closed");
+                Some(ToolOutput {
+                    content: "Consent channel closed — cannot request approval".into(),
+                    outcome: ToolOutcome::Error,
+                    metadata: None,
+                })
+            }
+        }
+    }
+
+    async fn audit_consent_granted(&self, session_id: &SessionId, tool_name: &str) {
+        if let Some(audit) = &self.audit {
+            if let Err(e) = audit
+                .record(
+                    session_id.as_str(),
+                    AuditEventType::ConsentGranted {
+                        tool_name: tool_name.into(),
+                    },
+                )
+                .await
+            {
+                tracing::error!(error = %e, "failed to write consent granted audit event");
+            }
+        }
+    }
+
+    async fn audit_consent_denied(
+        &self,
+        session_id: &SessionId,
+        tool_name: &str,
+        reason: Option<&str>,
+    ) {
+        if let Some(audit) = &self.audit {
+            if let Err(e) = audit
+                .record(
+                    session_id.as_str(),
+                    AuditEventType::ConsentDenied {
+                        tool_name: tool_name.into(),
+                        reason: reason.map(Into::into),
+                    },
+                )
+                .await
+            {
+                tracing::error!(error = %e, "failed to write consent denied audit event");
+            }
+        }
+    }
+
+    async fn audit_consent_expired(&self, session_id: &SessionId, tool_name: &str) {
+        if let Some(audit) = &self.audit {
+            if let Err(e) = audit
+                .record(
+                    session_id.as_str(),
+                    AuditEventType::ConsentExpired {
+                        tool_name: tool_name.into(),
+                    },
+                )
+                .await
+            {
+                tracing::error!(error = %e, "failed to write consent expired audit event");
+            }
+        }
+    }
+
     async fn audit_injection_detected(&self, session_id: &SessionId, pattern: &str) {
         if let Some(audit) = &self.audit {
             if let Err(e) = audit
@@ -342,6 +489,7 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use freebird_security::audit::AuditLine;
+    use freebird_security::consent::{ConsentGate, ConsentResponse};
     use freebird_traits::tool::{RiskLevel, SideEffects, ToolError, ToolInfo};
     use ring::hmac;
     use tempfile::TempDir;
@@ -396,6 +544,11 @@ mod tests {
 
         fn with_sleep(mut self, ms: u64) -> Self {
             self.sleep_ms = Some(ms);
+            self
+        }
+
+        fn with_risk_level(mut self, level: RiskLevel) -> Self {
+            self.info.risk_level = level;
             self
         }
 
@@ -510,6 +663,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -531,6 +685,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -553,6 +708,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
         )
         .unwrap();
         let grant = expired_grant(&path, &[Capability::FileRead]);
@@ -579,6 +735,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -605,6 +762,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -626,6 +784,7 @@ mod tests {
             StdDuration::from_millis(50),
             None,
             vec![],
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -650,6 +809,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -673,6 +833,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -692,8 +853,14 @@ mod tests {
     async fn test_unknown_tool_audits_denied() {
         let (tmp, path) = sandbox();
         let (logger, log_path) = make_audit_logger(&tmp);
-        let executor =
-            ToolExecutor::new(vec![], StdDuration::from_secs(5), Some(logger), vec![]).unwrap();
+        let executor = ToolExecutor::new(
+            vec![],
+            StdDuration::from_secs(5),
+            Some(logger),
+            vec![],
+            None,
+        )
+        .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let _ = executor
@@ -721,6 +888,7 @@ mod tests {
             StdDuration::from_secs(5),
             Some(logger),
             vec![],
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -750,6 +918,7 @@ mod tests {
             StdDuration::from_secs(5),
             Some(logger),
             vec![],
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -779,6 +948,7 @@ mod tests {
             StdDuration::from_millis(50),
             Some(logger),
             vec![],
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -807,6 +977,7 @@ mod tests {
             StdDuration::from_secs(5),
             Some(logger),
             vec![],
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -831,7 +1002,8 @@ mod tests {
     #[tokio::test]
     async fn test_no_audit_when_logger_is_none() {
         let (_tmp, path) = sandbox();
-        let executor = ToolExecutor::new(vec![], StdDuration::from_secs(5), None, vec![]).unwrap();
+        let executor =
+            ToolExecutor::new(vec![], StdDuration::from_secs(5), None, vec![], None).unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         // Should not panic
@@ -852,6 +1024,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
         );
         let err = result.expect_err("should fail");
         assert!(err.to_string().contains("duplicate tool name"));
@@ -859,14 +1032,16 @@ mod tests {
 
     #[test]
     fn test_empty_executor() {
-        let executor = ToolExecutor::new(vec![], StdDuration::from_secs(5), None, vec![]).unwrap();
+        let executor =
+            ToolExecutor::new(vec![], StdDuration::from_secs(5), None, vec![], None).unwrap();
         assert_eq!(executor.tool_count(), 0);
         assert!(executor.tool_definitions().is_empty());
     }
 
     #[test]
     fn test_get_returns_none_for_unknown() {
-        let executor = ToolExecutor::new(vec![], StdDuration::from_secs(5), None, vec![]).unwrap();
+        let executor =
+            ToolExecutor::new(vec![], StdDuration::from_secs(5), None, vec![], None).unwrap();
         assert!(executor.get("nonexistent").is_none());
     }
 
@@ -878,6 +1053,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
         )
         .unwrap();
         let found = executor.get("my_tool");
@@ -897,6 +1073,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
         )
         .unwrap();
 
@@ -920,6 +1097,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead, Capability::FileWrite]);
@@ -938,6 +1116,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
         )
         .unwrap();
         let grant = expired_grant(&path, &[Capability::FileRead]);
@@ -960,6 +1139,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead, Capability::FileWrite]);
@@ -974,5 +1154,310 @@ mod tests {
         assert_eq!(out_a.content, "result_a");
         assert_eq!(out_b.outcome, ToolOutcome::Success);
         assert_eq!(out_b.content, "result_b");
+    }
+
+    // ── Consent gate tests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_consent_gate_none_skips_check_for_high_risk() {
+        let (_tmp, path) = sandbox();
+        let tool = MockTool::new("shell", Capability::ShellExecute)
+            .with_risk_level(RiskLevel::High)
+            .with_output("done", ToolOutcome::Success);
+        let executor = ToolExecutor::new(
+            vec![Box::new(tool)],
+            StdDuration::from_secs(5),
+            None,
+            vec![],
+            None,
+        )
+        .unwrap();
+        let grant = grant_with_caps(&path, &[Capability::ShellExecute]);
+
+        let output = executor
+            .execute("shell", serde_json::json!({}), &grant, &session_id())
+            .await;
+
+        assert_eq!(output.outcome, ToolOutcome::Success);
+        assert_eq!(output.content, "done");
+    }
+
+    #[tokio::test]
+    async fn test_consent_gate_low_risk_auto_approved() {
+        let (_tmp, path) = sandbox();
+        let (gate, mut rx) = ConsentGate::new(RiskLevel::High, StdDuration::from_secs(60), 5);
+        let tool = MockTool::new("read_file", Capability::FileRead)
+            .with_risk_level(RiskLevel::Low)
+            .with_output("file data", ToolOutcome::Success);
+        let executor = ToolExecutor::new(
+            vec![Box::new(tool)],
+            StdDuration::from_secs(5),
+            None,
+            vec![],
+            Some(gate),
+        )
+        .unwrap();
+        let grant = grant_with_caps(&path, &[Capability::FileRead]);
+
+        let output = executor
+            .execute("read_file", serde_json::json!({}), &grant, &session_id())
+            .await;
+
+        assert_eq!(output.outcome, ToolOutcome::Success);
+        assert_eq!(output.content, "file data");
+        // No consent request should have been sent.
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_consent_gate_approved_executes_tool() {
+        let (_tmp, path) = sandbox();
+        let (gate, mut rx) = ConsentGate::new(RiskLevel::High, StdDuration::from_secs(60), 5);
+        let tool = MockTool::new("shell", Capability::ShellExecute)
+            .with_risk_level(RiskLevel::High)
+            .with_output("executed", ToolOutcome::Success);
+        let executor = Arc::new(
+            ToolExecutor::new(
+                vec![Box::new(tool)],
+                StdDuration::from_secs(5),
+                None,
+                vec![],
+                Some(gate),
+            )
+            .unwrap(),
+        );
+        let grant = grant_with_caps(&path, &[Capability::ShellExecute]);
+        let sid = session_id();
+
+        let exec = Arc::clone(&executor);
+        let handle = tokio::spawn(async move {
+            exec.execute("shell", serde_json::json!({"cmd": "ls"}), &grant, &sid)
+                .await
+        });
+
+        let req = rx.recv().await.unwrap();
+        assert_eq!(req.tool_name, "shell");
+        executor
+            .consent_respond(&req.id, ConsentResponse::Approved)
+            .await;
+
+        let output = handle.await.unwrap();
+        assert_eq!(output.outcome, ToolOutcome::Success);
+        assert_eq!(output.content, "executed");
+    }
+
+    #[tokio::test]
+    async fn test_consent_gate_denied_returns_error() {
+        let (_tmp, path) = sandbox();
+        let (gate, mut rx) = ConsentGate::new(RiskLevel::High, StdDuration::from_secs(60), 5);
+        let tool =
+            MockTool::new("shell", Capability::ShellExecute).with_risk_level(RiskLevel::High);
+        let executor = Arc::new(
+            ToolExecutor::new(
+                vec![Box::new(tool)],
+                StdDuration::from_secs(5),
+                None,
+                vec![],
+                Some(gate),
+            )
+            .unwrap(),
+        );
+        let grant = grant_with_caps(&path, &[Capability::ShellExecute]);
+        let sid = session_id();
+
+        let exec = Arc::clone(&executor);
+        let handle = tokio::spawn(async move {
+            exec.execute("shell", serde_json::json!({}), &grant, &sid)
+                .await
+        });
+
+        let req = rx.recv().await.unwrap();
+        executor
+            .consent_respond(
+                &req.id,
+                ConsentResponse::Denied {
+                    reason: Some("too risky".into()),
+                },
+            )
+            .await;
+
+        let output = handle.await.unwrap();
+        assert_eq!(output.outcome, ToolOutcome::Error);
+        assert!(output.content.contains("Consent denied"));
+        assert!(output.content.contains("too risky"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_consent_gate_expired_returns_error() {
+        let (_tmp, path) = sandbox();
+        let (gate, _rx) = ConsentGate::new(RiskLevel::High, StdDuration::from_secs(5), 5);
+        let tool =
+            MockTool::new("shell", Capability::ShellExecute).with_risk_level(RiskLevel::High);
+        let executor = ToolExecutor::new(
+            vec![Box::new(tool)],
+            StdDuration::from_secs(30),
+            None,
+            vec![],
+            Some(gate),
+        )
+        .unwrap();
+        let grant = grant_with_caps(&path, &[Capability::ShellExecute]);
+
+        let output = executor
+            .execute("shell", serde_json::json!({}), &grant, &session_id())
+            .await;
+
+        assert_eq!(output.outcome, ToolOutcome::Error);
+        assert!(output.content.contains("expired"));
+    }
+
+    #[tokio::test]
+    async fn test_consent_gate_too_many_pending() {
+        let (_tmp, path) = sandbox();
+        let (gate, mut rx) = ConsentGate::new(RiskLevel::High, StdDuration::from_secs(60), 1);
+        let tool =
+            MockTool::new("shell", Capability::ShellExecute).with_risk_level(RiskLevel::High);
+        let executor = Arc::new(
+            ToolExecutor::new(
+                vec![Box::new(tool)],
+                StdDuration::from_secs(5),
+                None,
+                vec![],
+                Some(gate),
+            )
+            .unwrap(),
+        );
+        let grant = grant_with_caps(&path, &[Capability::ShellExecute]);
+        let sid = session_id();
+
+        // First request — will block waiting for consent.
+        let exec1 = Arc::clone(&executor);
+        let g1 = grant_with_caps(&path, &[Capability::ShellExecute]);
+        let s1 = sid.clone();
+        let _h1 = tokio::spawn(async move {
+            exec1
+                .execute("shell", serde_json::json!({}), &g1, &s1)
+                .await
+        });
+
+        // Wait for the first request to arrive.
+        let _req = rx.recv().await.unwrap();
+
+        // Second request should fail with TooManyPending.
+        let output = executor
+            .execute("shell", serde_json::json!({}), &grant, &sid)
+            .await;
+
+        assert_eq!(output.outcome, ToolOutcome::Error);
+        assert!(output.content.contains("Too many pending"));
+    }
+
+    #[tokio::test]
+    async fn test_consent_gate_audits_granted() {
+        let (tmp, path) = sandbox();
+        let (logger, log_path) = make_audit_logger(&tmp);
+        let (gate, mut rx) = ConsentGate::new(RiskLevel::High, StdDuration::from_secs(60), 5);
+        let tool = MockTool::new("shell", Capability::ShellExecute)
+            .with_risk_level(RiskLevel::High)
+            .with_output("ok", ToolOutcome::Success);
+        let executor = Arc::new(
+            ToolExecutor::new(
+                vec![Box::new(tool)],
+                StdDuration::from_secs(5),
+                Some(logger),
+                vec![],
+                Some(gate),
+            )
+            .unwrap(),
+        );
+        let grant = grant_with_caps(&path, &[Capability::ShellExecute]);
+        let sid = session_id();
+
+        let exec = Arc::clone(&executor);
+        let handle = tokio::spawn(async move {
+            exec.execute("shell", serde_json::json!({}), &grant, &sid)
+                .await
+        });
+
+        let req = rx.recv().await.unwrap();
+        executor
+            .consent_respond(&req.id, ConsentResponse::Approved)
+            .await;
+        handle.await.unwrap();
+
+        let events = read_audit_events(&log_path);
+        // Flow: ConsentGranted (step 3), then ToolInvocation(Granted) (step 4)
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AuditEventType::ConsentGranted { tool_name } if tool_name == "shell"
+        )));
+    }
+
+    #[tokio::test]
+    async fn test_consent_gate_audits_denied() {
+        let (tmp, path) = sandbox();
+        let (logger, log_path) = make_audit_logger(&tmp);
+        let (gate, mut rx) = ConsentGate::new(RiskLevel::High, StdDuration::from_secs(60), 5);
+        let tool =
+            MockTool::new("shell", Capability::ShellExecute).with_risk_level(RiskLevel::High);
+        let executor = Arc::new(
+            ToolExecutor::new(
+                vec![Box::new(tool)],
+                StdDuration::from_secs(5),
+                Some(logger),
+                vec![],
+                Some(gate),
+            )
+            .unwrap(),
+        );
+        let grant = grant_with_caps(&path, &[Capability::ShellExecute]);
+        let sid = session_id();
+
+        let exec = Arc::clone(&executor);
+        let handle = tokio::spawn(async move {
+            exec.execute("shell", serde_json::json!({}), &grant, &sid)
+                .await
+        });
+
+        let req = rx.recv().await.unwrap();
+        executor
+            .consent_respond(
+                &req.id,
+                ConsentResponse::Denied {
+                    reason: Some("nope".into()),
+                },
+            )
+            .await;
+        handle.await.unwrap();
+
+        let events = read_audit_events(&log_path);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AuditEventType::ConsentDenied { tool_name, reason }
+                if tool_name == "shell" && reason.as_deref() == Some("nope")
+        )));
+    }
+
+    #[tokio::test]
+    async fn test_consent_respond_unknown_request_returns_false() {
+        let (gate, _rx) = ConsentGate::new(RiskLevel::High, StdDuration::from_secs(60), 5);
+        let executor =
+            ToolExecutor::new(vec![], StdDuration::from_secs(5), None, vec![], Some(gate)).unwrap();
+
+        let result = executor
+            .consent_respond("nonexistent-id", ConsentResponse::Approved)
+            .await;
+        assert!(!result, "unknown request_id should return false");
+    }
+
+    #[tokio::test]
+    async fn test_consent_respond_no_gate_returns_false() {
+        let executor =
+            ToolExecutor::new(vec![], StdDuration::from_secs(5), None, vec![], None).unwrap();
+
+        let result = executor
+            .consent_respond("any-id", ConsentResponse::Approved)
+            .await;
+        assert!(!result, "no consent gate should return false");
     }
 }

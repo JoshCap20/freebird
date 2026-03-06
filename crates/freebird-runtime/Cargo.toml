@@ -25,3 +25,4 @@ tokio-util = { workspace = true }
 freebird-memory = { path = "../freebird-memory" }
 tempfile = { workspace = true }
 ring = { workspace = true }
+tokio = { version = "1", features = ["full", "test-util"] }

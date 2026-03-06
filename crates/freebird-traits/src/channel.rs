@@ -75,6 +75,13 @@ pub enum InboundEvent {
         args: Vec<String>,
         sender_id: String,
     },
+    /// A user's response to a consent request.
+    ConsentResponse {
+        request_id: String,
+        approved: bool,
+        reason: Option<String>,
+        sender_id: String,
+    },
 }
 
 /// An outbound event to send to the user via the channel.
@@ -108,6 +115,16 @@ pub enum OutboundEvent {
     },
     /// The full agentic turn is complete — no more events for this user message.
     TurnComplete {
+        recipient_id: String,
+    },
+    /// A consent request for the user to approve or deny a high-risk tool.
+    ConsentRequest {
+        request_id: String,
+        tool_name: String,
+        description: String,
+        risk_level: String,
+        action_summary: String,
+        expires_at: String,
         recipient_id: String,
     },
 }
@@ -167,7 +184,7 @@ pub enum ChannelError {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -233,6 +250,61 @@ mod tests {
             auth: AuthRequirement::Required,
         };
         assert_eq!(info.id.as_str(), "websocket");
+    }
+
+    #[test]
+    fn test_outbound_consent_request_serde_roundtrip() {
+        let event = OutboundEvent::ConsentRequest {
+            request_id: "req-123".into(),
+            tool_name: "shell".into(),
+            description: "execute shell commands".into(),
+            risk_level: "high".into(),
+            action_summary: "rm -rf /tmp/test".into(),
+            expires_at: "2026-03-06T12:00:00Z".into(),
+            recipient_id: "user-1".into(),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        let back: OutboundEvent = serde_json::from_str(&json).unwrap();
+        match back {
+            OutboundEvent::ConsentRequest {
+                request_id,
+                tool_name,
+                risk_level,
+                ..
+            } => {
+                assert_eq!(request_id, "req-123");
+                assert_eq!(tool_name, "shell");
+                assert_eq!(risk_level, "high");
+            }
+            _ => panic!("expected ConsentRequest"),
+        }
+    }
+
+    #[test]
+    fn test_inbound_consent_response_serde_roundtrip() {
+        let event = InboundEvent::ConsentResponse {
+            request_id: "req-456".into(),
+            approved: false,
+            reason: Some("too risky".into()),
+            sender_id: "user-1".into(),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        let back: InboundEvent = serde_json::from_str(&json).unwrap();
+        match back {
+            InboundEvent::ConsentResponse {
+                request_id,
+                approved,
+                reason,
+                ..
+            } => {
+                assert_eq!(request_id, "req-456");
+                assert!(!approved);
+                assert_eq!(reason.unwrap(), "too risky");
+            }
+            _ => panic!("expected ConsentResponse"),
+        }
     }
 
     #[test]
