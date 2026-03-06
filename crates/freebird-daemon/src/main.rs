@@ -103,17 +103,18 @@ async fn cmd_serve() -> Result<()> {
         .context("failed to initialize file memory backend")?;
 
     // 7. TOOLS
-    let sandbox_root = expand_tilde(&config.tools.sandbox_root)?;
-    tokio::fs::create_dir_all(&sandbox_root)
+    let mut tools_config = config.tools;
+    tools_config.sandbox_root = expand_tilde(&tools_config.sandbox_root)?;
+    tokio::fs::create_dir_all(&tools_config.sandbox_root)
         .await
         .with_context(|| {
             format!(
                 "failed to create sandbox directory `{}`",
-                sandbox_root.display()
+                tools_config.sandbox_root.display()
             )
         })?;
     let tools: Vec<Box<dyn freebird_traits::tool::Tool>> =
-        freebird_tools::filesystem::filesystem_tools(sandbox_root);
+        freebird_tools::filesystem::filesystem_tools(tools_config.sandbox_root.clone());
 
     // 8. SHUTDOWN COORDINATOR
     let shutdown = ShutdownCoordinator::new(Duration::from_secs(config.runtime.drain_timeout_secs));
@@ -137,7 +138,7 @@ async fn cmd_serve() -> Result<()> {
         tools,
         Box::new(memory),
         config.runtime,
-        config.tools,
+        tools_config,
         None, // audit logger — wired in a later issue
     );
 
