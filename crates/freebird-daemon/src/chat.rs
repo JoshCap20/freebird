@@ -9,6 +9,53 @@ use tokio::net::TcpStream;
 
 use freebird_types::protocol::{ClientMessage, ServerMessage};
 
+// ── ANSI styling ─────────────────────────────────────────────────────────────
+
+/// Raw ANSI escape codes for terminal styling.
+///
+/// Only used when `is_tty == true` — non-tty output stays plain for test
+/// determinism and piped usage.
+mod style {
+    pub const RESET: &str = "\x1b[0m";
+    pub const BOLD: &str = "\x1b[1m";
+    pub const DIM: &str = "\x1b[2m";
+    pub const CYAN: &str = "\x1b[36m";
+    pub const GREEN: &str = "\x1b[32m";
+    pub const RED: &str = "\x1b[31m";
+    pub const YELLOW: &str = "\x1b[33m";
+    pub const MAGENTA: &str = "\x1b[35m";
+
+    #[must_use]
+    pub fn user_prompt() -> String {
+        format!("{BOLD}{CYAN}You:{RESET} ")
+    }
+
+    #[must_use]
+    pub fn bot_prefix() -> String {
+        format!("{BOLD}{GREEN}FreeBird:{RESET} ")
+    }
+
+    #[must_use]
+    pub fn error_prefix(text: &str) -> String {
+        format!("{BOLD}{RED}error:{RESET} {text}\n")
+    }
+
+    #[must_use]
+    pub fn tool_start(name: &str) -> String {
+        format!("{DIM}{YELLOW}  ⚙ {name}...{RESET}\n")
+    }
+
+    #[must_use]
+    pub fn tool_end(name: &str, outcome: &str, ms: u64) -> String {
+        format!("{DIM}{YELLOW}  ✓ {name} ({outcome}, {ms}ms){RESET}\n")
+    }
+
+    #[must_use]
+    pub fn system_msg(text: &str) -> String {
+        format!("{DIM}{MAGENTA}[{text}]{RESET}\n")
+    }
+}
+
 // ── Help text ────────────────────────────────────────────────────────────────
 
 /// Client-side help text printed by `/help` without a daemon round-trip.
@@ -81,15 +128,41 @@ pub fn parse_user_input(line: &str) -> ParseResult {
 /// Streaming chunks are returned as-is (no trailing newline) so they can be
 /// printed incrementally. The caller is responsible for printing the
 /// `FreeBird: ` prefix before the first chunk of each response.
+///
+/// When `is_tty` is true, ANSI styling is applied to errors and tool events.
 #[must_use]
-pub fn render_server_message(msg: &ServerMessage) -> String {
+pub fn render_server_message(msg: &ServerMessage, is_tty: bool) -> String {
     match msg {
         ServerMessage::Message { text } | ServerMessage::CommandResponse { text } => {
             format!("{text}\n")
         }
         ServerMessage::StreamChunk { text } => text.clone(),
         ServerMessage::StreamEnd => "\n".to_string(),
-        ServerMessage::Error { text } => format!("error: {text}\n"),
+        ServerMessage::Error { text } => {
+            if is_tty {
+                style::error_prefix(text)
+            } else {
+                format!("error: {text}\n")
+            }
+        }
+        ServerMessage::ToolStart { tool_name } => {
+            if is_tty {
+                style::tool_start(tool_name)
+            } else {
+                format!("[tool: {tool_name}...]\n")
+            }
+        }
+        ServerMessage::ToolEnd {
+            tool_name,
+            outcome,
+            duration_ms,
+        } => {
+            if is_tty {
+                style::tool_end(tool_name, outcome, *duration_ms)
+            } else {
+                format!("[tool: {tool_name} {outcome} {duration_ms}ms]\n")
+            }
+        }
     }
 }
 
@@ -126,13 +199,7 @@ where
     let mut in_stream = false;
 
     // Print the first prompt before the loop so the user sees it immediately.
-    if is_tty {
-        user_output
-            .write_all(b"You: ")
-            .await
-            .context("writing prompt")?;
-        user_output.flush().await.context("flushing prompt")?;
-    }
+    write_prompt(&mut user_output, is_tty).await?;
 
     loop {
         tokio::select! {
@@ -141,10 +208,7 @@ where
                     let trimmed = line.trim().to_string();
                     if trimmed.is_empty() {
                         // Re-print prompt on blank input
-                        if is_tty {
-                            user_output.write_all(b"You: ").await.context("writing prompt")?;
-                            user_output.flush().await.context("flushing prompt")?;
-                        }
+                        write_prompt(&mut user_output, is_tty).await?;
                         continue;
                     }
 
@@ -157,10 +221,7 @@ where
                             user_output.write_all(text.as_bytes()).await.context("writing local output")?;
                             user_output.flush().await.context("flushing local output")?;
                             // Re-print prompt after local output
-                            if is_tty {
-                                user_output.write_all(b"You: ").await.context("writing prompt")?;
-                                user_output.flush().await.context("flushing prompt")?;
-                            }
+                            write_prompt(&mut user_output, is_tty).await?;
                         }
                         ParseResult::Send(client_msg) => {
                             send_client_message(&mut socket_write, &client_msg).await?;
@@ -179,11 +240,13 @@ where
                     ).await?;
                 } else {
                     // Server disconnected — tell the user and suggest next steps.
-                    user_output
-                        .write_all(
-                            b"[daemon disconnected]\nRun 'freebird serve' to start the daemon.\n",
-                        )
-                        .await?;
+                    let notice = if is_tty {
+                        style::system_msg("daemon disconnected — run 'freebird serve' to restart")
+                    } else {
+                        "[daemon disconnected]\nRun 'freebird serve' to start the daemon.\n"
+                            .to_string()
+                    };
+                    user_output.write_all(notice.as_bytes()).await?;
                     user_output.flush().await?;
                     return Ok(());
                 }
@@ -214,6 +277,7 @@ async fn handle_daemon_line<O: AsyncWrite + Unpin>(
     };
 
     // Print "FreeBird: " prefix before the first token of each response.
+    // Tool events render their own prefix, so they skip this.
     let needs_prefix = is_tty
         && match &msg {
             ServerMessage::StreamChunk { .. } if !in_stream => true,
@@ -224,8 +288,13 @@ async fn handle_daemon_line<O: AsyncWrite + Unpin>(
         };
 
     if needs_prefix {
+        let prefix = if is_tty {
+            style::bot_prefix()
+        } else {
+            "FreeBird: ".to_string()
+        };
         user_output
-            .write_all(b"FreeBird: ")
+            .write_all(prefix.as_bytes())
             .await
             .context("writing response prefix")?;
     }
@@ -235,18 +304,13 @@ async fn handle_daemon_line<O: AsyncWrite + Unpin>(
         ServerMessage::StreamChunk { .. } => true,
         ServerMessage::StreamEnd => {
             // After stream ends, print the next prompt.
-            if is_tty {
-                user_output
-                    .write_all(b"You: ")
-                    .await
-                    .context("writing prompt")?;
-            }
+            write_prompt(user_output, is_tty).await?;
             false
         }
         _ => false,
     };
 
-    let rendered = render_server_message(&msg);
+    let rendered = render_server_message(&msg, is_tty);
     user_output
         .write_all(rendered.as_bytes())
         .await
@@ -254,22 +318,33 @@ async fn handle_daemon_line<O: AsyncWrite + Unpin>(
     user_output.flush().await.context("flushing output")?;
 
     // For non-streaming complete responses, print the next prompt now.
+    // Tool events do NOT trigger a prompt — more messages follow.
     if is_tty {
         match &msg {
             ServerMessage::Message { .. }
             | ServerMessage::CommandResponse { .. }
             | ServerMessage::Error { .. } => {
-                user_output
-                    .write_all(b"You: ")
-                    .await
-                    .context("writing prompt")?;
-                user_output.flush().await.context("flushing prompt")?;
+                write_prompt(user_output, is_tty).await?;
             }
             _ => {}
         }
     }
 
     Ok(new_in_stream)
+}
+
+/// Write the user input prompt (styled when tty).
+async fn write_prompt<O: AsyncWrite + Unpin>(output: &mut O, is_tty: bool) -> Result<()> {
+    if !is_tty {
+        return Ok(());
+    }
+    let prompt = style::user_prompt();
+    output
+        .write_all(prompt.as_bytes())
+        .await
+        .context("writing prompt")?;
+    output.flush().await.context("flushing prompt")?;
+    Ok(())
 }
 
 /// Send a [`ClientMessage`] as a JSON line over the socket.
@@ -382,7 +457,7 @@ mod tests {
     #[test]
     fn render_message() {
         let msg = ServerMessage::Message { text: "hi".into() };
-        assert_eq!(render_server_message(&msg), "hi\n");
+        assert_eq!(render_server_message(&msg, false), "hi\n");
     }
 
     #[test]
@@ -390,12 +465,15 @@ mod tests {
         let msg = ServerMessage::StreamChunk {
             text: "partial".into(),
         };
-        assert_eq!(render_server_message(&msg), "partial");
+        assert_eq!(render_server_message(&msg, false), "partial");
     }
 
     #[test]
     fn render_stream_end() {
-        assert_eq!(render_server_message(&ServerMessage::StreamEnd), "\n");
+        assert_eq!(
+            render_server_message(&ServerMessage::StreamEnd, false),
+            "\n"
+        );
     }
 
     #[test]
@@ -403,13 +481,60 @@ mod tests {
         let msg = ServerMessage::Error {
             text: "boom".into(),
         };
-        assert_eq!(render_server_message(&msg), "error: boom\n");
+        assert_eq!(render_server_message(&msg, false), "error: boom\n");
     }
 
     #[test]
     fn render_command_response() {
         let msg = ServerMessage::CommandResponse { text: "ok".into() };
-        assert_eq!(render_server_message(&msg), "ok\n");
+        assert_eq!(render_server_message(&msg, false), "ok\n");
+    }
+
+    #[test]
+    fn render_tool_start_plain() {
+        let msg = ServerMessage::ToolStart {
+            tool_name: "read_file".into(),
+        };
+        assert_eq!(render_server_message(&msg, false), "[tool: read_file...]\n");
+    }
+
+    #[test]
+    fn render_tool_end_plain() {
+        let msg = ServerMessage::ToolEnd {
+            tool_name: "read_file".into(),
+            outcome: "success".into(),
+            duration_ms: 42,
+        };
+        assert_eq!(
+            render_server_message(&msg, false),
+            "[tool: read_file success 42ms]\n"
+        );
+    }
+
+    #[test]
+    fn render_tool_start_tty_has_ansi() {
+        let msg = ServerMessage::ToolStart {
+            tool_name: "shell".into(),
+        };
+        let rendered = render_server_message(&msg, true);
+        assert!(
+            rendered.contains("\x1b["),
+            "tty tool_start should contain ANSI codes"
+        );
+        assert!(rendered.contains("shell"), "should contain tool name");
+    }
+
+    #[test]
+    fn render_error_tty_has_ansi() {
+        let msg = ServerMessage::Error {
+            text: "boom".into(),
+        };
+        let rendered = render_server_message(&msg, true);
+        assert!(
+            rendered.contains("\x1b["),
+            "tty error should contain ANSI codes"
+        );
+        assert!(rendered.contains("boom"), "should contain error text");
     }
 
     // ── Integration tests (is_tty = false) ────────────────────────────
@@ -737,12 +862,16 @@ mod tests {
         output_reader.read_to_string(&mut output).await.unwrap();
 
         assert!(
-            output.contains("You: "),
-            "tty mode should write 'You: ' prompt, got: {output}"
+            output.contains("You:"),
+            "tty mode should write styled 'You:' prompt, got: {output}"
         );
         assert!(
-            output.contains("FreeBird: "),
-            "tty mode should write 'FreeBird: ' prefix, got: {output}"
+            output.contains("FreeBird:"),
+            "tty mode should write styled 'FreeBird:' prefix, got: {output}"
+        );
+        assert!(
+            output.contains("\x1b["),
+            "tty mode should include ANSI escape codes, got: {output}"
         );
         assert!(
             output.contains("pong"),

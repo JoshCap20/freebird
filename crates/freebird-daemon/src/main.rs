@@ -195,8 +195,8 @@ async fn cmd_chat() -> Result<()> {
         .await
         .with_context(|| format!("failed to connect to daemon at {addr}"))?;
 
-    eprintln!("Connected to freebird daemon at {addr}");
-    eprintln!("Type /quit to disconnect, /help for commands.\n");
+    eprintln!("\x1b[1m\x1b[32mFreeBird\x1b[0m connected to {addr}");
+    eprintln!("\x1b[2mType /quit to disconnect, /help for commands.\x1b[0m\n");
 
     let stdin = tokio::io::BufReader::new(tokio::io::stdin());
     let stdout = tokio::io::stdout();
