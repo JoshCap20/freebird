@@ -164,7 +164,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
     .context("failed to construct ToolExecutor (duplicate tool names?)")?;
 
     // 10. AGENT RUNTIME
-    let runtime = AgentRuntime::new(
+    let mut runtime = AgentRuntime::new(
         registry,
         channel,
         tool_executor,

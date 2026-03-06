@@ -534,7 +534,7 @@ fn make_stream_runtime(
 async fn send_message_and_collect(
     inbound_tx: &mpsc::Sender<InboundEvent>,
     mut outbound_rx: mpsc::Receiver<OutboundEvent>,
-    runtime: AgentRuntime,
+    mut runtime: AgentRuntime,
     text: &str,
 ) -> Vec<OutboundEvent> {
     inbound_tx

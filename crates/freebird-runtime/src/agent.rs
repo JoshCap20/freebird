@@ -70,8 +70,7 @@ pub struct AgentRuntime {
     channel: Box<dyn Channel>,
     tool_executor: crate::tool_executor::ToolExecutor,
     /// Receives consent requests from the `ToolExecutor`'s `ConsentGate`.
-    /// Wired into the `run()` select loop in a later task.
-    #[allow(dead_code)]
+    /// Consumed by the third arm of the `run()` select loop.
     consent_rx: Option<tokio::sync::mpsc::Receiver<ConsentRequest>>,
     memory: Box<dyn Memory>,
     config: RuntimeConfig,
@@ -123,7 +122,7 @@ impl AgentRuntime {
     /// # Errors
     ///
     /// Returns `RuntimeError::Channel` if the channel fails to start or stop.
-    pub async fn run(&self, cancel: CancellationToken) -> Result<(), RuntimeError> {
+    pub async fn run(&mut self, cancel: CancellationToken) -> Result<(), RuntimeError> {
         let handle = self.channel.start().await?;
         let mut inbound = handle.inbound;
         let outbound = handle.outbound;
@@ -135,6 +134,9 @@ impl AgentRuntime {
                 () = cancel.cancelled() => {
                     tracing::info!("shutdown signal received, stopping runtime");
                     break;
+                }
+                Some(req) = recv_consent(&mut self.consent_rx) => {
+                    self.forward_consent_request(req, &outbound).await;
                 }
                 event = inbound.next() => {
                     if let Some(event) = event {
@@ -206,10 +208,28 @@ impl AgentRuntime {
                 tracing::info!(%sender_id, "user disconnected");
                 LoopAction::Continue
             }
-            InboundEvent::ConsentResponse { .. } => {
-                // Consent responses are handled by the consent bridge task,
-                // not the main event loop. Log and continue if one arrives here.
-                tracing::debug!("consent response received in main event loop — ignoring");
+            InboundEvent::ConsentResponse {
+                request_id,
+                approved,
+                reason,
+                sender_id,
+            } => {
+                let response = if approved {
+                    freebird_security::consent::ConsentResponse::Approved
+                } else {
+                    freebird_security::consent::ConsentResponse::Denied { reason }
+                };
+                let delivered = self
+                    .tool_executor
+                    .consent_respond(&request_id, response)
+                    .await;
+                if !delivered {
+                    tracing::warn!(
+                        %request_id,
+                        %sender_id,
+                        "consent response for unknown or expired request"
+                    );
+                }
                 LoopAction::Continue
             }
         }
@@ -1146,6 +1166,41 @@ impl AgentRuntime {
         if scanned.injection_detected() {
             self.audit_model_injection(session_id).await;
         }
+    }
+
+    /// Forward a consent request from the gate to the user's channel.
+    ///
+    /// TODO: In future, broadcast to all active channels or route to a
+    /// preferred approval channel (e.g. Signal on phone). Currently sends
+    /// to the channel/sender that triggered the tool call.
+    async fn forward_consent_request(
+        &self,
+        req: freebird_security::consent::ConsentRequest,
+        outbound: &mpsc::Sender<OutboundEvent>,
+    ) {
+        let event = OutboundEvent::ConsentRequest {
+            request_id: req.id,
+            tool_name: req.tool_name,
+            description: req.description,
+            risk_level: format!("{:?}", req.risk_level),
+            action_summary: req.action_summary,
+            expires_at: req.expires_at.to_rfc3339(),
+            recipient_id: req.sender_id,
+        };
+        send_outbound(outbound, event).await;
+    }
+}
+
+/// Receive from the consent channel, or pend forever if no gate is configured.
+///
+/// When `consent_rx` is `None` (no consent gate), this future never resolves,
+/// so the `select!` arm is effectively disabled.
+async fn recv_consent(
+    rx: &mut Option<mpsc::Receiver<freebird_security::consent::ConsentRequest>>,
+) -> Option<freebird_security::consent::ConsentRequest> {
+    match rx.as_mut() {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
     }
 }
 
