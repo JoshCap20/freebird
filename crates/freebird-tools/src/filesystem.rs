@@ -5,8 +5,6 @@
 //! for writes uses `TaintedToolInput::extract_file_content()` to bridge the
 //! `pub(crate)` taint boundary.
 
-use std::path::PathBuf;
-
 use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 
@@ -29,10 +27,10 @@ const MAX_DIR_ENTRIES: usize = 1000;
 
 /// Returns all filesystem tools as trait objects.
 ///
-/// `sandbox_root` is reserved for future per-tool sandbox configuration.
-/// Currently, the sandbox is provided at execution time via `ToolContext`.
+/// The sandbox is provided at execution time via `ToolContext`, not at
+/// construction — tools are stateless and shared across sessions.
 #[must_use]
-pub fn filesystem_tools(_sandbox_root: PathBuf) -> Vec<Box<dyn Tool>> {
+pub fn filesystem_tools() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(ReadFileTool::new()),
         Box::new(WriteFileTool::new()),
@@ -355,6 +353,7 @@ impl Tool for ListDirectoryTool {
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use std::io::Write as _;
+    use std::path::PathBuf;
 
     use freebird_traits::id::SessionId;
     use freebird_traits::tool::{Capability, Tool, ToolContext, ToolError};
@@ -950,8 +949,7 @@ mod tests {
 
     #[test]
     fn test_filesystem_tools_returns_three() {
-        let tmp = tempfile::tempdir().unwrap();
-        let tools = filesystem_tools(tmp.path().to_path_buf());
+        let tools = filesystem_tools();
         assert_eq!(tools.len(), 3);
 
         let mut names: Vec<String> = tools.iter().map(|t| t.info().name.clone()).collect();

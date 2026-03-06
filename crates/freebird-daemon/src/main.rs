@@ -135,7 +135,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
     }
 
     let mut tools: Vec<Box<dyn freebird_traits::tool::Tool>> =
-        freebird_tools::filesystem::filesystem_tools(tools_config.sandbox_root.clone());
+        freebird_tools::filesystem::filesystem_tools();
     tools.push(freebird_tools::shell::shell_tool(
         tools_config.allowed_shell_commands.clone(),
         tools_config.max_shell_output_bytes,
