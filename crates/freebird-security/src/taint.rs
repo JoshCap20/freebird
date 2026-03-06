@@ -208,6 +208,41 @@ impl TaintedToolInput {
         let tainted = self.extract_string(key)?;
         SafeUrl::from_tainted(&tainted, egress_policy)
     }
+
+    /// Extract an optional string array field as `Vec<Tainted>`.
+    ///
+    /// Returns `Ok(vec![])` if the key is absent or the array is empty.
+    /// Returns `Err(MissingField)` if the key exists but is not an array,
+    /// or if any array element is not a string.
+    ///
+    /// Each returned `Tainted` must be validated through a safe type factory
+    /// (e.g., `SafeShellArg::from_tainted()`) before use.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SecurityError::MissingField` if the value is not an array
+    /// or any element is not a string.
+    pub fn extract_string_array_optional(&self, key: &str) -> Result<Vec<Tainted>, SecurityError> {
+        match self.0.get(key) {
+            None => Ok(vec![]),
+            Some(serde_json::Value::Array(arr)) => arr
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    v.as_str()
+                        .map(Tainted::new)
+                        .ok_or_else(|| SecurityError::MissingField {
+                            field: format!("{key}[{i}]"),
+                            context: "tool input array element".into(),
+                        })
+                })
+                .collect(),
+            Some(_) => Err(SecurityError::MissingField {
+                field: key.into(),
+                context: "tool input (expected array)".into(),
+            }),
+        }
+    }
 }
 
 impl std::fmt::Debug for TaintedToolInput {
@@ -217,7 +252,7 @@ impl std::fmt::Debug for TaintedToolInput {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic)]
+#[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
@@ -338,5 +373,61 @@ mod tests {
             }
             other => panic!("expected MissingField, got: {other:?}"),
         }
+    }
+
+    // ── extract_string_array_optional tests ────────────────────────
+
+    #[test]
+    fn test_extract_string_array_optional_present() {
+        let input = TaintedToolInput::new(serde_json::json!({"args": ["a", "b", "c"]}));
+        let result = input.extract_string_array_optional("args").unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].inner(), "a");
+        assert_eq!(result[1].inner(), "b");
+        assert_eq!(result[2].inner(), "c");
+    }
+
+    #[test]
+    fn test_extract_string_array_optional_absent() {
+        let input = TaintedToolInput::new(serde_json::json!({"command": "ls"}));
+        let result = input.extract_string_array_optional("args").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_extract_string_array_optional_not_array() {
+        let input = TaintedToolInput::new(serde_json::json!({"args": "hello"}));
+        let result = input.extract_string_array_optional("args");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SecurityError::MissingField { field, context } => {
+                assert_eq!(field, "args");
+                assert!(
+                    context.contains("expected array"),
+                    "context should mention expected array: {context}"
+                );
+            }
+            other => panic!("expected MissingField, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_extract_string_array_optional_non_string_element() {
+        let input = TaintedToolInput::new(serde_json::json!({"args": [1, "b"]}));
+        let result = input.extract_string_array_optional("args");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SecurityError::MissingField { field, .. } => {
+                assert_eq!(field, "args[0]");
+            }
+            other => panic!("expected MissingField, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_extract_string_array_optional_empty_array() {
+        let input = TaintedToolInput::new(serde_json::json!({"args": []}));
+        let result = input.extract_string_array_optional("args").unwrap();
+        assert!(result.is_empty());
     }
 }
