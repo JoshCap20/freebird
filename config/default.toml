@@ -20,6 +20,9 @@ prompt = "you> "
 [tools]
 sandbox_root = "~/.freebird/sandbox"
 default_timeout_secs = 30
+# Additional directories the agent may access (absolute paths).
+# Can also be passed via CLI: freebird serve --allow-dir ~/projects
+# allowed_directories = ["~/Documents/myproject", "~/src/other"]
 
 [memory]
 kind = "file"
