@@ -76,13 +76,80 @@ Will likely eventually move crates to separate repos if project is ever big enou
 
 Freebird is in early development. The current focus is on the core agent loop, CLI channel, Anthropic provider, and the security layer described above.
 
-## Setup
+## Getting Started
 
-tba
+### Prerequisites
+
+- Rust toolchain (stable, 1.75+)
+- An Anthropic API key
+
+### Configuration
+
+Copy and edit the default config:
 
 ```bash
-cargo run -p freebird-daemon
+cp config/default.toml config/local.toml
+export FREEBIRD_CONFIG=config/local.toml
 ```
+
+Set your Anthropic API key:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+### Running the Daemon
+
+Start the daemon:
+
+```bash
+cargo run -p freebird-daemon -- serve
+```
+
+Connect with the chat client (in another terminal):
+
+```bash
+cargo run -p freebird-daemon -- chat
+```
+
+### CLI Reference
+
+```
+freebird serve   Start the daemon with TCP listener
+freebird chat    Connect to a running daemon for interactive chat
+freebird status  Check if the daemon is running
+freebird stop    Send graceful shutdown to the daemon
+```
+
+#### `freebird serve` Options
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--allow-dir <PATH>` | `-a` | Grant the agent access to an additional directory (repeatable) |
+
+By default, the agent can only access files within its sandbox directory (`~/.freebird/sandbox`). Use `--allow-dir` to grant access to additional directories — for example, to let the agent work on a project:
+
+```bash
+cargo run -p freebird-daemon -- serve --allow-dir ~/Documents/myproject
+```
+
+Multiple directories can be allowed:
+
+```bash
+cargo run -p freebird-daemon -- serve \
+  --allow-dir ~/Documents/project-a \
+  --allow-dir ~/src/project-b
+```
+
+Allowed directories can also be set in `config/default.toml`:
+
+```toml
+[tools]
+sandbox_root = "~/.freebird/sandbox"
+allowed_directories = ["~/Documents/myproject", "~/src/other"]
+```
+
+Paths support `~` expansion. CLI flags are merged with any directories set in config. Relative paths from the agent always resolve against the sandbox; absolute paths are validated against the sandbox and all allowed directories.
 
 ## License
 
