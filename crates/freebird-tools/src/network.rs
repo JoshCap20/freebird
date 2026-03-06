@@ -834,4 +834,45 @@ mod tests {
         assert_eq!(parsed["body"], "");
         assert_eq!(parsed["truncated"], false);
     }
+
+    // ── Metadata & Factory Tests ─────────────────────────────────────
+
+    #[test]
+    fn test_tool_info_has_correct_capability_and_risk() {
+        let tool = validation_tool();
+        let info = tool.info();
+        assert_eq!(info.name, "http_request");
+        assert_eq!(info.required_capability, Capability::NetworkOutbound);
+        assert_eq!(info.risk_level, RiskLevel::High);
+        assert_eq!(info.side_effects, SideEffects::HasSideEffects);
+    }
+
+    #[test]
+    fn test_network_tool_factory_returns_boxed_tool() {
+        let client = reqwest::Client::builder().build().unwrap();
+        let tool = network_tool(client, test_policy(), NetworkToolConfig::default());
+        assert_eq!(tool.info().name, "http_request");
+    }
+
+    // ── Blocked Header Exhaustiveness ────────────────────────────────
+
+    #[test]
+    fn test_all_blocked_headers_are_rejected() {
+        let tool = validation_tool();
+        for &blocked in BLOCKED_HEADERS {
+            let input = serde_json::json!({
+                "url": valid_url(),
+                "headers": { blocked: "value" }
+            });
+            let err = tool.validate_input(input).unwrap_err();
+            assert!(
+                matches!(err, ToolError::InvalidInput { .. }),
+                "header `{blocked}` should be rejected"
+            );
+            assert!(
+                err.to_string().contains("blocked"),
+                "error for `{blocked}` should mention 'blocked': {err}"
+            );
+        }
+    }
 }
