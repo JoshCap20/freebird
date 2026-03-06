@@ -251,7 +251,7 @@ impl ToolExecutor {
             self.audit_injection_detected(session_id, "prompt injection in tool output")
                 .await;
             ToolOutput {
-                content: scanned.content().to_string(),
+                content: scanned.into_content(),
                 outcome: ToolOutcome::Error,
                 metadata: None,
             }

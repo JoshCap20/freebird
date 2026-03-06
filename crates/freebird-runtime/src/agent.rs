@@ -648,9 +648,9 @@ impl AgentRuntime {
                         )
                         .await;
                 }
-                (scanned.content().to_owned(), ToolOutcome::Error)
+                (scanned.into_content(), ToolOutcome::Error)
             } else {
-                (scanned.content().to_owned(), output.outcome)
+                (scanned.into_content(), output.outcome)
             };
 
             let is_error = outcome == ToolOutcome::Error;
@@ -722,7 +722,7 @@ impl AgentRuntime {
         } else {
             let _ = outbound
                 .send(OutboundEvent::Message {
-                    text: scanned.content().to_owned(),
+                    text: scanned.into_content(),
                     recipient_id: sender_id.into(),
                 })
                 .await;

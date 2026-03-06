@@ -751,6 +751,12 @@ impl ScannedToolOutput {
     pub fn content(&self) -> &str {
         &self.content
     }
+
+    /// Consume self and return the owned content string.
+    #[must_use]
+    pub fn into_content(self) -> String {
+        self.content
+    }
 }
 
 // ── ScannedModelResponse ─────────────────────────────────────────
@@ -792,6 +798,12 @@ impl ScannedModelResponse {
     #[must_use]
     pub fn content(&self) -> &str {
         &self.content
+    }
+
+    /// Consume self and return the owned content string.
+    #[must_use]
+    pub fn into_content(self) -> String {
+        self.content
     }
 }
 

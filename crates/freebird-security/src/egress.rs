@@ -57,6 +57,7 @@ impl EgressPolicy {
     ///
     /// Returns `SecurityError::EgressBlocked` if the host is not allowlisted,
     /// the URL has no host, or the port is not permitted.
+    #[must_use = "egress check result must not be silently discarded"]
     pub fn check_url(&self, url: &url::Url) -> Result<(), SecurityError> {
         let host = url.host_str().ok_or_else(|| SecurityError::EgressBlocked {
             reason: "URL has no host".into(),

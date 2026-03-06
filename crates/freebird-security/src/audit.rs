@@ -387,6 +387,7 @@ impl AuditLogger {
     ///
     /// Returns `SecurityError::AuditCorruption` with line number and reason
     /// if any entry is tampered, deleted, or signed with a different key.
+    #[must_use = "audit chain verification result must not be silently discarded"]
     pub fn verify_chain(
         path: impl AsRef<Path>,
         signing_key: &hmac::Key,
