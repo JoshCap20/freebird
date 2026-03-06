@@ -518,6 +518,8 @@ impl AgentRuntime {
                         &mut messages,
                         &mut current_turn,
                         session_id,
+                        sender_id,
+                        outbound,
                     )
                     .await;
                 }
@@ -621,9 +623,18 @@ impl AgentRuntime {
         messages: &mut Vec<Message>,
         current_turn: &mut Turn,
         session_id: &SessionId,
+        sender_id: &str,
+        outbound: &mpsc::Sender<OutboundEvent>,
     ) {
-        self.execute_tool_calls(&response.message, messages, current_turn, session_id)
-            .await;
+        self.execute_tool_calls(
+            &response.message,
+            messages,
+            current_turn,
+            session_id,
+            sender_id,
+            outbound,
+        )
+        .await;
     }
 
     /// Extract tool-use blocks from an assistant message, execute them, scan
@@ -638,6 +649,8 @@ impl AgentRuntime {
         messages: &mut Vec<Message>,
         current_turn: &mut Turn,
         session_id: &SessionId,
+        sender_id: &str,
+        outbound: &mpsc::Sender<OutboundEvent>,
     ) {
         // Extract tool_use blocks from the message
         let tool_uses: Vec<(String, String, serde_json::Value)> = assistant_message
@@ -662,6 +675,15 @@ impl AgentRuntime {
         // Execute each tool and collect results
         let mut tool_results = Vec::with_capacity(tool_uses.len());
         for (tool_use_id, tool_name, input) in tool_uses {
+            send_outbound(
+                outbound,
+                OutboundEvent::ToolStart {
+                    tool_name: tool_name.clone(),
+                    recipient_id: sender_id.into(),
+                },
+            )
+            .await;
+
             let start = std::time::Instant::now();
 
             let output = self.execute_tool(&tool_name, &input, session_id).await;
@@ -687,6 +709,18 @@ impl AgentRuntime {
             };
 
             let is_error = outcome == ToolOutcome::Error;
+
+            let outcome_str = if is_error { "error" } else { "success" };
+            send_outbound(
+                outbound,
+                OutboundEvent::ToolEnd {
+                    tool_name: tool_name.clone(),
+                    outcome: outcome_str.into(),
+                    duration_ms,
+                    recipient_id: sender_id.into(),
+                },
+            )
+            .await;
 
             current_turn.tool_invocations.push(ToolInvocation {
                 tool_use_id: tool_use_id.clone(),
@@ -970,6 +1004,8 @@ impl AgentRuntime {
                         &mut messages,
                         &mut current_turn,
                         session_id,
+                        sender_id,
+                        outbound,
                     )
                     .await;
                 }

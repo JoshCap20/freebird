@@ -42,7 +42,7 @@ use freebird_traits::tool::{
 };
 use freebird_types::config::{RuntimeConfig, ToolsConfig};
 
-use helpers::{MockChannel, error_text, message_text};
+use helpers::{MockChannel, error_text, message_text, without_tool_status};
 
 // ---------------------------------------------------------------------------
 // QueuedProvider — returns queued responses in order
@@ -611,7 +611,9 @@ async fn test_tool_use_single_round() {
         Box::new(InMemoryMemory::new()),
     );
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Read test.txt").await;
+    let events = without_tool_status(
+        send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Read test.txt").await,
+    );
 
     assert_eq!(
         provider.call_count(),
@@ -654,8 +656,9 @@ async fn test_tool_use_multi_round() {
         Box::new(InMemoryMemory::new()),
     );
 
-    let events =
-        send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Read both files").await;
+    let events = without_tool_status(
+        send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Read both files").await,
+    );
 
     assert_eq!(provider.call_count(), 3);
     let msg = events.first().expect("should have response");
@@ -678,7 +681,9 @@ async fn test_tool_use_unknown_tool_returns_error_to_provider() {
         Box::new(InMemoryMemory::new()),
     );
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Use a tool").await;
+    let events = without_tool_status(
+        send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Use a tool").await,
+    );
 
     // Should still get a response (the provider sees the tool error and responds)
     assert_eq!(provider.call_count(), 2);
@@ -709,7 +714,9 @@ async fn test_tool_use_execution_error() {
         Box::new(InMemoryMemory::new()),
     );
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Do something").await;
+    let events = without_tool_status(
+        send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Do something").await,
+    );
 
     assert_eq!(provider.call_count(), 2);
     let msg = events.first().expect("should have response");
@@ -744,7 +751,9 @@ async fn test_tool_use_timeout() {
         None,
     );
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Do slow thing").await;
+    let events = without_tool_status(
+        send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Do slow thing").await,
+    );
 
     assert_eq!(provider.call_count(), 2);
     // The second provider call received a timeout error result
@@ -794,7 +803,9 @@ async fn test_tool_use_max_rounds_exceeded() {
         None,
     );
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Loop forever").await;
+    let events = without_tool_status(
+        send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Loop forever").await,
+    );
 
     assert_eq!(provider.call_count(), 2);
     // Should get an error about max rounds
@@ -841,8 +852,9 @@ async fn test_tool_use_multiple_tools_per_round() {
         Box::new(InMemoryMemory::new()),
     );
 
-    let events =
-        send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Use both tools").await;
+    let events = without_tool_status(
+        send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Use both tools").await,
+    );
 
     assert_eq!(provider.call_count(), 2);
     let msg = events.first().expect("should have response");
@@ -1041,7 +1053,9 @@ async fn test_tool_output_injection_replaced_with_error() {
         None,
     );
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Read file").await;
+    let events = without_tool_status(
+        send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Read file").await,
+    );
 
     // Tool output injection is blocked but the agentic loop continues with a
     // synthetic error result, so the provider is still called a second time.

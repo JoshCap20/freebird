@@ -620,12 +620,15 @@ async fn test_streaming_tool_use_round() {
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Read file").await;
 
     // Round 1: StreamChunk("Let me check") + StreamEnd (tool use)
+    // ToolStart + ToolEnd (tool status events)
     // Round 2: StreamChunk("File contents: hello") + StreamEnd
     // Then: quit message
     assert_eq!(stream_chunk_text(&events[0]), Some("Let me check"));
     assert!(is_stream_end(&events[1]));
-    assert_eq!(stream_chunk_text(&events[2]), Some("File contents: hello"));
-    assert!(is_stream_end(&events[3]));
+    assert!(matches!(&events[2], OutboundEvent::ToolStart { .. }));
+    assert!(matches!(&events[3], OutboundEvent::ToolEnd { .. }));
+    assert_eq!(stream_chunk_text(&events[4]), Some("File contents: hello"));
+    assert!(is_stream_end(&events[5]));
 }
 
 #[tokio::test]
@@ -909,11 +912,16 @@ async fn test_streaming_multiple_tools_same_round() {
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Use both").await;
 
     // Round 1: StreamChunk("Using both tools") + StreamEnd (tool use, 2 tools executed)
+    // ToolStart(tool_a) + ToolEnd(tool_a) + ToolStart(tool_b) + ToolEnd(tool_b)
     // Round 2: StreamChunk("Both tools done") + StreamEnd
     assert_eq!(stream_chunk_text(&events[0]), Some("Using both tools"));
     assert!(is_stream_end(&events[1]));
-    assert_eq!(stream_chunk_text(&events[2]), Some("Both tools done"));
-    assert!(is_stream_end(&events[3]));
+    assert!(matches!(&events[2], OutboundEvent::ToolStart { .. }));
+    assert!(matches!(&events[3], OutboundEvent::ToolEnd { .. }));
+    assert!(matches!(&events[4], OutboundEvent::ToolStart { .. }));
+    assert!(matches!(&events[5], OutboundEvent::ToolEnd { .. }));
+    assert_eq!(stream_chunk_text(&events[6]), Some("Both tools done"));
+    assert!(is_stream_end(&events[7]));
 }
 
 #[tokio::test]
