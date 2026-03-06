@@ -174,6 +174,7 @@ impl ToolExecutor {
         input: serde_json::Value,
         grant: &CapabilityGrant,
         session_id: &SessionId,
+        sender_id: &str,
     ) -> ToolOutput {
         // 1. Tool lookup
         let Some(tool) = self.tools.get(tool_name) else {
@@ -211,7 +212,7 @@ impl ToolExecutor {
 
         // 3. Consent gate for High/Critical risk tools (ASI09)
         if let Some(output) = self
-            .check_consent(tool_name, tool.info(), &input, session_id)
+            .check_consent(tool_name, tool.info(), &input, session_id, sender_id)
             .await
         {
             return output;
@@ -341,6 +342,7 @@ impl ToolExecutor {
         tool_info: &freebird_traits::tool::ToolInfo,
         input: &serde_json::Value,
         session_id: &SessionId,
+        sender_id: &str,
     ) -> Option<ToolOutput> {
         // Truncate action summary to avoid leaking large tool inputs (e.g. file contents)
         // through the consent channel. 512 chars is enough for a human to make a decision.
@@ -358,7 +360,7 @@ impl ToolExecutor {
         } else {
             raw_summary
         };
-        match consent.check(tool_info, action_summary).await {
+        match consent.check(tool_info, action_summary, sender_id).await {
             Ok(()) => {
                 self.audit_consent_granted(session_id, tool_name).await;
                 None
@@ -669,7 +671,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let output = executor
-            .execute("nonexistent", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "nonexistent",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Error);
@@ -691,7 +699,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let output = executor
-            .execute("write_file", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "write_file",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Error);
@@ -714,7 +728,13 @@ mod tests {
         let grant = expired_grant(&path, &[Capability::FileRead]);
 
         let output = executor
-            .execute("read_file", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "read_file",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Error);
@@ -741,7 +761,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let output = executor
-            .execute("read_file", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "read_file",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Success);
@@ -768,7 +794,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let output = executor
-            .execute("fail_tool", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "fail_tool",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Error);
@@ -790,7 +822,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let output = executor
-            .execute("slow_tool", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "slow_tool",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Error);
@@ -815,7 +853,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let output = executor
-            .execute("reader", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "reader",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Error);
@@ -839,7 +883,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let output = executor
-            .execute("reader", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "reader",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Error);
@@ -864,7 +914,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let _ = executor
-            .execute("nonexistent", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "nonexistent",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         let events = read_audit_events(&log_path);
@@ -894,7 +950,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let _ = executor
-            .execute("write_file", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "write_file",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         let events = read_audit_events(&log_path);
@@ -924,7 +986,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let _ = executor
-            .execute("read_file", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "read_file",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         let events = read_audit_events(&log_path);
@@ -954,7 +1022,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let _ = executor
-            .execute("slow_tool", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "slow_tool",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         let events = read_audit_events(&log_path);
@@ -983,7 +1057,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let _ = executor
-            .execute("reader", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "reader",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         let events = read_audit_events(&log_path);
@@ -1008,7 +1088,13 @@ mod tests {
 
         // Should not panic
         let output = executor
-            .execute("nonexistent", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "nonexistent",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
         assert_eq!(output.outcome, ToolOutcome::Error);
     }
@@ -1146,8 +1232,8 @@ mod tests {
         let sid = session_id();
 
         let (out_a, out_b) = tokio::join!(
-            executor.execute("tool_a", serde_json::json!({}), &grant, &sid),
-            executor.execute("tool_b", serde_json::json!({}), &grant, &sid),
+            executor.execute("tool_a", serde_json::json!({}), &grant, &sid, "test-sender"),
+            executor.execute("tool_b", serde_json::json!({}), &grant, &sid, "test-sender"),
         );
 
         assert_eq!(out_a.outcome, ToolOutcome::Success);
@@ -1175,7 +1261,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::ShellExecute]);
 
         let output = executor
-            .execute("shell", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "shell",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Success);
@@ -1200,7 +1292,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let output = executor
-            .execute("read_file", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "read_file",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Success);
@@ -1231,8 +1329,14 @@ mod tests {
 
         let exec = Arc::clone(&executor);
         let handle = tokio::spawn(async move {
-            exec.execute("shell", serde_json::json!({"cmd": "ls"}), &grant, &sid)
-                .await
+            exec.execute(
+                "shell",
+                serde_json::json!({"cmd": "ls"}),
+                &grant,
+                &sid,
+                "test-sender",
+            )
+            .await
         });
 
         let req = rx.recv().await.unwrap();
@@ -1267,7 +1371,7 @@ mod tests {
 
         let exec = Arc::clone(&executor);
         let handle = tokio::spawn(async move {
-            exec.execute("shell", serde_json::json!({}), &grant, &sid)
+            exec.execute("shell", serde_json::json!({}), &grant, &sid, "test-sender")
                 .await
         });
 
@@ -1304,7 +1408,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::ShellExecute]);
 
         let output = executor
-            .execute("shell", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "shell",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Error);
@@ -1336,7 +1446,7 @@ mod tests {
         let s1 = sid.clone();
         let _h1 = tokio::spawn(async move {
             exec1
-                .execute("shell", serde_json::json!({}), &g1, &s1)
+                .execute("shell", serde_json::json!({}), &g1, &s1, "test-sender")
                 .await
         });
 
@@ -1345,7 +1455,7 @@ mod tests {
 
         // Second request should fail with TooManyPending.
         let output = executor
-            .execute("shell", serde_json::json!({}), &grant, &sid)
+            .execute("shell", serde_json::json!({}), &grant, &sid, "test-sender")
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Error);
@@ -1375,7 +1485,7 @@ mod tests {
 
         let exec = Arc::clone(&executor);
         let handle = tokio::spawn(async move {
-            exec.execute("shell", serde_json::json!({}), &grant, &sid)
+            exec.execute("shell", serde_json::json!({}), &grant, &sid, "test-sender")
                 .await
         });
 
@@ -1415,7 +1525,7 @@ mod tests {
 
         let exec = Arc::clone(&executor);
         let handle = tokio::spawn(async move {
-            exec.execute("shell", serde_json::json!({}), &grant, &sid)
+            exec.execute("shell", serde_json::json!({}), &grant, &sid, "test-sender")
                 .await
         });
 

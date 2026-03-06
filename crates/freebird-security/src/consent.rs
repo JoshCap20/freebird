@@ -31,6 +31,9 @@ pub struct ConsentRequest {
     /// What the tool will do — MUST be machine-generated from the actual
     /// tool input, never from LLM-provided text.
     pub action_summary: String,
+    /// Who triggered this tool call — used for routing consent prompts
+    /// back to the correct user on multi-user channels.
+    pub sender_id: String,
     /// When the request was created.
     pub requested_at: DateTime<Utc>,
     /// When the request expires if not answered.
@@ -129,6 +132,7 @@ impl ConsentGate {
         &self,
         tool_info: &ToolInfo,
         action_summary: String,
+        sender_id: &str,
     ) -> Result<(), ConsentError> {
         if tool_info.risk_level < self.threshold {
             return Ok(());
@@ -146,6 +150,7 @@ impl ConsentGate {
             description: tool_info.description.clone(),
             risk_level: tool_info.risk_level.clone(),
             action_summary,
+            sender_id: sender_id.to_owned(),
             requested_at: now,
             expires_at: now + ttl_delta,
         };
@@ -231,7 +236,9 @@ mod tests {
         let (gate, mut rx) = ConsentGate::new(RiskLevel::Medium, Duration::from_secs(60), 5);
         let tool = make_tool_info("read_file", RiskLevel::Low);
 
-        let result = gate.check(&tool, "reading /tmp/foo".into()).await;
+        let result = gate
+            .check(&tool, "reading /tmp/foo".into(), "test-sender")
+            .await;
         assert!(result.is_ok());
 
         // No request should have been sent.
@@ -248,7 +255,7 @@ mod tests {
         let tool_clone = tool.clone();
         let handle = tokio::spawn(async move {
             gate_clone
-                .check(&tool_clone, "writing /tmp/bar".into())
+                .check(&tool_clone, "writing /tmp/bar".into(), "test-sender")
                 .await
         });
 
@@ -271,10 +278,11 @@ mod tests {
 
         let gate_clone = Arc::clone(&gate);
         let tool_clone = tool.clone();
-        let handle =
-            tokio::spawn(
-                async move { gate_clone.check(&tool_clone, "running rm -rf".into()).await },
-            );
+        let handle = tokio::spawn(async move {
+            gate_clone
+                .check(&tool_clone, "running rm -rf".into(), "test-sender")
+                .await
+        });
 
         let request = rx.recv().await.unwrap();
         gate.respond(&request.id, ConsentResponse::Approved).await;
@@ -292,7 +300,7 @@ mod tests {
         let tool_clone = tool.clone();
         let handle = tokio::spawn(async move {
             gate_clone
-                .check(&tool_clone, "changing config".into())
+                .check(&tool_clone, "changing config".into(), "test-sender")
                 .await
         });
 
@@ -313,7 +321,11 @@ mod tests {
             ("shell", RiskLevel::High),
         ] {
             let tool = make_tool_info(name, risk);
-            assert!(gate.check(&tool, "action".into()).await.is_ok());
+            assert!(
+                gate.check(&tool, "action".into(), "test-sender")
+                    .await
+                    .is_ok()
+            );
         }
 
         // No requests should have been sent.
@@ -330,8 +342,11 @@ mod tests {
 
         let gate_clone = Arc::clone(&gate);
         let tool_clone = tool.clone();
-        let handle =
-            tokio::spawn(async move { gate_clone.check(&tool_clone, "ls -la".into()).await });
+        let handle = tokio::spawn(async move {
+            gate_clone
+                .check(&tool_clone, "ls -la".into(), "test-sender")
+                .await
+        });
 
         let req = rx.recv().await.unwrap();
         gate.respond(&req.id, ConsentResponse::Approved).await;
@@ -347,8 +362,11 @@ mod tests {
 
         let gate_clone = Arc::clone(&gate);
         let tool_clone = tool.clone();
-        let handle =
-            tokio::spawn(async move { gate_clone.check(&tool_clone, "rm -rf /".into()).await });
+        let handle = tokio::spawn(async move {
+            gate_clone
+                .check(&tool_clone, "rm -rf /".into(), "test-sender")
+                .await
+        });
 
         let req = rx.recv().await.unwrap();
         gate.respond(
@@ -377,8 +395,11 @@ mod tests {
 
         let gate_clone = Arc::clone(&gate);
         let tool_clone = tool.clone();
-        let handle =
-            tokio::spawn(async move { gate_clone.check(&tool_clone, "action".into()).await });
+        let handle = tokio::spawn(async move {
+            gate_clone
+                .check(&tool_clone, "action".into(), "test-sender")
+                .await
+        });
 
         let req = rx.recv().await.unwrap();
         gate.respond(&req.id, ConsentResponse::Denied { reason: None })
@@ -399,7 +420,7 @@ mod tests {
         let (gate, _rx) = ConsentGate::new(RiskLevel::High, ttl, 5);
         let tool = make_tool_info("shell", RiskLevel::High);
 
-        let result = gate.check(&tool, "action".into()).await;
+        let result = gate.check(&tool, "action".into(), "test-sender").await;
 
         match result.unwrap_err() {
             ConsentError::Expired { tool, timeout_secs } => {
@@ -420,7 +441,7 @@ mod tests {
         let tool_clone = tool.clone();
         let handle = tokio::spawn(async move {
             gate_clone
-                .check(&tool_clone, "GET https://example.com".into())
+                .check(&tool_clone, "GET https://example.com".into(), "test-sender")
                 .await
         });
 
@@ -431,6 +452,7 @@ mod tests {
         assert_eq!(req.action_summary, "GET https://example.com");
         assert!(req.requested_at < req.expires_at);
         assert!(!req.id.is_empty());
+        assert_eq!(req.sender_id, "test-sender");
 
         // Clean up by approving.
         gate.respond(&req.id, ConsentResponse::Approved).await;
@@ -445,7 +467,7 @@ mod tests {
         let (gate, _rx) = ConsentGate::new(RiskLevel::High, ttl, 5);
         let tool = make_tool_info("shell", RiskLevel::High);
 
-        let _ = gate.check(&tool, "action".into()).await;
+        let _ = gate.check(&tool, "action".into(), "test-sender").await;
 
         assert_eq!(gate.pending_count().await, 0);
     }
@@ -460,7 +482,7 @@ mod tests {
         // when nothing responds.
         drop(rx);
 
-        let result = gate.check(&tool, "action".into()).await;
+        let result = gate.check(&tool, "action".into(), "test-sender").await;
 
         // Should get ChannelClosed since receiver was dropped.
         assert!(matches!(result, Err(ConsentError::ChannelClosed)));
@@ -484,8 +506,11 @@ mod tests {
 
         let gate_clone = Arc::clone(&gate);
         let tool_clone = tool.clone();
-        let handle =
-            tokio::spawn(async move { gate_clone.check(&tool_clone, "action".into()).await });
+        let handle = tokio::spawn(async move {
+            gate_clone
+                .check(&tool_clone, "action".into(), "test-sender")
+                .await
+        });
 
         // Grab the request but don't respond — let it timeout.
         let req = rx.recv().await.unwrap();
@@ -506,7 +531,7 @@ mod tests {
 
         drop(rx);
 
-        let result = gate.check(&tool, "action".into()).await;
+        let result = gate.check(&tool, "action".into(), "test-sender").await;
         assert!(matches!(result, Err(ConsentError::ChannelClosed)));
         assert_eq!(gate.pending_count().await, 0);
     }
@@ -522,18 +547,18 @@ mod tests {
         // Start 2 pending checks (they will block waiting for responses).
         let gate1 = Arc::clone(&gate);
         let t1 = tool.clone();
-        let _h1 = tokio::spawn(async move { gate1.check(&t1, "a1".into()).await });
+        let _h1 = tokio::spawn(async move { gate1.check(&t1, "a1".into(), "test-sender").await });
 
         let gate2 = Arc::clone(&gate);
         let t2 = tool.clone();
-        let _h2 = tokio::spawn(async move { gate2.check(&t2, "a2".into()).await });
+        let _h2 = tokio::spawn(async move { gate2.check(&t2, "a2".into(), "test-sender").await });
 
         // Wait for both requests to arrive (proves they registered in pending).
         let _r1 = rx.recv().await.unwrap();
         let _r2 = rx.recv().await.unwrap();
 
         // 3rd should fail with TooManyPending.
-        let result = gate.check(&tool, "a3".into()).await;
+        let result = gate.check(&tool, "a3".into(), "test-sender").await;
         match result.unwrap_err() {
             ConsentError::TooManyPending { tool, max } => {
                 assert_eq!(tool, "shell");
@@ -552,7 +577,8 @@ mod tests {
         // First request.
         let gate_clone = Arc::clone(&gate);
         let t = tool.clone();
-        let h = tokio::spawn(async move { gate_clone.check(&t, "first".into()).await });
+        let h =
+            tokio::spawn(async move { gate_clone.check(&t, "first".into(), "test-sender").await });
 
         let req = rx.recv().await.unwrap();
         gate.respond(&req.id, ConsentResponse::Approved).await;
@@ -561,7 +587,8 @@ mod tests {
         // Second request should succeed (slot is free).
         let gate_clone = Arc::clone(&gate);
         let t = tool.clone();
-        let h = tokio::spawn(async move { gate_clone.check(&t, "second".into()).await });
+        let h =
+            tokio::spawn(async move { gate_clone.check(&t, "second".into(), "test-sender").await });
 
         let req = rx.recv().await.unwrap();
         gate.respond(&req.id, ConsentResponse::Approved).await;
@@ -580,11 +607,11 @@ mod tests {
 
         let ga = Arc::clone(&gate);
         let ta = tool_a.clone();
-        let ha = tokio::spawn(async move { ga.check(&ta, "action a".into()).await });
+        let ha = tokio::spawn(async move { ga.check(&ta, "action a".into(), "test-sender").await });
 
         let gb = Arc::clone(&gate);
         let tb = tool_b.clone();
-        let hb = tokio::spawn(async move { gb.check(&tb, "action b".into()).await });
+        let hb = tokio::spawn(async move { gb.check(&tb, "action b".into(), "test-sender").await });
 
         // Receive both requests.
         let r1 = rx.recv().await.unwrap();
@@ -660,6 +687,7 @@ mod tests {
             description: "execute shell commands".into(),
             risk_level: RiskLevel::High,
             action_summary: "rm -rf /tmp/test".into(),
+            sender_id: "user-42".into(),
             requested_at: now,
             expires_at: now + TimeDelta::seconds(60),
         };
@@ -672,6 +700,7 @@ mod tests {
         assert_eq!(back.description, req.description);
         assert_eq!(back.risk_level, req.risk_level);
         assert_eq!(back.action_summary, req.action_summary);
+        assert_eq!(back.sender_id, req.sender_id);
         assert_eq!(back.requested_at, req.requested_at);
         assert_eq!(back.expires_at, req.expires_at);
     }
