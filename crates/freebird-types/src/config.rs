@@ -108,6 +108,28 @@ pub struct ToolsConfig {
     /// sandbox root. Typically set via the `--allow-dir` CLI flag.
     #[serde(default)]
     pub allowed_directories: Vec<PathBuf>,
+    /// Commands the shell tool is permitted to execute. Empty = deny all.
+    #[serde(default = "default_allowed_shell_commands")]
+    pub allowed_shell_commands: Vec<String>,
+    /// Maximum stdout+stderr bytes the shell tool returns. Output beyond
+    /// this limit is truncated with a `[output truncated]` marker.
+    #[serde(default = "default_max_shell_output_bytes")]
+    pub max_shell_output_bytes: usize,
+}
+
+fn default_allowed_shell_commands() -> Vec<String> {
+    // Only read-only, single-file commands. Notably excluded:
+    // - `git`: can make network connections, bypassing EgressPolicy (CLAUDE.md §12)
+    // - `find`: `-delete` flag enables filesystem destruction outside sandbox
+    // Admins can add these via config if they accept the risks.
+    ["ls", "cat", "grep", "head", "tail", "wc"]
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+const fn default_max_shell_output_bytes() -> usize {
+    1_048_576 // 1 MiB
 }
 
 /// Which memory storage backend to use.
@@ -203,6 +225,14 @@ format = "pretty""#,
             |(_, v)| v,
         );
 
+        let tools = overrides.iter().find(|(k, _)| *k == "tools").map_or(
+            r#"sandbox_root = "~/.freebird/sandbox"
+default_timeout_secs = 30
+allowed_shell_commands = ["ls", "cat", "grep", "head", "tail", "wc"]
+max_shell_output_bytes = 1048576"#,
+            |(_, v)| v,
+        );
+
         let daemon = overrides.iter().find(|(k, _)| *k == "daemon");
 
         let daemon_section = daemon.map_or(String::new(), |(_, v)| format!("\n[daemon]\n{v}\n"));
@@ -221,8 +251,7 @@ id = "cli"
 kind = "cli"
 
 [tools]
-sandbox_root = "~/.freebird/sandbox"
-default_timeout_secs = 30
+{tools}
 
 [memory]
 kind = "file"
@@ -462,5 +491,33 @@ drain_timeout_secs = 1"#,
         let json = serde_json::to_string(&daemon).unwrap();
         let back: DaemonConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(daemon, back);
+    }
+
+    // ── Shell config tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_shell_config_from_default_toml() {
+        let toml_str = include_str!("../../../config/default.toml");
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.tools.allowed_shell_commands,
+            vec!["ls", "cat", "grep", "head", "tail", "wc"]
+        );
+        assert_eq!(config.tools.max_shell_output_bytes, 1_048_576);
+    }
+
+    #[test]
+    fn test_shell_config_serde_defaults_when_absent() {
+        // Use a tools override that omits shell fields to verify serde defaults apply
+        let toml_str = config_toml(&[(
+            "tools",
+            "sandbox_root = \"/tmp\"\ndefault_timeout_secs = 10",
+        )]);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(
+            config.tools.allowed_shell_commands,
+            vec!["ls", "cat", "grep", "head", "tail", "wc"]
+        );
+        assert_eq!(config.tools.max_shell_output_bytes, 1_048_576);
     }
 }

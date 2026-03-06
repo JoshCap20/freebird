@@ -23,6 +23,8 @@ default_timeout_secs = 30
 # Additional directories the agent may access (absolute paths).
 # Can also be passed via CLI: freebird serve --allow-dir ~/projects
 # allowed_directories = ["~/Documents/myproject", "~/src/other"]
+allowed_shell_commands = ["ls", "cat", "grep", "head", "tail", "wc"]
+max_shell_output_bytes = 1048576
 
 [memory]
 kind = "file"

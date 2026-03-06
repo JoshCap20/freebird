@@ -442,6 +442,8 @@ fn default_tools_config() -> ToolsConfig {
         sandbox_root: PathBuf::from("/tmp/test-sandbox"),
         default_timeout_secs: 30,
         allowed_directories: vec![],
+        allowed_shell_commands: vec![],
+        max_shell_output_bytes: 1_048_576,
     }
 }
 
@@ -728,6 +730,8 @@ async fn test_tool_use_timeout() {
         sandbox_root: PathBuf::from("/tmp/test-sandbox"),
         default_timeout_secs: 1, // 1 second timeout
         allowed_directories: vec![],
+        allowed_shell_commands: vec![],
+        max_shell_output_bytes: 1_048_576,
     };
 
     let runtime = AgentRuntime::new(
