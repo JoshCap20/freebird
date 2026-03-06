@@ -22,6 +22,12 @@ use freebird_traits::tool::{
 /// attacker places a malicious binary earlier in PATH.
 const SANDBOXED_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
+/// Maximum number of arguments per shell command (ASI08 resource exhaustion).
+///
+/// Prevents the LLM from passing thousands of arguments that could exhaust
+/// memory or create excessively long process argument lists.
+const MAX_ARG_COUNT: usize = 64;
+
 /// Sandboxed shell command executor.
 ///
 /// Invariants enforced by construction:
@@ -97,6 +103,17 @@ impl ShellTool {
                     tool: Self::NAME.into(),
                     reason: e.to_string(),
                 })?;
+
+        if tainted_args.len() > MAX_ARG_COUNT {
+            return Err(ToolError::InvalidInput {
+                tool: Self::NAME.into(),
+                reason: format!(
+                    "too many arguments: {} (max {})",
+                    tainted_args.len(),
+                    MAX_ARG_COUNT
+                ),
+            });
+        }
 
         tainted_args
             .iter()
@@ -923,6 +940,51 @@ mod tests {
         assert!(out2.content.contains("file2.txt"));
         assert!(!out1.content.contains("file2.txt"));
         assert!(!out2.content.contains("file1.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_too_many_args_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = echo_tool();
+        let (sid, caps) = make_context();
+        let ctx = ToolContext {
+            session_id: &sid,
+            sandbox_root: tmp.path(),
+            granted_capabilities: &caps,
+            allowed_directories: &[],
+        };
+
+        let args: Vec<String> = (0..=MAX_ARG_COUNT).map(|i| format!("arg{i}")).collect();
+        let err = tool
+            .execute(serde_json::json!({"command": "echo", "args": args}), &ctx)
+            .await
+            .unwrap_err();
+        match &err {
+            ToolError::InvalidInput { reason, .. } => {
+                assert!(reason.contains("too many arguments"), "reason: {reason}");
+            }
+            other => panic!("expected InvalidInput, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_max_args_at_limit_succeeds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = echo_tool();
+        let (sid, caps) = make_context();
+        let ctx = ToolContext {
+            session_id: &sid,
+            sandbox_root: tmp.path(),
+            granted_capabilities: &caps,
+            allowed_directories: &[],
+        };
+
+        let args: Vec<String> = (0..MAX_ARG_COUNT).map(|i| format!("arg{i}")).collect();
+        let output = tool
+            .execute(serde_json::json!({"command": "echo", "args": args}), &ctx)
+            .await
+            .unwrap();
+        assert!(matches!(output.outcome, ToolOutcome::Success));
     }
 
     #[tokio::test]
