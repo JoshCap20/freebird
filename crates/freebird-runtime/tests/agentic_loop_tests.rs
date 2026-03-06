@@ -42,7 +42,7 @@ use freebird_traits::tool::{
 };
 use freebird_types::config::{RuntimeConfig, ToolsConfig};
 
-use helpers::{MockChannel, error_text, message_text, without_tool_status};
+use helpers::{MockChannel, error_text, message_text, without_status_events};
 
 // ---------------------------------------------------------------------------
 // QueuedProvider — returns queued responses in order
@@ -573,7 +573,9 @@ async fn test_single_turn_empty_response_skipped() {
     let provider = Arc::new(QueuedProvider::new(vec![text_response("")]));
     let runtime = make_test_runtime(channel, provider, vec![], Box::new(InMemoryMemory::new()));
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = without_status_events(
+        send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await,
+    );
 
     // Empty responses are silently skipped — only the Goodbye from /quit should appear
     assert!(
@@ -611,7 +613,7 @@ async fn test_tool_use_single_round() {
         Box::new(InMemoryMemory::new()),
     );
 
-    let events = without_tool_status(
+    let events = without_status_events(
         send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Read test.txt").await,
     );
 
@@ -656,7 +658,7 @@ async fn test_tool_use_multi_round() {
         Box::new(InMemoryMemory::new()),
     );
 
-    let events = without_tool_status(
+    let events = without_status_events(
         send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Read both files").await,
     );
 
@@ -681,7 +683,7 @@ async fn test_tool_use_unknown_tool_returns_error_to_provider() {
         Box::new(InMemoryMemory::new()),
     );
 
-    let events = without_tool_status(
+    let events = without_status_events(
         send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Use a tool").await,
     );
 
@@ -714,7 +716,7 @@ async fn test_tool_use_execution_error() {
         Box::new(InMemoryMemory::new()),
     );
 
-    let events = without_tool_status(
+    let events = without_status_events(
         send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Do something").await,
     );
 
@@ -751,7 +753,7 @@ async fn test_tool_use_timeout() {
         None,
     );
 
-    let events = without_tool_status(
+    let events = without_status_events(
         send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Do slow thing").await,
     );
 
@@ -803,7 +805,7 @@ async fn test_tool_use_max_rounds_exceeded() {
         None,
     );
 
-    let events = without_tool_status(
+    let events = without_status_events(
         send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Loop forever").await,
     );
 
@@ -852,7 +854,7 @@ async fn test_tool_use_multiple_tools_per_round() {
         Box::new(InMemoryMemory::new()),
     );
 
-    let events = without_tool_status(
+    let events = without_status_events(
         send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Use both tools").await,
     );
 
@@ -1053,7 +1055,7 @@ async fn test_tool_output_injection_replaced_with_error() {
         None,
     );
 
-    let events = without_tool_status(
+    let events = without_status_events(
         send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Read file").await,
     );
 

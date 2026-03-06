@@ -103,14 +103,17 @@ pub fn error_text(event: &OutboundEvent) -> Option<&str> {
     }
 }
 
-/// Filter out `ToolStart`/`ToolEnd` status events, keeping only messages and errors.
-pub fn without_tool_status(events: Vec<OutboundEvent>) -> Vec<OutboundEvent> {
+/// Filter out status/control events (`ToolStart`, `ToolEnd`, `TurnComplete`),
+/// keeping only content events (messages, errors, stream chunks).
+pub fn without_status_events(events: Vec<OutboundEvent>) -> Vec<OutboundEvent> {
     events
         .into_iter()
         .filter(|e| {
             !matches!(
                 e,
-                OutboundEvent::ToolStart { .. } | OutboundEvent::ToolEnd { .. }
+                OutboundEvent::ToolStart { .. }
+                    | OutboundEvent::ToolEnd { .. }
+                    | OutboundEvent::TurnComplete { .. }
             )
         })
         .collect()

@@ -181,8 +181,17 @@ impl AgentRuntime {
                 args,
                 sender_id,
             } => {
-                self.handle_command(&name, &args, &sender_id, outbound)
-                    .await
+                let action = self
+                    .handle_command(&name, &args, &sender_id, outbound)
+                    .await;
+                send_outbound(
+                    outbound,
+                    OutboundEvent::TurnComplete {
+                        recipient_id: sender_id,
+                    },
+                )
+                .await;
+                action
             }
             InboundEvent::Connected { sender_id } => {
                 tracing::info!(%sender_id, "user connected");
@@ -274,9 +283,32 @@ impl AgentRuntime {
         session_id: SessionId,
         outbound: &mpsc::Sender<OutboundEvent>,
     ) {
+        self.handle_message_inner(&raw_text, &sender_id, &session_id, outbound)
+            .await;
+
+        // Always signal turn complete — even on validation/load errors —
+        // so the client knows to re-prompt for input.
+        send_outbound(
+            outbound,
+            OutboundEvent::TurnComplete {
+                recipient_id: sender_id,
+            },
+        )
+        .await;
+    }
+
+    /// Inner implementation of message handling. Separated so `handle_message`
+    /// can unconditionally send `TurnComplete` regardless of early returns.
+    async fn handle_message_inner(
+        &self,
+        raw_text: &str,
+        sender_id: &str,
+        session_id: &SessionId,
+        outbound: &mpsc::Sender<OutboundEvent>,
+    ) {
         // 1. Taint input and validate
         let Some(safe_message) = self
-            .validate_input(&raw_text, &sender_id, &session_id, outbound)
+            .validate_input(raw_text, sender_id, session_id, outbound)
             .await
         else {
             return;
@@ -284,7 +316,7 @@ impl AgentRuntime {
 
         // 2. Load or create conversation
         let Some(mut conversation) = self
-            .load_or_create_conversation(&session_id, &sender_id, outbound)
+            .load_or_create_conversation(session_id, sender_id, outbound)
             .await
         else {
             return;
@@ -301,8 +333,8 @@ impl AgentRuntime {
         let current_turn = if use_streaming {
             self.run_agentic_loop_streaming(
                 &safe_message,
-                &sender_id,
-                &session_id,
+                sender_id,
+                session_id,
                 &conversation,
                 outbound,
             )
@@ -310,8 +342,8 @@ impl AgentRuntime {
         } else {
             self.run_agentic_loop(
                 &safe_message,
-                &sender_id,
-                &session_id,
+                sender_id,
+                session_id,
                 &conversation,
                 outbound,
                 None,

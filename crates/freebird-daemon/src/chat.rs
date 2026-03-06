@@ -32,7 +32,7 @@ mod style {
 
     #[must_use]
     pub fn bot_prefix() -> String {
-        format!("{BOLD}{GREEN}FreeBird:{RESET} ")
+        format!("{BOLD}{GREEN}Freebird:{RESET} ")
     }
 
     #[must_use]
@@ -127,7 +127,7 @@ pub fn parse_user_input(line: &str) -> ParseResult {
 ///
 /// Streaming chunks are returned as-is (no trailing newline) so they can be
 /// printed incrementally. The caller is responsible for printing the
-/// `FreeBird: ` prefix before the first chunk of each response.
+/// `Freebird: ` prefix before the first chunk of each response.
 ///
 /// When `is_tty` is true, ANSI styling is applied to errors and tool events.
 #[must_use]
@@ -163,6 +163,8 @@ pub fn render_server_message(msg: &ServerMessage, is_tty: bool) -> String {
                 format!("[tool: {tool_name} {outcome} {duration_ms}ms]\n")
             }
         }
+        // TurnComplete is a control signal — no visible output.
+        ServerMessage::TurnComplete => String::new(),
     }
 }
 
@@ -175,7 +177,7 @@ pub fn render_server_message(msg: &ServerMessage, is_tty: bool) -> String {
 /// daemon, and renders them to `user_output`.
 ///
 /// The `is_tty` flag controls whether interactive prompts (`You: `,
-/// `FreeBird: `) are written. Pass `true` when connected to a real terminal
+/// `Freebird: `) are written. Pass `true` when connected to a real terminal
 /// and `false` in tests / piped usage so assertions on `user_output` remain
 /// deterministic.
 pub async fn run_chat_with_io<I, O>(
@@ -195,7 +197,7 @@ where
     let mut socket_lines = socket_reader.lines();
 
     // True while we are mid-stream (between first StreamChunk and StreamEnd).
-    // Used to suppress the "FreeBird: " prefix on every chunk after the first.
+    // Used to suppress the "Freebird: " prefix on every chunk after the first.
     let mut in_stream = false;
 
     // Print the first prompt before the loop so the user sees it immediately.
@@ -276,7 +278,7 @@ async fn handle_daemon_line<O: AsyncWrite + Unpin>(
         }
     };
 
-    // Print "FreeBird: " prefix before the first token of each response.
+    // Print "Freebird: " prefix before the first token of each response.
     // Tool events render their own prefix, so they skip this.
     let needs_prefix = is_tty
         && match &msg {
@@ -308,18 +310,11 @@ async fn handle_daemon_line<O: AsyncWrite + Unpin>(
         .context("writing to output")?;
     user_output.flush().await.context("flushing output")?;
 
-    // Print next prompt after complete responses and stream end.
-    // Tool events do NOT trigger a prompt — more messages follow.
-    if is_tty {
-        match &msg {
-            ServerMessage::Message { .. }
-            | ServerMessage::CommandResponse { .. }
-            | ServerMessage::Error { .. }
-            | ServerMessage::StreamEnd => {
-                write_prompt(user_output, is_tty).await?;
-            }
-            _ => {}
-        }
+    // Only print the "You: " prompt after TurnComplete — the server signals
+    // when the entire agentic turn is done. Intermediate messages, stream ends,
+    // and tool events do NOT trigger a prompt.
+    if matches!(&msg, ServerMessage::TurnComplete) {
+        write_prompt(user_output, is_tty).await?;
     }
 
     Ok(new_in_stream)
@@ -874,8 +869,8 @@ mod tests {
             "tty mode should write styled 'You:' prompt, got: {output}"
         );
         assert!(
-            output.contains("FreeBird:"),
-            "tty mode should write styled 'FreeBird:' prefix, got: {output}"
+            output.contains("Freebird:"),
+            "tty mode should write styled 'Freebird:' prefix, got: {output}"
         );
         assert!(
             output.contains("\x1b["),

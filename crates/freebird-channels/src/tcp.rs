@@ -366,6 +366,7 @@ fn outbound_to_server_message(event: OutboundEvent) -> (String, ServerMessage) {
                 duration_ms,
             },
         ),
+        OutboundEvent::TurnComplete { recipient_id } => (recipient_id, ServerMessage::TurnComplete),
     }
 }
 
@@ -776,6 +777,12 @@ mod tests {
                         duration_ms: 42,
                     },
                 ),
+            ),
+            (
+                OutboundEvent::TurnComplete {
+                    recipient_id: "tcp-6".into(),
+                },
+                ("tcp-6".to_string(), ServerMessage::TurnComplete),
             ),
         ];
 

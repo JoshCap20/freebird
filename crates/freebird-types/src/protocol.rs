@@ -39,6 +39,8 @@ pub enum ServerMessage {
         outcome: String,
         duration_ms: u64,
     },
+    /// The full agentic turn is complete — client may prompt for next input.
+    TurnComplete,
 }
 
 #[cfg(test)]
@@ -159,6 +161,13 @@ mod tests {
     }
 
     #[test]
+    fn server_turn_complete_serializes() {
+        let msg = ServerMessage::TurnComplete;
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"turn_complete"}"#);
+    }
+
+    #[test]
     fn server_message_roundtrips() {
         for msg in [
             ServerMessage::Message {
@@ -178,6 +187,7 @@ mod tests {
                 outcome: "error".into(),
                 duration_ms: 100,
             },
+            ServerMessage::TurnComplete,
         ] {
             let json = serde_json::to_string(&msg).unwrap();
             let back: ServerMessage = serde_json::from_str(&json).unwrap();

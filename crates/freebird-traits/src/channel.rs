@@ -106,6 +106,10 @@ pub enum OutboundEvent {
         duration_ms: u64,
         recipient_id: String,
     },
+    /// The full agentic turn is complete — no more events for this user message.
+    TurnComplete {
+        recipient_id: String,
+    },
 }
 
 /// A media attachment.
