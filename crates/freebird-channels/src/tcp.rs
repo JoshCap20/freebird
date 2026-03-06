@@ -367,6 +367,21 @@ fn outbound_to_server_message(event: OutboundEvent) -> (String, ServerMessage) {
             },
         ),
         OutboundEvent::TurnComplete { recipient_id } => (recipient_id, ServerMessage::TurnComplete),
+        OutboundEvent::ConsentRequest {
+            tool_name,
+            action_summary,
+            risk_level,
+            recipient_id,
+            ..
+        } => (
+            recipient_id,
+            ServerMessage::Message {
+                text: format!(
+                    "[CONSENT REQUIRED] Tool `{tool_name}` (risk: {risk_level}) \
+                     wants to: {action_summary}\nReply /approve or /deny"
+                ),
+            },
+        ),
     }
 }
 
