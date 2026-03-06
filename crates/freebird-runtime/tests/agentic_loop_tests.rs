@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 use freebird_memory::in_memory::InMemoryMemory;
 use freebird_runtime::agent::AgentRuntime;
 use freebird_runtime::registry::ProviderRegistry;
+use freebird_security::safe_types::ScannedToolOutput;
 use freebird_traits::channel::{InboundEvent, OutboundEvent};
 use freebird_traits::id::{ModelId, ProviderId, SessionId};
 use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary, Turn};
@@ -1054,7 +1055,7 @@ async fn test_tool_output_injection_replaced_with_error() {
         .expect("should have messages");
     let has_blocked_tool_result = last_msg.content.iter().any(|block| {
         matches!(block, ContentBlock::ToolResult { content, is_error, .. }
-            if content.contains("Tool output blocked") && *is_error)
+            if content.contains(ScannedToolOutput::BLOCKED_MESSAGE) && *is_error)
     });
     assert!(
         has_blocked_tool_result,
@@ -1395,9 +1396,14 @@ async fn test_new_conversation_uses_config_values() {
     let requests = provider.captured_requests().await;
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].model.as_str(), "custom-model-v2");
-    assert_eq!(
-        requests[0].system_prompt.as_deref(),
-        Some("You are a custom bot.")
+    let prompt = requests[0].system_prompt.as_deref().unwrap_or("");
+    assert!(
+        prompt.starts_with("You are a custom bot."),
+        "system prompt should start with base prompt, got: {prompt}"
+    );
+    assert!(
+        prompt.contains("custom-model-v2"),
+        "system prompt should mention the model id, got: {prompt}"
     );
     assert_eq!(requests[0].max_tokens, 2048);
     assert_eq!(requests[0].temperature, Some(0.5));

@@ -707,6 +707,20 @@ impl SafeFileContent {
 
 // ── ScannedToolOutput ────────────────────────────────────────────
 
+// ── Shared injection-scan helper ─────────────────────────────────
+
+/// Scan raw content and return `(content, injection_detected)`.
+///
+/// If injection is detected, the content is replaced with `blocked_msg`.
+fn scan_and_wrap(raw: &str, blocked_msg: &str) -> (String, bool) {
+    match injection::scan_output(raw) {
+        Ok(()) => (raw.to_string(), false),
+        Err(_) => (blocked_msg.to_string(), true),
+    }
+}
+
+// ── ScannedToolOutput ────────────────────────────────────────────
+
 /// Tool output that has been scanned for prompt injection.
 ///
 /// Wraps tool output after injection scanning. If injection is detected,
@@ -714,29 +728,25 @@ impl SafeFileContent {
 /// content never reaches the LLM context.
 #[derive(Debug)]
 pub struct ScannedToolOutput {
-    /// The (possibly replaced) content.
     content: String,
-    /// Whether injection was detected and the content was replaced.
     injection_detected: bool,
 }
 
 impl ScannedToolOutput {
+    /// Message used when tool output injection is detected.
+    pub const BLOCKED_MESSAGE: &str = "Tool output blocked: potential prompt injection detected";
+
     /// Scan raw tool output for prompt injection patterns.
     ///
-    /// If injection is detected, the content is replaced with a synthetic
-    /// error message. The caller should check `injection_detected()` to
-    /// determine if the content is the original tool output or a replacement.
+    /// If injection is detected, the content is replaced with
+    /// [`Self::BLOCKED_MESSAGE`]. Check `injection_detected()` to
+    /// determine if the content is original or a replacement.
     #[must_use]
     pub fn from_raw(raw: &str) -> Self {
-        match injection::scan_output(raw) {
-            Ok(()) => Self {
-                content: raw.to_string(),
-                injection_detected: false,
-            },
-            Err(_) => Self {
-                content: "Tool output blocked: potential prompt injection detected".to_string(),
-                injection_detected: true,
-            },
+        let (content, injection_detected) = scan_and_wrap(raw, Self::BLOCKED_MESSAGE);
+        Self {
+            content,
+            injection_detected,
         }
     }
 
@@ -773,18 +783,16 @@ pub struct ScannedModelResponse {
 }
 
 impl ScannedModelResponse {
+    /// Message used when model response injection is detected.
+    pub const BLOCKED_MESSAGE: &str = "Response blocked: potential prompt injection detected";
+
     /// Scan raw model response for prompt injection patterns.
     #[must_use]
     pub fn from_raw(raw: &str) -> Self {
-        match injection::scan_output(raw) {
-            Ok(()) => Self {
-                content: raw.to_string(),
-                injection_detected: false,
-            },
-            Err(_) => Self {
-                content: "Response blocked: potential prompt injection detected".to_string(),
-                injection_detected: true,
-            },
+        let (content, injection_detected) = scan_and_wrap(raw, Self::BLOCKED_MESSAGE);
+        Self {
+            content,
+            injection_detected,
         }
     }
 

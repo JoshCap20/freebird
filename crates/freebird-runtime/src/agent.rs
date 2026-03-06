@@ -34,9 +34,6 @@ use crate::history::conversation_to_messages;
 use crate::registry::ProviderRegistry;
 use crate::stream::StreamAccumulator;
 
-/// Error message sent to the user when model output injection is detected.
-const MODEL_OUTPUT_INJECTION_BLOCKED: &str =
-    "Response blocked: potential prompt injection detected in model output.";
 use crate::session::SessionManager;
 
 /// Controls the event loop after handling an event.
@@ -568,7 +565,8 @@ impl AgentRuntime {
         tool_definitions: &[ToolDefinition],
     ) -> CompletionRequest {
         let base = conversation.system_prompt.as_deref().unwrap_or("");
-        let system_prompt = self.build_effective_system_prompt(base);
+        let system_prompt =
+            self.build_effective_system_prompt(base, conversation.model_id.as_str());
 
         CompletionRequest {
             model: conversation.model_id.clone(),
@@ -583,10 +581,11 @@ impl AgentRuntime {
 
     /// Augment the base system prompt with tool and filesystem access
     /// information so the model knows what it can do.
-    fn build_effective_system_prompt(&self, base: &str) -> String {
+    fn build_effective_system_prompt(&self, base: &str, model_id: &str) -> String {
         use std::fmt::Write;
 
         let mut prompt = base.to_owned();
+        let _ = write!(prompt, "\n\nYou are running on model: {model_id}");
 
         if self.tools.is_empty() {
             return prompt;
@@ -756,7 +755,7 @@ impl AgentRuntime {
 
             let _ = outbound
                 .send(OutboundEvent::Error {
-                    text: MODEL_OUTPUT_INJECTION_BLOCKED.into(),
+                    text: ScannedModelResponse::BLOCKED_MESSAGE.into(),
                     recipient_id: sender_id.into(),
                 })
                 .await;
@@ -798,7 +797,7 @@ impl AgentRuntime {
 
             let _ = outbound
                 .send(OutboundEvent::Error {
-                    text: MODEL_OUTPUT_INJECTION_BLOCKED.into(),
+                    text: ScannedModelResponse::BLOCKED_MESSAGE.into(),
                     recipient_id: sender_id.into(),
                 })
                 .await;

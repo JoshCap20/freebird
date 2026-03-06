@@ -659,10 +659,7 @@ mod tests {
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Error);
-        assert_eq!(
-            output.content,
-            "Tool output blocked: potential prompt injection detected"
-        );
+        assert_eq!(output.content, ScannedToolOutput::BLOCKED_MESSAGE);
     }
 
     #[tokio::test]
