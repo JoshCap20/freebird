@@ -540,6 +540,18 @@ mod tests {
         assert!(rendered.contains("42ms"), "should contain duration");
     }
 
+    #[test]
+    fn render_turn_complete_returns_empty() {
+        assert_eq!(
+            render_server_message(&ServerMessage::TurnComplete, false),
+            ""
+        );
+        assert_eq!(
+            render_server_message(&ServerMessage::TurnComplete, true),
+            ""
+        );
+    }
+
     // ── Integration tests (is_tty = false) ────────────────────────────
     //
     // All integration tests pass `is_tty = false` so prompts are never written
@@ -879,6 +891,55 @@ mod tests {
         assert!(
             output.contains("pong"),
             "response text should still appear, got: {output}"
+        );
+    }
+
+    /// `TurnComplete` triggers a new "You: " prompt in TTY mode.
+    #[tokio::test]
+    async fn tty_turn_complete_triggers_reprompt() {
+        let (listener, port) = bind_random().await;
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (_read_half, mut write_half) = stream.into_split();
+
+            // Send a complete turn: Message then TurnComplete
+            for msg in [
+                ServerMessage::Message {
+                    text: "hello".into(),
+                },
+                ServerMessage::TurnComplete,
+            ] {
+                let json = serde_json::to_string(&msg).unwrap();
+                write_half
+                    .write_all(format!("{json}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            write_half.flush().await.unwrap();
+            drop(write_half);
+        });
+
+        let stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+
+        let (_stdin_write, stdin_read) = duplex(1024);
+        let input = BufReader::new(stdin_read);
+        let (output_writer, mut output_reader) = duplex(4096);
+
+        run_chat_with_io(stream, input, output_writer, true)
+            .await
+            .unwrap();
+
+        let mut output = String::new();
+        output_reader.read_to_string(&mut output).await.unwrap();
+
+        // "You:" should appear at least twice: initial prompt + after TurnComplete
+        let you_count = output.matches("You:").count();
+        assert!(
+            you_count >= 2,
+            "expected at least 2 'You:' prompts (initial + after TurnComplete), got {you_count} in: {output}"
         );
     }
 }
