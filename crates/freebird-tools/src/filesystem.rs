@@ -200,6 +200,12 @@ impl Tool for WriteFileTool {
 
         // Atomic write: temp file + rename.
         // Unique suffix avoids collisions from concurrent writes.
+        //
+        // `file_name()` is always `Some` for a SafeFilePath (validated non-empty,
+        // no trailing separator). `to_str()` could fail on non-UTF-8 OS strings,
+        // but SafeFilePath is constructed from a UTF-8 `Tainted` input, so the
+        // path components are always valid UTF-8. The fallback is a harmless
+        // default that only affects the temp file name.
         let file_name = safe_path
             .as_path()
             .file_name()
