@@ -844,6 +844,102 @@ mod tests {
         );
     }
 
+    // ── allowed_directories tests ──────────────────────────────
+
+    #[tokio::test]
+    async fn test_read_file_via_allowed_directory() {
+        let h = TestHarness::new();
+        let extra_dir = tempfile::tempdir().unwrap();
+        // Canonicalize to resolve macOS /var → /private/var symlink
+        let extra_canonical = extra_dir.path().canonicalize().unwrap();
+        std::fs::write(extra_canonical.join("external.txt"), "external data").unwrap();
+
+        let h = h.with_allowed_directories(vec![extra_canonical.clone()]);
+        let tool = ReadFileTool::new();
+
+        let abs_path = extra_canonical.join("external.txt");
+        let output = tool
+            .execute(
+                serde_json::json!({"path": abs_path.to_str().unwrap()}),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.content, "external data");
+        assert!(matches!(output.outcome, ToolOutcome::Success));
+    }
+
+    #[tokio::test]
+    async fn test_write_file_via_allowed_directory() {
+        let h = TestHarness::new();
+        let extra_dir = tempfile::tempdir().unwrap();
+        let extra_canonical = extra_dir.path().canonicalize().unwrap();
+
+        let h = h.with_allowed_directories(vec![extra_canonical.clone()]);
+        let tool = WriteFileTool::new();
+
+        let abs_path = extra_canonical.join("written.txt");
+        let output = tool
+            .execute(
+                serde_json::json!({"path": abs_path.to_str().unwrap(), "content": "allowed write"}),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(output.outcome, ToolOutcome::Success));
+
+        let written = std::fs::read_to_string(&abs_path).unwrap();
+        assert_eq!(written, "allowed write");
+    }
+
+    #[tokio::test]
+    async fn test_absolute_path_rejected_when_not_in_allowed_directories() {
+        let h = TestHarness::new();
+        let extra_dir = tempfile::tempdir().unwrap();
+        std::fs::write(extra_dir.path().join("secret.txt"), "secret").unwrap();
+
+        // Don't add extra_dir to allowed_directories
+        let tool = ReadFileTool::new();
+
+        let abs_path = extra_dir.path().canonicalize().unwrap().join("secret.txt");
+        let err = tool
+            .execute(
+                serde_json::json!({"path": abs_path.to_str().unwrap()}),
+                &h.context(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput { tool, .. } => assert_eq!(tool, "read_file"),
+            other => panic!("expected InvalidInput, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_directory_via_allowed_directory() {
+        let h = TestHarness::new();
+        let extra_dir = tempfile::tempdir().unwrap();
+        let extra_canonical = extra_dir.path().canonicalize().unwrap();
+        std::fs::write(extra_canonical.join("visible.txt"), "").unwrap();
+
+        let h = h.with_allowed_directories(vec![extra_canonical.clone()]);
+        let tool = ListDirectoryTool::new();
+
+        let output = tool
+            .execute(
+                serde_json::json!({"path": extra_canonical.to_str().unwrap()}),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(output.outcome, ToolOutcome::Success));
+        assert!(
+            output.content.contains("visible.txt"),
+            "should list files in allowed dir: {}",
+            output.content
+        );
+    }
+
     // ── Factory test ────────────────────────────────────────────
 
     #[test]
