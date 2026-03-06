@@ -733,6 +733,14 @@ impl AgentRuntime {
             Ok(g) => g,
             Err(e) => {
                 tracing::error!(error = %e, "cannot create capability grant — skipping tool execution");
+                send_outbound(
+                    outbound,
+                    OutboundEvent::Error {
+                        text: "Internal error: sandbox root is not accessible".into(),
+                        recipient_id: sender_id.into(),
+                    },
+                )
+                .await;
                 return;
             }
         };
