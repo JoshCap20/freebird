@@ -106,7 +106,12 @@ async fn cmd_serve() -> Result<()> {
     let sandbox_root = expand_tilde(&config.tools.sandbox_root)?;
     tokio::fs::create_dir_all(&sandbox_root)
         .await
-        .with_context(|| format!("failed to create sandbox directory `{}`", sandbox_root.display()))?;
+        .with_context(|| {
+            format!(
+                "failed to create sandbox directory `{}`",
+                sandbox_root.display()
+            )
+        })?;
     let tools: Vec<Box<dyn freebird_traits::tool::Tool>> =
         freebird_tools::filesystem::filesystem_tools(sandbox_root);
 

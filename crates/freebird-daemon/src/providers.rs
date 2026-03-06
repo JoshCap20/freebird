@@ -26,20 +26,18 @@ pub async fn build_provider_registry(config: &AppConfig) -> Result<ProviderRegis
 
     for provider_config in &config.providers {
         match provider_config.kind {
-            ProviderKind::Anthropic => {
-                match build_anthropic_provider(provider_config).await {
-                    Ok(provider) => {
-                        registry.register(provider_config.id.clone(), Box::new(provider));
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            provider = %provider_config.id,
-                            error = %e,
-                            "failed to initialize provider, skipping"
-                        );
-                    }
+            ProviderKind::Anthropic => match build_anthropic_provider(provider_config).await {
+                Ok(provider) => {
+                    registry.register(provider_config.id.clone(), Box::new(provider));
                 }
-            }
+                Err(e) => {
+                    tracing::warn!(
+                        provider = %provider_config.id,
+                        error = %e,
+                        "failed to initialize provider, skipping"
+                    );
+                }
+            },
             ProviderKind::OpenAi => {
                 tracing::warn!(
                     provider = %provider_config.id,
@@ -70,18 +68,16 @@ pub async fn build_provider_registry(config: &AppConfig) -> Result<ProviderRegis
 }
 
 /// Build a single Anthropic provider from config, loading credentials from env.
-async fn build_anthropic_provider(
-    provider_config: &ProviderConfig,
-) -> Result<AnthropicProvider> {
+async fn build_anthropic_provider(provider_config: &ProviderConfig) -> Result<AnthropicProvider> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .map(SecretString::from)
+        .map(|s| SecretString::from(s.trim().to_owned()))
         .map_err(|e| match e {
-            std::env::VarError::NotPresent => anyhow::anyhow!(
-                "ANTHROPIC_API_KEY environment variable not set"
-            ),
-            std::env::VarError::NotUnicode(_) => anyhow::anyhow!(
-                "ANTHROPIC_API_KEY contains invalid UTF-8"
-            ),
+            std::env::VarError::NotPresent => {
+                anyhow::anyhow!("ANTHROPIC_API_KEY environment variable not set")
+            }
+            std::env::VarError::NotUnicode(_) => {
+                anyhow::anyhow!("ANTHROPIC_API_KEY contains invalid UTF-8")
+            }
         })?;
 
     let anthropic_config = AnthropicConfig {

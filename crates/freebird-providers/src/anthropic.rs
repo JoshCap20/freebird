@@ -228,10 +228,20 @@ pub struct AnthropicConfig {
     pub default_model: Option<String>,
 }
 
+/// How the provider authenticates with the Anthropic API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthKind {
+    /// Standard API key from console.anthropic.com → `x-api-key` header.
+    ApiKey,
+    /// OAuth token from Claude Pro/Max subscription → `Authorization: Bearer` header.
+    OAuthToken,
+}
+
 /// The Anthropic provider implementation.
 pub struct AnthropicProvider {
     client: Client,
     api_key: SecretString,
+    auth_kind: AuthKind,
     base_url: String,
     default_model: String,
     info: ProviderInfo,
@@ -286,13 +296,39 @@ impl AnthropicProvider {
             ]),
         };
 
+        let auth_kind = if api_key.expose_secret().starts_with("sk-ant-oat") {
+            AuthKind::OAuthToken
+        } else {
+            AuthKind::ApiKey
+        };
+
         Ok(Self {
             client,
             api_key,
+            auth_kind,
             base_url,
             default_model,
             info,
         })
+    }
+
+    /// Build a POST request to the messages endpoint with correct auth headers.
+    fn messages_request(&self) -> reqwest::RequestBuilder {
+        let builder = self
+            .client
+            .post(format!("{}/v1/messages", self.base_url))
+            .header("anthropic-version", API_VERSION)
+            .header("content-type", "application/json");
+
+        match self.auth_kind {
+            AuthKind::ApiKey => builder.header("x-api-key", self.api_key.expose_secret()),
+            AuthKind::OAuthToken => builder
+                .header(
+                    "authorization",
+                    format!("Bearer {}", self.api_key.expose_secret()),
+                )
+                .header("anthropic-beta", "oauth-2025-04-20"),
+        }
     }
 }
 
@@ -797,11 +833,7 @@ impl Provider for AnthropicProvider {
         });
 
         let resp = self
-            .client
-            .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", self.api_key.expose_secret())
-            .header("anthropic-version", API_VERSION)
-            .header("content-type", "application/json")
+            .messages_request()
             .json(&body)
             .send()
             .await
@@ -821,11 +853,7 @@ impl Provider for AnthropicProvider {
         let api_request = build_request_body(request);
 
         let resp = self
-            .client
-            .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", self.api_key.expose_secret())
-            .header("anthropic-version", API_VERSION)
-            .header("content-type", "application/json")
+            .messages_request()
             .json(&api_request)
             .send()
             .await
@@ -852,11 +880,7 @@ impl Provider for AnthropicProvider {
         api_request.stream = Some(true);
 
         let resp = self
-            .client
-            .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", self.api_key.expose_secret())
-            .header("anthropic-version", API_VERSION)
-            .header("content-type", "application/json")
+            .messages_request()
             .json(&api_request)
             .send()
             .await
