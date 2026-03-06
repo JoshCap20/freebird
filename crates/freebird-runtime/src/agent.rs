@@ -340,18 +340,15 @@ impl AgentRuntime {
         match SafeMessage::from_tainted(&tainted) {
             Ok(msg) => Some(msg),
             Err(e) => {
-                if let Some(audit) = &self.audit {
-                    let _ = audit
-                        .record(
-                            session_id.as_str(),
-                            AuditEventType::InjectionDetected {
-                                pattern: format!("{e}"),
-                                source: InjectionSource::UserInput,
-                                severity: Severity::High,
-                            },
-                        )
-                        .await;
-                }
+                self.audit(
+                    session_id,
+                    AuditEventType::InjectionDetected {
+                        pattern: format!("{e}"),
+                        source: InjectionSource::UserInput,
+                        severity: Severity::High,
+                    },
+                )
+                .await;
                 let _ = outbound
                     .send(OutboundEvent::Error {
                         text: "Message rejected by input validation.".into(),
@@ -452,21 +449,18 @@ impl AgentRuntime {
         sender_id: &str,
         outbound: &mpsc::Sender<OutboundEvent>,
     ) {
-        if let Some(audit) = &self.audit {
-            let _ = audit
-                .record(
-                    session_id.as_str(),
-                    AuditEventType::PolicyViolation {
-                        rule: "max_tool_rounds".into(),
-                        context: format!(
-                            "agentic loop exhausted {} rounds without completing",
-                            self.config.max_tool_rounds
-                        ),
-                        severity: Severity::Medium,
-                    },
-                )
-                .await;
-        }
+        self.audit(
+            session_id,
+            AuditEventType::PolicyViolation {
+                rule: "max_tool_rounds".into(),
+                context: format!(
+                    "agentic loop exhausted {} rounds without completing",
+                    self.config.max_tool_rounds
+                ),
+                severity: Severity::Medium,
+            },
+        )
+        .await;
         current_turn.completed_at = Some(Utc::now());
         send_outbound(
             outbound,
@@ -678,18 +672,15 @@ impl AgentRuntime {
             let scanned = ScannedToolOutput::from_raw(&output.content);
             let (final_content, outcome) = if scanned.injection_detected() {
                 tracing::warn!(tool = %tool_name, "injection detected in tool output, blocking");
-                if let Some(audit) = &self.audit {
-                    let _ = audit
-                        .record(
-                            session_id.as_str(),
-                            AuditEventType::InjectionDetected {
-                                pattern: "prompt injection in tool output".to_owned(),
-                                source: InjectionSource::ToolOutput,
-                                severity: Severity::High,
-                            },
-                        )
-                        .await;
-                }
+                self.audit(
+                    session_id,
+                    AuditEventType::InjectionDetected {
+                        pattern: "prompt injection in tool output".to_owned(),
+                        source: InjectionSource::ToolOutput,
+                        severity: Severity::High,
+                    },
+                )
+                .await;
                 (scanned.into_content(), ToolOutcome::Error)
             } else {
                 (scanned.into_content(), output.outcome)
@@ -750,8 +741,16 @@ impl AgentRuntime {
         // Scan model output for injection — BLOCK if detected
         let scanned = ScannedModelResponse::from_raw(&response_text);
         if scanned.injection_detected() {
-            self.log_model_output_injection(session_id, "prompt injection in model output")
-                .await;
+            tracing::warn!("injection detected in model output, blocking delivery");
+            self.audit(
+                session_id,
+                AuditEventType::InjectionDetected {
+                    pattern: "prompt injection in model output".to_owned(),
+                    source: InjectionSource::ModelResponse,
+                    severity: Severity::High,
+                },
+            )
+            .await;
 
             let _ = outbound
                 .send(OutboundEvent::Error {
@@ -792,8 +791,16 @@ impl AgentRuntime {
         // Scan truncated output for injection — BLOCK if detected
         let scanned = ScannedModelResponse::from_raw(&partial_text);
         if scanned.injection_detected() {
-            self.log_model_output_injection(session_id, "prompt injection in model output")
-                .await;
+            tracing::warn!("injection detected in model output, blocking delivery");
+            self.audit(
+                session_id,
+                AuditEventType::InjectionDetected {
+                    pattern: "prompt injection in model output".to_owned(),
+                    source: InjectionSource::ModelResponse,
+                    severity: Severity::High,
+                },
+            )
+            .await;
 
             let _ = outbound
                 .send(OutboundEvent::Error {
@@ -819,20 +826,14 @@ impl AgentRuntime {
         current_turn.completed_at = Some(Utc::now());
     }
 
-    /// Log a model output injection detection to audit.
-    async fn log_model_output_injection(&self, session_id: &SessionId, description: &str) {
-        tracing::warn!("injection detected in model output, blocking delivery");
+    /// Record an audit event if an audit logger is configured.
+    ///
+    /// No-op when `self.audit` is `None`. Errors from the audit logger
+    /// are intentionally discarded — audit failures must never block the
+    /// agent loop.
+    async fn audit(&self, session_id: &SessionId, event: AuditEventType) {
         if let Some(audit) = &self.audit {
-            let _ = audit
-                .record(
-                    session_id.as_str(),
-                    AuditEventType::InjectionDetected {
-                        pattern: description.to_owned(),
-                        source: InjectionSource::ModelResponse,
-                        severity: Severity::High,
-                    },
-                )
-                .await;
+            let _ = audit.record(session_id.as_str(), event).await;
         }
     }
 
@@ -844,19 +845,16 @@ impl AgentRuntime {
         session_id: &SessionId,
     ) -> ToolOutput {
         let Some(tool) = self.find_tool(tool_name) else {
-            if let Some(audit) = &self.audit {
-                let _ = audit
-                    .record(
-                        session_id.as_str(),
-                        AuditEventType::ToolInvocation {
-                            tool_name: tool_name.into(),
-                            capability_check: CapabilityCheckResult::Denied {
-                                reason: "tool not found".into(),
-                            },
-                        },
-                    )
-                    .await;
-            }
+            self.audit(
+                session_id,
+                AuditEventType::ToolInvocation {
+                    tool_name: tool_name.into(),
+                    capability_check: CapabilityCheckResult::Denied {
+                        reason: "tool not found".into(),
+                    },
+                },
+            )
+            .await;
             return ToolOutput {
                 content: format!("Error: tool `{tool_name}` not found"),
                 outcome: ToolOutcome::Error,
@@ -864,17 +862,14 @@ impl AgentRuntime {
             };
         };
 
-        if let Some(audit) = &self.audit {
-            let _ = audit
-                .record(
-                    session_id.as_str(),
-                    AuditEventType::ToolInvocation {
-                        tool_name: tool_name.into(),
-                        capability_check: CapabilityCheckResult::Granted,
-                    },
-                )
-                .await;
-        }
+        self.audit(
+            session_id,
+            AuditEventType::ToolInvocation {
+                tool_name: tool_name.into(),
+                capability_check: CapabilityCheckResult::Granted,
+            },
+        )
+        .await;
 
         let context = ToolContext {
             session_id,
@@ -1113,8 +1108,16 @@ impl AgentRuntime {
         let response_text = extract_text(message);
         let scanned = ScannedModelResponse::from_raw(&response_text);
         if scanned.injection_detected() {
-            self.log_model_output_injection(session_id, "prompt injection in model output")
-                .await;
+            tracing::warn!("injection detected in model output, blocking delivery");
+            self.audit(
+                session_id,
+                AuditEventType::InjectionDetected {
+                    pattern: "prompt injection in model output".to_owned(),
+                    source: InjectionSource::ModelResponse,
+                    severity: Severity::High,
+                },
+            )
+            .await;
         }
     }
 
