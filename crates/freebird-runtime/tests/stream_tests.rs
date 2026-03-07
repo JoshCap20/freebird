@@ -496,14 +496,8 @@ fn default_tools_config() -> ToolsConfig {
 }
 
 fn make_tool_executor(tools: Vec<Box<dyn Tool>>) -> ToolExecutor {
-    ToolExecutor::new(
-        tools,
-        Duration::from_secs(30),
-        None,
-        vec![],
-        None,
-    )
-    .expect("test tool executor construction should not fail")
+    ToolExecutor::new(tools, Duration::from_secs(30), None, vec![], None)
+        .expect("test tool executor construction should not fail")
 }
 
 fn make_stream_registry(provider: Arc<QueuedStreamProvider>) -> ProviderRegistry {

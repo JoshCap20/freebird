@@ -12,7 +12,6 @@
 mod helpers;
 
 use std::collections::{BTreeSet, VecDeque};
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -449,14 +448,8 @@ fn default_tools_config() -> ToolsConfig {
 }
 
 fn make_tool_executor(tools: Vec<Box<dyn Tool>>) -> ToolExecutor {
-    ToolExecutor::new(
-        tools,
-        Duration::from_secs(30),
-        None,
-        vec![],
-        None,
-    )
-    .expect("test tool executor construction should not fail")
+    ToolExecutor::new(tools, Duration::from_secs(30), None, vec![], None)
+        .expect("test tool executor construction should not fail")
 }
 
 fn make_registry(provider: Arc<QueuedProvider>) -> ProviderRegistry {
@@ -637,9 +630,7 @@ async fn test_tool_use_single_round() {
     let runtime = make_test_runtime(
         channel,
         provider.clone(),
-        {
-            make_tool_executor(vec![Box::new(mock_tool)])
-        },
+        make_tool_executor(vec![Box::new(mock_tool)]),
         Box::new(InMemoryMemory::new()),
     );
 
@@ -684,9 +675,7 @@ async fn test_tool_use_multi_round() {
     let runtime = make_test_runtime(
         channel,
         provider.clone(),
-        {
-            make_tool_executor(vec![Box::new(mock_tool)])
-        },
+        make_tool_executor(vec![Box::new(mock_tool)]),
         Box::new(InMemoryMemory::new()),
     );
 
@@ -744,9 +733,7 @@ async fn test_tool_use_execution_error() {
     let runtime = make_test_runtime(
         channel,
         provider.clone(),
-        {
-            make_tool_executor(vec![Box::new(mock_tool)])
-        },
+        make_tool_executor(vec![Box::new(mock_tool)]),
         Box::new(InMemoryMemory::new()),
     );
 
@@ -770,19 +757,27 @@ async fn test_tool_use_timeout() {
     let slow_tool = SlowTool::new("slow_tool", Duration::from_secs(60));
 
     let tools_config = ToolsConfig {
-        sandbox_root: PathBuf::from("/tmp/test-sandbox"),
+        sandbox_root: std::env::temp_dir(),
         default_timeout_secs: 1, // 1 second timeout
         allowed_directories: vec![],
         allowed_shell_commands: vec![],
         max_shell_output_bytes: 1_048_576,
     };
 
+    // Use a 1-second timeout executor to match tools_config
+    let short_timeout_executor = ToolExecutor::new(
+        vec![Box::new(slow_tool)],
+        Duration::from_secs(1),
+        None,
+        vec![],
+        None,
+    )
+    .unwrap();
+
     let runtime = AgentRuntime::new(
         make_registry(provider.clone()),
         Box::new(channel),
-        {
-            make_tool_executor(vec![Box::new(slow_tool)])
-        },
+        short_timeout_executor,
         None,
         Box::new(InMemoryMemory::new()),
         default_config(),
@@ -835,9 +830,7 @@ async fn test_tool_use_max_rounds_exceeded() {
     let runtime = AgentRuntime::new(
         make_registry(provider.clone()),
         Box::new(channel),
-        {
-            make_tool_executor(vec![Box::new(mock_tool)])
-        },
+        make_tool_executor(vec![Box::new(mock_tool)]),
         None,
         Box::new(InMemoryMemory::new()),
         config,
@@ -890,9 +883,7 @@ async fn test_tool_use_multiple_tools_per_round() {
     let runtime = make_test_runtime(
         channel,
         provider.clone(),
-        {
-            make_tool_executor(vec![Box::new(tool_a), Box::new(tool_b)])
-        },
+        make_tool_executor(vec![Box::new(tool_a), Box::new(tool_b)]),
         Box::new(InMemoryMemory::new()),
     );
 
@@ -955,9 +946,7 @@ async fn test_tool_invocations_recorded_in_turn() {
     let runtime = AgentRuntime::new(
         make_registry(provider),
         Box::new(channel),
-        {
-            make_tool_executor(vec![Box::new(mock_tool)])
-        },
+        make_tool_executor(vec![Box::new(mock_tool)]),
         None,
         Box::new(ArcMemory(Arc::clone(&memory))),
         default_config(),
@@ -1094,9 +1083,7 @@ async fn test_tool_output_injection_replaced_with_error() {
     let runtime = AgentRuntime::new(
         make_capturing_registry(Arc::clone(&provider)),
         Box::new(channel),
-        {
-            make_tool_executor(vec![Box::new(mock_tool)])
-        },
+        make_tool_executor(vec![Box::new(mock_tool)]),
         None,
         Box::new(InMemoryMemory::new()),
         default_config(),

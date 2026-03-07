@@ -13,10 +13,10 @@ use std::time::Duration;
 use freebird_runtime::agent::AgentRuntime;
 use freebird_runtime::registry::ProviderRegistry;
 use freebird_runtime::tool_executor::ToolExecutor;
-use freebird_traits::tool::Tool;
 use freebird_traits::channel::InboundEvent;
 use freebird_traits::id::{ModelId, ProviderId, SessionId};
 use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary};
+use freebird_traits::tool::Tool;
 use freebird_types::config::{RuntimeConfig, ToolsConfig};
 use tokio_util::sync::CancellationToken;
 
@@ -48,14 +48,8 @@ impl Memory for NoopMemory {
 }
 
 fn make_tool_executor(tools: Vec<Box<dyn Tool>>) -> ToolExecutor {
-    ToolExecutor::new(
-        tools,
-        Duration::from_secs(30),
-        None,
-        vec![],
-        None,
-    )
-    .expect("test tool executor construction should not fail")
+    ToolExecutor::new(tools, Duration::from_secs(30), None, vec![], None)
+        .expect("test tool executor construction should not fail")
 }
 
 fn make_runtime(channel: MockChannel) -> AgentRuntime {
