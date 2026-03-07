@@ -5,6 +5,8 @@
 //! routes them to handlers, and shuts down gracefully when the
 //! cancellation token fires or the inbound stream closes.
 
+use std::pin::Pin;
+
 use chrono::Utc;
 use freebird_security::audit::{AuditEventType, AuditLogger, InjectionSource};
 use freebird_security::capability::CapabilityGrant;
@@ -124,10 +126,15 @@ impl AgentRuntime {
     /// Returns `RuntimeError::Channel` if the channel fails to start or stop.
     pub async fn run(&mut self, cancel: CancellationToken) -> Result<(), RuntimeError> {
         let handle = self.channel.start().await?;
-        let mut inbound = handle.inbound;
         let outbound = handle.outbound;
 
         tracing::info!("agent runtime started, waiting for messages");
+
+        // Fan-out inbound events into a splitter task and optional consent
+        // bridge task. See `spawn_inbound_splitter` and
+        // `spawn_consent_forwarder` for details.
+        let (mut main_rx, splitter_task, consent_task) =
+            self.spawn_consent_bridge(handle.inbound, &outbound, &cancel);
 
         loop {
             tokio::select! {
@@ -135,10 +142,7 @@ impl AgentRuntime {
                     tracing::info!("shutdown signal received, stopping runtime");
                     break;
                 }
-                Some(req) = recv_consent(&mut self.consent_rx) => {
-                    self.forward_consent_request(req, &outbound).await;
-                }
-                event = inbound.next() => {
+                event = main_rx.recv() => {
                     if let Some(event) = event {
                         if matches!(
                             self.handle_event(event, &outbound).await,
@@ -154,8 +158,113 @@ impl AgentRuntime {
             }
         }
 
+        // Clean up spawned tasks
+        splitter_task.abort();
+        if let Some(task) = consent_task {
+            task.abort();
+        }
+
         self.channel.stop().await?;
         Ok(())
+    }
+
+    /// Spawn background tasks for consent bridge plumbing.
+    ///
+    /// Returns a receiver for non-consent inbound events, the splitter task
+    /// handle, and an optional consent-forwarder task handle.
+    ///
+    /// **Splitter task**: reads from the raw inbound stream and routes
+    /// `ConsentResponse` events directly to the consent gate's
+    /// [`ConsentResponder`], bypassing the main event loop. All other
+    /// events are forwarded to the returned `main_rx`. This is necessary
+    /// because `handle_event()` may block on `check_consent()` (awaiting
+    /// user approval via oneshot), and the `ConsentResponse` that unblocks
+    /// it also arrives as an `InboundEvent`.
+    ///
+    /// **Consent-forwarder task**: reads `ConsentRequest`s from the gate's
+    /// mpsc channel and forwards them as `OutboundEvent::ConsentRequest` to
+    /// the user's channel.
+    fn spawn_consent_bridge(
+        &mut self,
+        inbound: Pin<Box<dyn futures::Stream<Item = InboundEvent> + Send>>,
+        outbound: &mpsc::Sender<OutboundEvent>,
+        cancel: &CancellationToken,
+    ) -> (
+        mpsc::Receiver<InboundEvent>,
+        tokio::task::JoinHandle<()>,
+        Option<tokio::task::JoinHandle<()>>,
+    ) {
+        let (main_tx, main_rx) = mpsc::channel::<InboundEvent>(32);
+        let consent_responder = self.tool_executor.consent_responder();
+        let has_consent_gate = consent_responder.is_some();
+
+        let splitter_cancel = cancel.clone();
+        let splitter_task = tokio::spawn({
+            let mut inbound = inbound;
+            async move {
+                loop {
+                    tokio::select! {
+                        () = splitter_cancel.cancelled() => break,
+                        event = inbound.next() => {
+                            match event {
+                                Some(InboundEvent::ConsentResponse {
+                                    request_id, approved, reason, sender_id,
+                                }) if has_consent_gate => {
+                                    if let Some(ref resp) = consent_responder {
+                                        let response = if approved {
+                                            freebird_security::consent::ConsentResponse::Approved
+                                        } else {
+                                            freebird_security::consent::ConsentResponse::Denied { reason }
+                                        };
+                                        if !resp.respond(&request_id, response).await {
+                                            tracing::warn!(
+                                                %request_id, %sender_id,
+                                                "consent response for unknown or expired request"
+                                            );
+                                        }
+                                    }
+                                }
+                                Some(event) => {
+                                    if main_tx.send(event).await.is_err() { break; }
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let consent_task = self.consent_rx.take().map(|mut consent_rx| {
+            let consent_cancel = cancel.clone();
+            let consent_outbound = outbound.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        () = consent_cancel.cancelled() => break,
+                        req = consent_rx.recv() => {
+                            match req {
+                                Some(req) => {
+                                    let event = OutboundEvent::ConsentRequest {
+                                        request_id: req.id,
+                                        tool_name: req.tool_name,
+                                        description: req.description,
+                                        risk_level: format!("{:?}", req.risk_level),
+                                        action_summary: req.action_summary,
+                                        expires_at: req.expires_at.to_rfc3339(),
+                                        recipient_id: req.sender_id,
+                                    };
+                                    let _ = consent_outbound.send(event).await;
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                }
+            })
+        });
+
+        (main_rx, splitter_task, consent_task)
     }
 
     /// Route an inbound event to the appropriate handler.
@@ -210,26 +319,19 @@ impl AgentRuntime {
             }
             InboundEvent::ConsentResponse {
                 request_id,
-                approved,
-                reason,
                 sender_id,
+                ..
             } => {
-                let response = if approved {
-                    freebird_security::consent::ConsentResponse::Approved
-                } else {
-                    freebird_security::consent::ConsentResponse::Denied { reason }
-                };
-                let delivered = self
-                    .tool_executor
-                    .consent_respond(&request_id, response)
-                    .await;
-                if !delivered {
-                    tracing::warn!(
-                        %request_id,
-                        %sender_id,
-                        "consent response for unknown or expired request"
-                    );
-                }
+                // When a consent gate is configured, ConsentResponse events
+                // are handled by the splitter task (which runs concurrently
+                // and can deliver responses while handle_event is blocked).
+                // This arm only fires when no consent gate is configured
+                // (the splitter passes them through to the main loop).
+                tracing::warn!(
+                    %request_id,
+                    %sender_id,
+                    "consent response received but no consent gate is configured"
+                );
                 LoopAction::Continue
             }
         }
@@ -1166,41 +1268,6 @@ impl AgentRuntime {
         if scanned.injection_detected() {
             self.audit_model_injection(session_id).await;
         }
-    }
-
-    /// Forward a consent request from the gate to the user's channel.
-    ///
-    /// TODO: In future, broadcast to all active channels or route to a
-    /// preferred approval channel (e.g. Signal on phone). Currently sends
-    /// to the channel/sender that triggered the tool call.
-    async fn forward_consent_request(
-        &self,
-        req: freebird_security::consent::ConsentRequest,
-        outbound: &mpsc::Sender<OutboundEvent>,
-    ) {
-        let event = OutboundEvent::ConsentRequest {
-            request_id: req.id,
-            tool_name: req.tool_name,
-            description: req.description,
-            risk_level: format!("{:?}", req.risk_level),
-            action_summary: req.action_summary,
-            expires_at: req.expires_at.to_rfc3339(),
-            recipient_id: req.sender_id,
-        };
-        send_outbound(outbound, event).await;
-    }
-}
-
-/// Receive from the consent channel, or pend forever if no gate is configured.
-///
-/// When `consent_rx` is `None` (no consent gate), this future never resolves,
-/// so the `select!` arm is effectively disabled.
-async fn recv_consent(
-    rx: &mut Option<mpsc::Receiver<freebird_security::consent::ConsentRequest>>,
-) -> Option<freebird_security::consent::ConsentRequest> {
-    match rx.as_mut() {
-        Some(rx) => rx.recv().await,
-        None => std::future::pending().await,
     }
 }
 

@@ -157,6 +157,16 @@ impl ToolExecutor {
         }
     }
 
+    /// Get a [`ConsentResponder`] handle that can be sent to spawned tasks.
+    ///
+    /// Returns `None` if no consent gate is configured. The responder shares
+    /// the same pending-request map as the gate, so calling `respond()` on it
+    /// will unblock a `check()` awaiting approval.
+    #[must_use]
+    pub fn consent_responder(&self) -> Option<freebird_security::consent::ConsentResponder> {
+        self.consent_gate.as_ref().map(ConsentGate::responder)
+    }
+
     /// Execute a tool by name. This is the ONLY entry point for tool execution.
     ///
     /// Enforces the mandatory security sequence from CLAUDE.md §11.2:

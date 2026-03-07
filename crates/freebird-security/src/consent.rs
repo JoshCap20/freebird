@@ -199,7 +199,27 @@ impl ConsentGate {
     /// Returns `true` if the response was delivered, `false` if the
     /// request ID was not found (already expired or already responded).
     pub async fn respond(&self, request_id: &str, response: ConsentResponse) -> bool {
-        self.pending
+        Self::respond_inner(&self.pending, request_id, response).await
+    }
+
+    /// Create a [`ConsentResponder`] handle that can be sent to other tasks.
+    ///
+    /// The responder shares the same pending-request map as this gate,
+    /// so calling `responder.respond()` will unblock a `check()` that is
+    /// awaiting approval on the matching request ID.
+    #[must_use]
+    pub fn responder(&self) -> ConsentResponder {
+        ConsentResponder {
+            pending: Arc::clone(&self.pending),
+        }
+    }
+
+    async fn respond_inner(
+        pending: &Mutex<HashMap<String, oneshot::Sender<ConsentResponse>>>,
+        request_id: &str,
+        response: ConsentResponse,
+    ) -> bool {
+        pending
             .lock()
             .await
             .remove(request_id)
@@ -209,6 +229,26 @@ impl ConsentGate {
     /// Returns the number of currently pending consent requests.
     pub async fn pending_count(&self) -> usize {
         self.pending.lock().await.len()
+    }
+}
+
+/// A lightweight, cloneable handle for delivering consent responses.
+///
+/// Created via [`ConsentGate::responder()`]. Can be sent to spawned tasks
+/// to route user consent decisions back to the gate while the event loop
+/// remains free to process other events.
+#[derive(Clone)]
+pub struct ConsentResponder {
+    pending: Arc<Mutex<HashMap<String, oneshot::Sender<ConsentResponse>>>>,
+}
+
+impl ConsentResponder {
+    /// Deliver a consent response to the gate.
+    ///
+    /// Returns `true` if the response was delivered, `false` if the
+    /// request ID was not found (already expired or already responded).
+    pub async fn respond(&self, request_id: &str, response: ConsentResponse) -> bool {
+        ConsentGate::respond_inner(&self.pending, request_id, response).await
     }
 }
 
