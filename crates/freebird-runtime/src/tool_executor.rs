@@ -352,9 +352,17 @@ impl ToolExecutor {
         let raw_summary =
             serde_json::to_string(input).unwrap_or_else(|_| "<unserializable input>".into());
         let action_summary = if raw_summary.len() > MAX_SUMMARY_LEN {
+            // Find a char-boundary-safe truncation point to avoid panicking
+            // on multi-byte UTF-8 sequences (e.g. CJK, emoji in tool input).
+            let truncate_at = raw_summary
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|&i| i <= MAX_SUMMARY_LEN)
+                .last()
+                .unwrap_or(0);
             format!(
                 "{}… ({} bytes total)",
-                &raw_summary[..MAX_SUMMARY_LEN],
+                &raw_summary[..truncate_at],
                 raw_summary.len()
             )
         } else {
@@ -386,6 +394,12 @@ impl ToolExecutor {
             }
             Err(ConsentError::TooManyPending { tool, max }) => {
                 tracing::warn!(%tool, max, %session_id, "too many pending consent requests");
+                self.audit_consent_denied(
+                    session_id,
+                    &tool,
+                    Some(&format!("too many pending requests (max {max})")),
+                )
+                .await;
                 Some(ToolOutput {
                     content: format!("Too many pending consent requests ({max}); denying `{tool}`"),
                     outcome: ToolOutcome::Error,
@@ -394,6 +408,8 @@ impl ToolExecutor {
             }
             Err(ConsentError::ChannelClosed) => {
                 tracing::warn!(%session_id, "consent channel closed");
+                self.audit_consent_denied(session_id, tool_name, Some("consent channel closed"))
+                    .await;
                 Some(ToolOutput {
                     content: "Consent channel closed — cannot request approval".into(),
                     outcome: ToolOutcome::Error,
