@@ -250,16 +250,28 @@ impl AgentRuntime {
                         req = consent_rx.recv() => {
                             match req {
                                 Some(req) => {
+                                    // Serialize risk_level via serde to get the canonical
+                                    // snake_case form ("high", not "High" from Debug).
+                                    let risk_level = serde_json::to_value(&req.risk_level)
+                                        .ok()
+                                        .and_then(|v| v.as_str().map(String::from))
+                                        .unwrap_or_else(|| format!("{:?}", req.risk_level));
                                     let event = OutboundEvent::ConsentRequest {
                                         request_id: req.id,
                                         tool_name: req.tool_name,
                                         description: req.description,
-                                        risk_level: format!("{:?}", req.risk_level),
+                                        risk_level,
                                         action_summary: req.action_summary,
                                         expires_at: req.expires_at.to_rfc3339(),
                                         recipient_id: req.sender_id,
                                     };
-                                    let _ = consent_outbound.send(event).await;
+                                    if consent_outbound.send(event).await.is_err() {
+                                        tracing::warn!(
+                                            "consent outbound channel closed; \
+                                             consent request dropped"
+                                        );
+                                        break;
+                                    }
                                 }
                                 None => break,
                             }

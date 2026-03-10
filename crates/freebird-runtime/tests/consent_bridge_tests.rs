@@ -366,7 +366,7 @@ async fn test_consent_request_forwarded_to_channel() {
                 ..
             })) => {
                 assert_eq!(tool_name, "dangerous_tool");
-                assert_eq!(risk_level, "High");
+                assert_eq!(risk_level, "high");
                 assert_eq!(recipient_id, "alice");
                 request_id = rid;
                 consent_request_seen = true;
