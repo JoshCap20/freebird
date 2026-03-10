@@ -749,7 +749,13 @@ impl Tool for RepoMapTool {
         let mut output_text = format_repo_map(&file_symbols, &scan_root);
 
         if output_text.len() > MAX_OUTPUT_BYTES {
-            output_text.truncate(MAX_OUTPUT_BYTES);
+            // Find a char boundary at or before MAX_OUTPUT_BYTES to avoid panicking
+            // on multi-byte UTF-8 characters.
+            let mut trunc_at = MAX_OUTPUT_BYTES;
+            while !output_text.is_char_boundary(trunc_at) && trunc_at > 0 {
+                trunc_at -= 1;
+            }
+            output_text.truncate(trunc_at);
             if let Some(last_nl) = output_text.rfind('\n') {
                 output_text.truncate(last_nl + 1);
             }
@@ -1363,6 +1369,62 @@ mod tests {
         assert_eq!(info.required_capability, Capability::FileRead);
         assert_eq!(info.risk_level, RiskLevel::Low);
         assert_eq!(info.side_effects, SideEffects::None);
+    }
+
+    #[test]
+    fn test_discover_skips_symlinks() {
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("real.rs"), "pub fn real() {}").unwrap();
+
+        // Create a symlinked directory pointing outside the sandbox
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("escape.rs"), "pub fn escape() {}").unwrap();
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside.path(), h.path().join("linked_dir")).unwrap();
+            std::os::unix::fs::symlink(
+                outside.path().join("escape.rs"),
+                h.path().join("linked_file.rs"),
+            )
+            .unwrap();
+        }
+
+        let files = discover_files(h.path(), "rs", 100);
+        // Only real.rs should appear — symlinks are not followed
+        assert_eq!(files.len(), 1);
+        assert!(files[0].to_string_lossy().contains("real.rs"));
+    }
+
+    #[test]
+    fn test_truncation_safe_on_multibyte_utf8() {
+        // Build a repo map output containing multi-byte characters
+        let sym = Symbol {
+            signature: "pub fn café() -> Ünïcödé".to_owned(),
+            doc_comment: None,
+            children: vec![],
+            #[cfg(test)]
+            kind: SymbolKind::Function,
+            #[cfg(test)]
+            name: "café".to_owned(),
+            #[cfg(test)]
+            visibility: Some("pub".to_owned()),
+        };
+        let file_symbols = vec![(PathBuf::from("/root/src/lib.rs"), vec![sym])];
+        let output = format_repo_map(&file_symbols, Path::new("/root"));
+        // Verify the output is valid UTF-8 (it always is since String)
+        assert!(output.is_char_boundary(0));
+        // Verify truncation at arbitrary byte offsets doesn't panic
+        for i in 0..output.len() {
+            let mut s = output.clone();
+            let mut trunc_at = i;
+            while !s.is_char_boundary(trunc_at) && trunc_at > 0 {
+                trunc_at -= 1;
+            }
+            s.truncate(trunc_at);
+            // Should not panic and should be valid UTF-8
+            assert!(s.len() <= i);
+        }
     }
 
     // ── Phase 6: Property tests ───────────────────────────────────
