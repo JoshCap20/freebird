@@ -19,6 +19,7 @@ use freebird_types::config::AppConfig;
 /// - Filesystem tools (`read_file`, `write_file`, `list_directory`)
 /// - Edit tool (`search_replace_edit`)
 /// - Grep search tool (`grep_search`)
+/// - Glob find tool (`glob_find`) — file pattern discovery
 /// - Viewer tool (`file_viewer`) — windowed file reading
 /// - Shell tool (`shell`)
 /// - Network tool (`http_request`) — gated by [`EgressPolicy`] built from
@@ -35,6 +36,9 @@ pub fn build_tool_registry(config: &AppConfig) -> Result<ToolRegistry> {
 
     // Grep search tool — regex-based code search with context lines.
     registry.register_all(freebird_tools::grep::grep_tools());
+
+    // Glob find tool — file pattern discovery with glob patterns.
+    registry.register_all(freebird_tools::glob_find::glob_find_tools());
 
     // Viewer tool — windowed file reading with line numbers and pattern jump.
     registry.register_all(freebird_tools::viewer::viewer_tools());
@@ -169,6 +173,7 @@ format = "pretty"
             "missing search_replace_edit"
         );
         assert!(registry.get("grep_search").is_some(), "missing grep_search");
+        assert!(registry.get("glob_find").is_some(), "missing glob_find");
         assert!(registry.get("shell").is_some(), "missing shell");
         assert!(
             registry.get("http_request").is_some(),
