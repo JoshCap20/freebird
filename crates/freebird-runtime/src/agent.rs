@@ -199,6 +199,7 @@ impl AgentRuntime {
         let has_consent_gate = consent_responder.is_some();
 
         let splitter_cancel = cancel.clone();
+        let splitter_outbound = outbound.clone();
         let splitter_task = tokio::spawn({
             let mut inbound = inbound;
             async move {
@@ -226,6 +227,15 @@ impl AgentRuntime {
                                                 %request_id, %sender_id,
                                                 "consent response for unknown or expired request"
                                             );
+                                            let _ = splitter_outbound.send(
+                                                OutboundEvent::Error {
+                                                    text: format!(
+                                                        "No pending consent request with id `{request_id}` \
+                                                         (expired or already responded)"
+                                                    ),
+                                                    recipient_id: sender_id,
+                                                }
+                                            ).await;
                                         }
                                     }
                                 }

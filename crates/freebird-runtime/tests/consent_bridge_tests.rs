@@ -824,7 +824,7 @@ async fn test_consent_no_gate_executes_freely() {
 /// Sending a `ConsentResponse` with an unknown `request_id` doesn't crash.
 #[tokio::test]
 async fn test_consent_response_unknown_id_logged() {
-    let (channel, inbound_tx, _outbound_rx, _) = MockChannel::new();
+    let (channel, inbound_tx, outbound_rx, _) = MockChannel::new();
 
     let provider = Arc::new(QueuedProvider::new(vec![]));
 
@@ -874,5 +874,21 @@ async fn test_consent_response_unknown_id_logged() {
     assert!(
         result.is_ok(),
         "runtime should handle unknown consent ID gracefully"
+    );
+
+    // The splitter should have sent an error back to the user about the
+    // unknown consent request ID.
+    let mut found_error = false;
+    let mut outbound_rx = outbound_rx;
+    while let Ok(event) = outbound_rx.try_recv() {
+        if let OutboundEvent::Error { ref text, .. } = event {
+            if text.contains("nonexistent-id-12345") {
+                found_error = true;
+            }
+        }
+    }
+    assert!(
+        found_error,
+        "expected error about unknown consent ID in outbound events"
     );
 }
