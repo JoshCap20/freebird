@@ -168,7 +168,8 @@ impl TtyChat {
                             if let Some(msg) = Self::consent_action_to_message(sel.auto_deny("timeout")) {
                                 crate::chat::send_client_message(&mut socket_write, &msg).await?;
                             }
-                            theme::write_error_styled(&mut self.writer, "consent request expired")?;
+                            ConsentSelector::clear(&mut self.writer)?;
+                            sel.render_outcome(&mut self.writer, false)?;
                             self.input.render(&mut self.writer)?;
                         }
                     }
@@ -192,19 +193,22 @@ impl TtyChat {
                 ConsentAction::Redraw => {
                     // Temporarily take the selector to avoid borrow conflict
                     // with save_input_area (which borrows &mut self).
-                    let sel = self.consent.take();
-                    self.save_input_area()?;
-                    if let Some(ref s) = sel {
-                        s.render(&mut self.writer)?;
+                    if let Some(sel) = self.consent.take() {
+                        ConsentSelector::clear(&mut self.writer)?;
+                        sel.render(&mut self.writer)?;
+                        self.consent = Some(sel);
                     }
-                    self.consent = sel;
                 }
                 ConsentAction::Confirmed {
                     request_id,
                     approved,
                     reason,
                 } => {
-                    self.consent = None;
+                    // Clear selector lines and show a collapsed outcome summary.
+                    if let Some(sel) = self.consent.take() {
+                        ConsentSelector::clear(&mut self.writer)?;
+                        sel.render_outcome(&mut self.writer, approved)?;
+                    }
                     let msg = ClientMessage::ConsentResponse {
                         request_id,
                         approved,
@@ -358,7 +362,9 @@ impl TtyChat {
                 self.save_input_area()?;
                 self.render_consent_header(&tool_name, &action_summary, &risk_level)?;
                 // Create the interactive selector (falls back to text hint if expired/unparseable).
-                if let Some(sel) = ConsentSelector::new(request_id.clone(), &expires_at) {
+                if let Some(sel) =
+                    ConsentSelector::new(request_id.clone(), tool_name.clone(), &expires_at)
+                {
                     sel.render(&mut self.writer)?;
                     self.consent = Some(sel);
                 } else {
