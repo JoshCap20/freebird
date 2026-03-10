@@ -111,31 +111,29 @@ struct ViewerParams {
     pattern: Option<freebird_security::safe_types::SafeFileContent>,
 }
 
+/// Map any `SecurityError` into a `ToolError::InvalidInput` for the viewer.
+fn invalid_input(e: &SecurityError) -> ToolError {
+    ToolError::InvalidInput {
+        tool: FileViewerTool::NAME.into(),
+        reason: e.to_string(),
+    }
+}
+
 fn extract_params(
     tainted: &TaintedToolInput,
     ctx: &ToolContext<'_>,
 ) -> Result<ViewerParams, ToolError> {
     let safe_path = tainted
         .extract_path_multi_root("path", ctx.sandbox_root, ctx.allowed_directories)
-        .map_err(|e| ToolError::InvalidInput {
-            tool: FileViewerTool::NAME.into(),
-            reason: e.to_string(),
-        })?;
+        .map_err(|e| invalid_input(&e))?;
 
-    let raw_offset =
-        tainted
-            .extract_u64_optional("offset")
-            .map_err(|e| ToolError::InvalidInput {
-                tool: FileViewerTool::NAME.into(),
-                reason: e.to_string(),
-            })?;
+    let raw_offset = tainted
+        .extract_u64_optional("offset")
+        .map_err(|e| invalid_input(&e))?;
 
     let raw_limit = tainted
         .extract_u64_optional("limit")
-        .map_err(|e| ToolError::InvalidInput {
-            tool: FileViewerTool::NAME.into(),
-            reason: e.to_string(),
-        })?;
+        .map_err(|e| invalid_input(&e))?;
 
     // Pattern is optional — MissingField means "no pattern provided".
     // Empty strings are treated as "no pattern" since `str::contains("")`
@@ -144,10 +142,7 @@ fn extract_params(
         Ok(pat) if !pat.as_str().is_empty() => Some(pat),
         Ok(_) | Err(SecurityError::MissingField { .. }) => None,
         Err(e) => {
-            return Err(ToolError::InvalidInput {
-                tool: FileViewerTool::NAME.into(),
-                reason: e.to_string(),
-            });
+            return Err(invalid_input(&e));
         }
     };
 
@@ -202,6 +197,7 @@ async fn read_file_content(
 
     let cap = MAX_READ_FILE_BYTES + 1;
     let mut buf = Vec::with_capacity(cap.min(8 * 1024));
+    // cap is ~10 MiB, always fits in u64
     file.take(cap as u64)
         .read_to_end(&mut buf)
         .await
@@ -348,7 +344,9 @@ fn format_lines(lines: &[&str], start_line: usize) -> String {
     let max_line_num = start_line + lines.len() - 1;
     let width = max_line_num.to_string().len();
 
-    let mut out = String::new();
+    // Each line is roughly: width digits + "│ " + line content + "\n"
+    let estimated = lines.len() * (width + 3 + 40);
+    let mut out = String::with_capacity(estimated);
     for (i, line) in lines.iter().enumerate() {
         let line_num = start_line + i;
         let _ = writeln!(out, "{line_num:>width$}\u{2502} {line}");
@@ -865,6 +863,24 @@ mod tests {
                 assert_eq!(tool, "file_viewer");
             }
             other => panic!("expected InvalidInput, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_file_not_found_returns_error() {
+        let h = TestHarness::new();
+        // SafeFilePath resolves symlinks + checks existence during path validation,
+        // so a non-existent file fails at the path extraction stage (InvalidInput).
+        let tool = FileViewerTool::new();
+        let result = tool
+            .execute(serde_json::json!({"path": "nonexistent.txt"}), &h.context())
+            .await;
+
+        match result {
+            Err(ToolError::InvalidInput { tool, .. }) => {
+                assert_eq!(tool, "file_viewer");
+            }
+            other => panic!("expected InvalidInput for missing file, got: {other:?}"),
         }
     }
 
