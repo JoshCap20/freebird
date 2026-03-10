@@ -16,22 +16,13 @@ use freebird_traits::tool::{
     ToolOutput,
 };
 
+use crate::common;
+
 /// Default maximum number of results to return.
 const DEFAULT_MAX_RESULTS: usize = 100;
 
 /// Hard cap on maximum results to prevent context window flooding.
 const MAX_RESULTS_HARD_CAP: usize = 500;
-
-/// Directories to always skip in glob results (same list as grep for consistency).
-const SKIP_DIRS: &[&str] = &[
-    ".git",
-    ".hg",
-    ".svn",
-    "node_modules",
-    "target",
-    "__pycache__",
-    ".build",
-];
 
 /// Returns the glob find tool as a trait object.
 #[must_use]
@@ -91,21 +82,13 @@ struct GlobFindParams {
     display_root: PathBuf,
 }
 
-/// Extract optional usize from JSON input.
-fn extract_optional_usize(input: &serde_json::Value, key: &str) -> Option<usize> {
-    input
-        .get(key)
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|v| usize::try_from(v).ok())
-}
-
-/// Check if any component of a relative path is in the `SKIP_DIRS` list.
+/// Check if any component of a relative path is a skipped directory.
 fn path_contains_skip_dir(path: &Path, root: &Path) -> bool {
     let relative = path.strip_prefix(root).unwrap_or(path);
     for component in relative.components() {
         if let Component::Normal(name) = component {
             let name_str = name.to_string_lossy();
-            if SKIP_DIRS.contains(&name_str.as_ref()) {
+            if common::should_skip_dir(&name_str) {
                 return true;
             }
         }
@@ -156,7 +139,7 @@ fn parse_glob_find_params(
     };
 
     // Optional: max_results (default 100, hard cap 500)
-    let max_results = extract_optional_usize(input, "max_results")
+    let max_results = common::extract_optional_usize(input, "max_results")
         .unwrap_or(DEFAULT_MAX_RESULTS)
         .min(MAX_RESULTS_HARD_CAP);
 

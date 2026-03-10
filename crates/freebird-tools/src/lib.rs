@@ -5,6 +5,7 @@
 #![deny(clippy::indexing_slicing)]
 #![allow(clippy::module_name_repetitions)]
 
+mod common;
 pub mod edit;
 pub mod filesystem;
 pub mod glob_find;

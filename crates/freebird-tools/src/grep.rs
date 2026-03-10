@@ -16,6 +16,10 @@ use freebird_traits::tool::{
     ToolOutput,
 };
 
+use crate::common::{
+    extract_optional_bool, extract_optional_str, extract_optional_usize, should_skip_dir,
+};
+
 /// Default number of context lines before and after each match.
 const DEFAULT_CONTEXT_LINES: usize = 3;
 
@@ -35,17 +39,6 @@ const BINARY_CHECK_BYTES: usize = 8 * 1024;
 /// that cause excessive NFA construction. The `regex` crate already prevents
 /// catastrophic backtracking, but this limits resource usage during compilation.
 const REGEX_SIZE_LIMIT: usize = 256 * 1024;
-
-/// Directories to always skip during recursive search.
-const SKIP_DIRS: &[&str] = &[
-    ".git",
-    ".hg",
-    ".svn",
-    "node_modules",
-    "target",
-    "__pycache__",
-    ".build",
-];
 
 /// Returns the grep search tool as a trait object.
 #[must_use]
@@ -165,33 +158,12 @@ impl MatchResult {
     }
 }
 
-/// Extract optional parameters from JSON input (non-tainted primitives).
-fn extract_optional_usize(input: &serde_json::Value, key: &str) -> Option<usize> {
-    input
-        .get(key)
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|v| usize::try_from(v).ok())
-}
-
-fn extract_optional_bool(input: &serde_json::Value, key: &str) -> Option<bool> {
-    input.get(key).and_then(serde_json::Value::as_bool)
-}
-
-fn extract_optional_str<'a>(input: &'a serde_json::Value, key: &str) -> Option<&'a str> {
-    input.get(key).and_then(serde_json::Value::as_str)
-}
-
 /// Check if a file appears to be binary by looking for null bytes in the first 8KB.
 fn is_binary(content: &[u8]) -> bool {
     let check_len = content.len().min(BINARY_CHECK_BYTES);
     content
         .get(..check_len)
         .is_some_and(|slice| slice.contains(&0))
-}
-
-/// Check if a directory name should be skipped.
-fn should_skip_dir(name: &str) -> bool {
-    SKIP_DIRS.contains(&name)
 }
 
 /// Recursively collect files in a directory, respecting skip rules and glob filter.
