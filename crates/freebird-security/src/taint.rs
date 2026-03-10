@@ -209,19 +209,6 @@ impl TaintedToolInput {
         SafeUrl::from_tainted(&tainted, egress_policy)
     }
 
-    /// Extract an optional string array field as `Vec<Tainted>`.
-    ///
-    /// Returns `Ok(vec![])` if the key is absent or the array is empty.
-    /// Returns `Err(MissingField)` if the key exists but is not an array,
-    /// or if any array element is not a string.
-    ///
-    /// Each returned `Tainted` must be validated through a safe type factory
-    /// (e.g., `SafeShellArg::from_tainted()`) before use.
-    ///
-    /// # Errors
-    ///
-    /// Returns `SecurityError::MissingField` if the value is not an array
-    /// or any element is not a string.
     /// Extract an optional unsigned integer field.
     ///
     /// Returns `Ok(None)` if the key is absent.
