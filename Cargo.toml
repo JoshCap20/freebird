@@ -69,6 +69,10 @@ clap = { version = "4", features = ["derive"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 unicode-width = "0.2"
 
+# Regex & glob
+regex = "1"
+glob = "0.3"
+
 # Filesystem
 home = "0.5"
 

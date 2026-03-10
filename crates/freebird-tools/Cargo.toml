@@ -19,6 +19,8 @@ futures = { workspace = true }
 url = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+regex = { workspace = true }
+glob = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
