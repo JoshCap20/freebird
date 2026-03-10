@@ -263,16 +263,20 @@ impl TtyChat {
                 output_tokens,
                 ..
             } => {
+                self.save_input_area()?;
                 self.status
                     .show_token_usage(&mut self.writer, input_tokens, output_tokens)?;
+                self.input.render(&mut self.writer)?;
             }
             ServerMessage::SessionInfo {
                 session_id,
                 model_id,
                 ..
             } => {
+                self.save_input_area()?;
                 self.status
                     .set_session_info(&mut self.writer, &model_id, &session_id)?;
+                self.input.render(&mut self.writer)?;
             }
             ServerMessage::ConsentRequest {
                 request_id,
