@@ -610,27 +610,29 @@ impl RepoMapTool {
             })
     }
 
-    /// Resolve the scan root directory from input parameters.
+    /// Resolve the scan root directory from tainted input.
+    ///
+    /// The `path` field is optional. If missing, defaults to sandbox root.
+    /// If present but invalid (traversal, outside sandbox), returns an error.
     fn resolve_scan_root(
-        input: &serde_json::Value,
+        tainted: &TaintedToolInput,
         context: &ToolContext<'_>,
     ) -> Result<PathBuf, ToolError> {
-        let Some(path_str) = input.get("path").and_then(serde_json::Value::as_str) else {
-            return Ok(context.sandbox_root.to_path_buf());
-        };
-
-        if path_str.is_empty() || path_str == "." {
-            return Ok(context.sandbox_root.to_path_buf());
-        }
-
-        let tainted = TaintedToolInput::new(input.clone());
-        let safe_path = tainted
-            .extract_path_multi_root("path", context.sandbox_root, context.allowed_directories)
-            .map_err(|e| ToolError::InvalidInput {
+        match tainted.extract_path_multi_root(
+            "path",
+            context.sandbox_root,
+            context.allowed_directories,
+        ) {
+            Ok(path) => Ok(path.as_path().to_path_buf()),
+            Err(freebird_security::error::SecurityError::MissingField { .. }) => {
+                // "path" is optional — default to sandbox root
+                Ok(context.sandbox_root.to_path_buf())
+            }
+            Err(e) => Err(ToolError::InvalidInput {
                 tool: Self::NAME.into(),
                 reason: e.to_string(),
-            })?;
-        Ok(safe_path.as_path().to_path_buf())
+            }),
+        }
     }
 
     /// Parse files and extract symbols from each.
@@ -673,6 +675,10 @@ impl Tool for RepoMapTool {
         input: serde_json::Value,
         context: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError> {
+        // depth, language, and max_files are enum selectors / integers validated
+        // by pattern matching and clamping below. TaintedToolInput has no integer
+        // extractor, so these are read before wrapping. Only `path` requires
+        // taint-boundary validation via SafeFilePath.
         let depth = match input.get("depth").and_then(serde_json::Value::as_str) {
             Some(s) => parse_depth(s).map_err(|reason| ToolError::InvalidInput {
                 tool: Self::NAME.into(),
@@ -693,7 +699,9 @@ impl Tool for RepoMapTool {
         }
 
         let max_files = Self::parse_max_files(&input);
-        let scan_root = Self::resolve_scan_root(&input, context)?;
+
+        let tainted = TaintedToolInput::new(input);
+        let scan_root = Self::resolve_scan_root(&tainted, context)?;
 
         if !scan_root.is_dir() {
             return Err(ToolError::InvalidInput {
