@@ -649,6 +649,13 @@ impl RepoMapTool {
 
         let mut results: Vec<(PathBuf, Vec<Symbol>)> = Vec::with_capacity(files.len());
         for file_path in files {
+            // Re-check size to narrow the TOCTOU window from discovery.
+            let Ok(metadata) = std::fs::metadata(file_path) else {
+                continue;
+            };
+            if metadata.len() > MAX_PARSE_FILE_BYTES {
+                continue;
+            }
             let Ok(source) = std::fs::read(file_path) else {
                 continue;
             };
