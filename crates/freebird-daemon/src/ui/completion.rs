@@ -1,46 +1,71 @@
-//! Command completion — tab completion for `/commands`.
+//! Command completion — tab completion and command registry for `/commands`.
+//!
+//! This module is the **single source of truth** for all known client commands.
+//! Both tab completion and `/help` output are derived from [`COMMANDS`].
 
-/// A known command definition for tab completion.
-struct CommandDef {
-    name: &'static str,
-    _description: &'static str,
+use std::fmt::Write;
+
+/// A known command definition.
+pub struct CommandDef {
+    /// The command name (without the leading `/`).
+    pub name: &'static str,
+    /// Human-readable description shown in `/help` output.
+    pub description: &'static str,
 }
 
-/// Known commands available in the chat client.
-const COMMANDS: &[CommandDef] = &[
+/// All known commands available in the chat client.
+///
+/// This is the canonical command list — tab completion and help text are both
+/// derived from it. To add a new command, add it here.
+pub const COMMANDS: &[CommandDef] = &[
     CommandDef {
         name: "help",
-        _description: "Show available commands",
+        description: "Show available commands",
     },
     CommandDef {
         name: "quit",
-        _description: "Disconnect from the daemon",
+        description: "Disconnect from the daemon",
     },
     CommandDef {
         name: "exit",
-        _description: "Disconnect from the daemon",
+        description: "Disconnect from the daemon",
     },
     CommandDef {
         name: "new",
-        _description: "Start a new conversation",
+        description: "Start a new conversation",
     },
     CommandDef {
         name: "model",
-        _description: "Switch model",
+        description: "Switch model",
     },
     CommandDef {
         name: "status",
-        _description: "Show session status",
+        description: "Show session status",
     },
     CommandDef {
         name: "approve",
-        _description: "Approve a consent request",
+        description: "Approve a consent request",
     },
     CommandDef {
         name: "deny",
-        _description: "Deny a consent request",
+        description: "Deny a consent request",
     },
 ];
+
+/// Generate help text from the command registry.
+///
+/// Skips `/exit` (duplicate of `/quit`) to keep the output clean.
+#[must_use]
+pub fn generate_help_text() -> String {
+    let mut text = String::from("Available commands:\n");
+    for cmd in COMMANDS {
+        if cmd.name == "exit" {
+            continue;
+        }
+        let _ = writeln!(text, "  /{:<16}{}", cmd.name, cmd.description);
+    }
+    text
+}
 
 /// Manages tab completion state for `/commands`.
 pub struct CommandCompleter {
@@ -175,5 +200,21 @@ mod tests {
         let _ = c.complete("/he");
         c.reset();
         assert!(c.matches.is_empty());
+    }
+
+    #[test]
+    fn generate_help_text_contains_all_commands() {
+        let text = generate_help_text();
+        for name in ["help", "quit", "new", "model", "status", "approve", "deny"] {
+            assert!(
+                text.contains(&format!("/{name}")),
+                "help text should contain /{name}, got: {text}"
+            );
+        }
+        // /exit is skipped (duplicate of /quit)
+        assert!(
+            !text.contains("/exit"),
+            "help text should not contain /exit (duplicate of /quit)"
+        );
     }
 }

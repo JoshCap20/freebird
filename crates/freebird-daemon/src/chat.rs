@@ -61,18 +61,6 @@ mod style {
     }
 }
 
-// ── Help text ────────────────────────────────────────────────────────────────
-
-/// Client-side help text printed by `/help` without a daemon round-trip.
-const HELP_TEXT: &str = "\
-Available commands:
-  /help              Show this help message
-  /new               Start a new conversation
-  /approve <id>      Approve a consent request
-  /deny <id> [reason] Deny a consent request
-  /quit, /exit       Disconnect from the daemon
-";
-
 // ── Input parsing ────────────────────────────────────────────────────────────
 
 /// The result of parsing a line of user input.
@@ -100,7 +88,7 @@ pub enum ParseResult {
 pub fn parse_user_input(line: &str) -> ParseResult {
     match line {
         "/quit" | "/exit" => return ParseResult::Quit,
-        "/help" => return ParseResult::LocalOutput(HELP_TEXT.to_string()),
+        "/help" => return ParseResult::LocalOutput(crate::ui::completion::generate_help_text()),
         "/" => {
             return ParseResult::LocalOutput(
                 "Unknown command '/'. Type /help for available commands.\n".to_string(),
@@ -554,6 +542,8 @@ mod tests {
         if let ParseResult::LocalOutput(text) = result {
             assert!(text.contains("/quit"), "help text should mention /quit");
             assert!(text.contains("/new"), "help text should mention /new");
+            assert!(text.contains("/model"), "help text should mention /model");
+            assert!(text.contains("/status"), "help text should mention /status");
         }
     }
 
