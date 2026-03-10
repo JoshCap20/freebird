@@ -7,9 +7,11 @@
 use std::io::Write;
 
 use chrono::{DateTime, Utc};
+use crossterm::cursor::MoveUp;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crossterm::queue;
 use crossterm::style::{Attribute, Color, ResetColor, SetAttribute, SetForegroundColor};
+use crossterm::terminal::{Clear, ClearType};
 
 /// Which option is currently highlighted in the consent selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +46,9 @@ pub enum ConsentAction {
     None,
 }
 
+/// Number of terminal lines occupied by the selector (Approve + Deny).
+const SELECTOR_LINES: u16 = 2;
+
 /// Interactive consent selector widget.
 ///
 /// Renders a two-option selector (Approve / Deny) and handles keyboard
@@ -52,6 +57,8 @@ pub enum ConsentAction {
 pub struct ConsentSelector {
     /// The pending consent request ID.
     request_id: String,
+    /// Tool name for outcome display after confirmation.
+    tool_name: String,
     /// Currently highlighted choice.
     choice: ConsentChoice,
     /// When this request expires.
@@ -64,13 +71,14 @@ impl ConsentSelector {
     /// `expires_at_str` is the RFC 3339 timestamp from the server.
     /// Returns `None` if the timestamp is unparseable or already expired.
     #[must_use]
-    pub fn new(request_id: String, expires_at_str: &str) -> Option<Self> {
+    pub fn new(request_id: String, tool_name: String, expires_at_str: &str) -> Option<Self> {
         let expires_at = expires_at_str.parse::<DateTime<Utc>>().ok()?;
         if expires_at <= Utc::now() {
             return None;
         }
         Some(Self {
             request_id,
+            tool_name,
             choice: ConsentChoice::Approve,
             expires_at,
         })
@@ -116,6 +124,43 @@ impl ConsentSelector {
         writeln!(w)?;
         // Deny line
         self.render_option(w, ConsentChoice::Deny, "Deny", "[n]")?;
+        writeln!(w)?;
+        w.flush()
+    }
+
+    /// Erase the selector lines from the terminal.
+    ///
+    /// Moves cursor up past the two selector lines and clears from there down.
+    /// Call this before re-rendering or when dismissing the selector.
+    pub fn clear<W: Write>(w: &mut W) -> std::io::Result<()> {
+        queue!(w, MoveUp(SELECTOR_LINES), Clear(ClearType::FromCursorDown))?;
+        w.flush()
+    }
+
+    /// Render a one-line summary after the user confirms or the request expires.
+    ///
+    /// Example output:
+    /// ```text
+    ///   ✓ Approved: http_request
+    ///   ✗ Denied: http_request
+    /// ```
+    pub fn render_outcome<W: Write>(&self, w: &mut W, approved: bool) -> std::io::Result<()> {
+        if approved {
+            queue!(
+                w,
+                SetAttribute(Attribute::Bold),
+                SetForegroundColor(Color::Green),
+            )?;
+            write!(w, "  \u{2713} Approved: {}", self.tool_name)?;
+        } else {
+            queue!(
+                w,
+                SetAttribute(Attribute::Bold),
+                SetForegroundColor(Color::Red),
+            )?;
+            write!(w, "  \u{2717} Denied: {}", self.tool_name)?;
+        }
+        queue!(w, ResetColor, SetAttribute(Attribute::Reset))?;
         writeln!(w)?;
         w.flush()
     }
@@ -200,7 +245,7 @@ mod tests {
     /// Helper to create a selector with a future expiry.
     fn make_selector(request_id: &str) -> ConsentSelector {
         let future = (Utc::now() + Duration::minutes(5)).to_rfc3339();
-        ConsentSelector::new(request_id.to_string(), &future).unwrap()
+        ConsentSelector::new(request_id.to_string(), "test_tool".to_string(), &future).unwrap()
     }
 
     // ── Construction tests ───────────────────────────────────────────
@@ -208,7 +253,7 @@ mod tests {
     #[test]
     fn test_new_returns_none_for_expired_timestamp() {
         let past = (Utc::now() - Duration::minutes(1)).to_rfc3339();
-        assert!(ConsentSelector::new("req-1".to_string(), &past).is_none());
+        assert!(ConsentSelector::new("req-1".to_string(), "tool".to_string(), &past).is_none());
     }
 
     #[test]
@@ -219,7 +264,9 @@ mod tests {
 
     #[test]
     fn test_new_returns_none_for_invalid_timestamp() {
-        assert!(ConsentSelector::new("req-1".to_string(), "not-a-date").is_none());
+        assert!(
+            ConsentSelector::new("req-1".to_string(), "tool".to_string(), "not-a-date").is_none()
+        );
     }
 
     // ── Navigation tests ─────────────────────────────────────────────
@@ -363,6 +410,7 @@ mod tests {
         // building the struct directly (testing internal state).
         let expired_sel = ConsentSelector {
             request_id: "req-expired".to_string(),
+            tool_name: "test_tool".to_string(),
             choice: ConsentChoice::Approve,
             expires_at: Utc::now() - Duration::seconds(1),
         };
@@ -418,6 +466,26 @@ mod tests {
             !output.contains("> Approve [y]"),
             "Approve should not be selected, got: {output}"
         );
+    }
+
+    // ── Outcome render tests ───────────────────────────────────────
+
+    #[test]
+    fn test_render_outcome_approved() {
+        let sel = make_selector("req-1");
+        let mut buf = Vec::new();
+        sel.render_outcome(&mut buf, true).unwrap();
+        let output = String::from_utf8_lossy(&buf);
+        assert!(output.contains("Approved: test_tool"), "got: {output}");
+    }
+
+    #[test]
+    fn test_render_outcome_denied() {
+        let sel = make_selector("req-1");
+        let mut buf = Vec::new();
+        sel.render_outcome(&mut buf, false).unwrap();
+        let output = String::from_utf8_lossy(&buf);
+        assert!(output.contains("Denied: test_tool"), "got: {output}");
     }
 
     // ── Unrelated key tests ──────────────────────────────────────────
