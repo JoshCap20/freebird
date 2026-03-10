@@ -107,6 +107,17 @@ pub enum AuditEventType {
         used: u64,
         limit: u64,
     },
+    SecretAccessBlocked {
+        tool_name: String,
+        reason: String,
+    },
+    SecretAccessConsent {
+        tool_name: String,
+        reason: String,
+    },
+    SecretRedacted {
+        tool_name: String,
+    },
 }
 
 // ── Chain metadata types ────────────────────────────────────────────

@@ -103,6 +103,13 @@ pub enum SecurityError {
 
     #[error("keyfile error: {0}")]
     KeyfileError(String),
+
+    // ── Secret guard ──────────────────────────────────────────────
+    #[error("secret guard configuration error: {reason}")]
+    SecretGuardConfigError { reason: String },
+
+    #[error("secret access blocked: {reason}")]
+    SecretAccessBlocked { reason: String },
 }
 
 #[cfg(test)]
