@@ -190,17 +190,33 @@ impl Tool for GlobFindTool {
                 }
             };
 
-            // Skip entries in excluded directories
+            // Skip entries in excluded directories (pre-canonicalization check
+            // avoids unnecessary I/O for obviously-excluded paths).
             if path_contains_skip_dir(&path, &params.display_root) {
                 continue;
             }
 
-            // Defense-in-depth: verify path is within sandbox
-            if !path.starts_with(&params.display_root) {
+            // Canonicalize to resolve symlinks before sandbox containment check.
+            // This prevents symlinks inside the sandbox from escaping to external paths.
+            let canonical = match path.canonicalize() {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::debug!(path = %path.display(), error = %e, "skipping non-canonicalizable path");
+                    continue;
+                }
+            };
+
+            // Defense-in-depth: verify canonical path is within sandbox
+            if !canonical.starts_with(&params.display_root) {
+                tracing::debug!(
+                    path = %path.display(),
+                    canonical = %canonical.display(),
+                    "skipping glob result outside sandbox"
+                );
                 continue;
             }
 
-            let is_dir = path.is_dir();
+            let is_dir = canonical.is_dir();
             let relative = path
                 .strip_prefix(&params.display_root)
                 .unwrap_or(&path)
@@ -621,6 +637,39 @@ mod tests {
             }
             other => panic!("expected InvalidInput, got: {other:?}"),
         }
+    }
+
+    // ── Symlink Security Tests ────────────────────────────────────
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_symlink_escape_rejected() {
+        let h = TestHarness::new();
+
+        // Create a file inside the sandbox
+        std::fs::write(h.path().join("legit.txt"), "safe").unwrap();
+
+        // Create a symlink that points outside the sandbox
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("secret.txt");
+        std::fs::write(&outside_file, "secret data").unwrap();
+
+        std::os::unix::fs::symlink(outside.path(), h.path().join("escape_link")).unwrap();
+
+        let output = tool()
+            .execute(serde_json::json!({"pattern": "**/*.txt"}), &h.context())
+            .await
+            .unwrap();
+
+        assert!(
+            output.content.contains("legit.txt"),
+            "should find legitimate file"
+        );
+        assert!(
+            !output.content.contains("secret.txt"),
+            "should not expose files via symlink escape: {}",
+            output.content
+        );
     }
 
     // ── Factory Test ────────────────────────────────────────────────
