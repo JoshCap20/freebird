@@ -9,3 +9,5 @@ pub mod file;
 mod helpers;
 pub mod in_memory;
 pub mod sqlite;
+pub mod sqlite_knowledge;
+pub mod sqlite_memory;
