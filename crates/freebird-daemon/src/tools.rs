@@ -45,6 +45,9 @@ pub fn build_tool_registry(config: &AppConfig) -> Result<ToolRegistry> {
         network_config,
     ));
 
+    // Knowledge tools — store, search, update, delete.
+    registry.register_all(freebird_tools::knowledge::knowledge_tools());
+
     tracing::info!(
         tool_count = registry.tool_count(),
         tools = ?registry.tool_names(),
@@ -138,7 +141,7 @@ format = "pretty"
         let config = test_config();
         let registry = build_tool_registry(&config).unwrap();
 
-        // Must include filesystem, shell, and network tools
+        // Must include filesystem, shell, network, and knowledge tools
         assert!(registry.get("read_file").is_some(), "missing read_file");
         assert!(registry.get("write_file").is_some(), "missing write_file");
         assert!(
@@ -151,8 +154,16 @@ format = "pretty"
             "missing http_request"
         );
         assert!(
-            registry.tool_count() >= 5,
-            "expected at least 5 tools, got {}",
+            registry.get("store_knowledge").is_some(),
+            "missing store_knowledge"
+        );
+        assert!(
+            registry.get("search_knowledge").is_some(),
+            "missing search_knowledge"
+        );
+        assert!(
+            registry.tool_count() >= 9,
+            "expected at least 9 tools, got {}",
             registry.tool_count()
         );
     }

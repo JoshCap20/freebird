@@ -21,7 +21,9 @@ use figment::providers::{Env, Format, Toml};
 use tracing_subscriber::EnvFilter;
 
 use freebird_channels::tcp::TcpChannel;
-use freebird_memory::file::FileMemory;
+use freebird_memory::sqlite::SqliteDb;
+use freebird_memory::sqlite_knowledge::SqliteKnowledgeStore;
+use freebird_memory::sqlite_memory::SqliteMemory;
 use freebird_runtime::agent::AgentRuntime;
 use freebird_runtime::shutdown::ShutdownCoordinator;
 use freebird_types::config::AppConfig;
@@ -96,8 +98,8 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         config.daemon.port,
     ));
 
-    // 6. MEMORY
-    let memory = init_memory(&config).await?;
+    // 6. MEMORY — SQLite with SQLCipher encryption
+    let (memory, knowledge_store) = init_sqlite(&config)?;
 
     // 7. TOOLS — build registry before moving config.tools
     let tool_registry =
@@ -151,6 +153,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         None, // audit logger — wired in a later issue
         tools_config.allowed_directories.clone(),
         Some(consent_gate),
+        knowledge_store,
     )
     .context("failed to construct ToolExecutor (duplicate tool names?)")?;
 
@@ -262,23 +265,55 @@ fn validate_config(config: &AppConfig) -> Result<()> {
     Ok(())
 }
 
-/// Initialize the file-based memory backend from config.
+/// Initialize the `SQLite`-backed memory and knowledge store.
 ///
-/// TODO(#68): Replace with `SQLite` backend in knowledge store implementation.
-async fn init_memory(config: &AppConfig) -> Result<FileMemory> {
-    // Temporary: derive conversations dir from db_path parent or default.
-    // Will be replaced when SqliteMemory is implemented.
-    let base = config
+/// Opens (or creates) an encrypted `SQLCipher` database, derives the key via
+/// PBKDF2-HMAC-SHA256, and returns both `SqliteMemory` and an `Arc`-wrapped
+/// `SqliteKnowledgeStore` for injection into the `ToolExecutor`.
+fn init_sqlite(
+    config: &AppConfig,
+) -> Result<(
+    SqliteMemory,
+    Option<std::sync::Arc<dyn freebird_traits::knowledge::KnowledgeStore>>,
+)> {
+    use std::sync::Arc;
+
+    let db_path = config
         .memory
         .db_path
         .as_ref()
-        .and_then(|p| p.parent().map(|parent| parent.join("conversations")))
-        .unwrap_or_else(|| PathBuf::from("~/.freebird/conversations"));
-    let memory_dir = expand_tilde(&base)?;
-    tokio::task::spawn_blocking(move || FileMemory::new(memory_dir))
-        .await
-        .context("file memory init task panicked")?
-        .context("failed to initialize file memory backend")
+        .map(|p| expand_tilde(p))
+        .transpose()?
+        .unwrap_or_else(|| {
+            home::home_dir().map_or_else(
+                || PathBuf::from(".freebird/freebird.db"),
+                |h| h.join(".freebird/freebird.db"),
+            )
+        });
+
+    let salt_path = db_path.with_extension("salt");
+    let salt = freebird_security::db_key::load_or_create_salt(&salt_path)
+        .context("failed to load or create database salt")?;
+
+    let passphrase = freebird_security::db_key::resolve_passphrase(
+        config.memory.keyfile_path.as_deref(),
+        true, // allow interactive prompt
+    )
+    .context("failed to resolve database encryption key")?;
+
+    let key =
+        freebird_security::db_key::derive_key(&passphrase, &salt, config.memory.pbkdf2_iterations);
+
+    let db = SqliteDb::open(&db_path, &key).context("failed to open encrypted database")?;
+    let db = Arc::new(db);
+
+    tracing::info!(path = %db_path.display(), "encrypted database opened");
+
+    let memory = SqliteMemory::new(Arc::clone(&db));
+    let knowledge: Arc<dyn freebird_traits::knowledge::KnowledgeStore> =
+        Arc::new(SqliteKnowledgeStore::new(db));
+
+    Ok((memory, Some(knowledge)))
 }
 
 /// Merge CLI `--allow-dir` flags into the tools configuration.

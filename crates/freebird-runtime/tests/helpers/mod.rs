@@ -223,7 +223,7 @@ pub fn default_tools_config() -> ToolsConfig {
 }
 
 pub fn make_tool_executor(tools: Vec<Box<dyn Tool>>) -> ToolExecutor {
-    ToolExecutor::new(tools, Duration::from_secs(30), None, vec![], None)
+    ToolExecutor::new(tools, Duration::from_secs(30), None, vec![], None, None)
         .expect("test tool executor construction should not fail")
 }
 

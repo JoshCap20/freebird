@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use freebird_security::audit::{
@@ -23,6 +24,7 @@ use freebird_security::consent::{ConsentError, ConsentGate};
 use freebird_security::error::Severity;
 use freebird_security::safe_types::ScannedToolOutput;
 use freebird_traits::id::SessionId;
+use freebird_traits::knowledge::KnowledgeStore;
 use freebird_traits::provider::ToolDefinition;
 use freebird_traits::tool::{Capability, Tool, ToolContext, ToolOutcome, ToolOutput};
 
@@ -49,6 +51,7 @@ pub struct ToolExecutor {
     audit: Option<AuditLogger>,
     allowed_directories: Vec<PathBuf>,
     consent_gate: Option<ConsentGate>,
+    knowledge_store: Option<Arc<dyn KnowledgeStore>>,
 }
 
 impl std::fmt::Debug for ToolExecutor {
@@ -59,6 +62,7 @@ impl std::fmt::Debug for ToolExecutor {
             .field("has_audit", &self.audit.is_some())
             .field("allowed_directories", &self.allowed_directories)
             .field("has_consent_gate", &self.consent_gate.is_some())
+            .field("has_knowledge_store", &self.knowledge_store.is_some())
             .finish()
     }
 }
@@ -72,12 +76,14 @@ impl ToolExecutor {
     /// Returns [`ToolExecutorError::DuplicateToolName`] if two or more tools
     /// share the same name. Duplicate tool names are a configuration bug —
     /// fail loudly at startup rather than silently overwriting (CLAUDE.md §3.4).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         tools: Vec<Box<dyn Tool>>,
         default_timeout: Duration,
         audit: Option<AuditLogger>,
         allowed_directories: Vec<PathBuf>,
         consent_gate: Option<ConsentGate>,
+        knowledge_store: Option<Arc<dyn KnowledgeStore>>,
     ) -> Result<Self, ToolExecutorError> {
         let mut map = HashMap::with_capacity(tools.len());
         for tool in tools {
@@ -99,6 +105,7 @@ impl ToolExecutor {
             audit,
             allowed_directories,
             consent_gate,
+            knowledge_store,
         })
     }
 
@@ -239,7 +246,7 @@ impl ToolExecutor {
             sandbox_root: grant.sandbox_root(),
             granted_capabilities: &caps_vec,
             allowed_directories: &self.allowed_directories,
-            knowledge_store: None,
+            knowledge_store: self.knowledge_store.as_deref(),
         };
 
         let output =
@@ -693,6 +700,7 @@ mod tests {
             None,
             vec![],
             None,
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -720,6 +728,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
             None,
         )
         .unwrap();
@@ -749,6 +758,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
             None,
         )
         .unwrap();
@@ -783,6 +793,7 @@ mod tests {
             None,
             vec![],
             None,
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -816,6 +827,7 @@ mod tests {
             None,
             vec![],
             None,
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -843,6 +855,7 @@ mod tests {
             StdDuration::from_millis(50),
             None,
             vec![],
+            None,
             None,
         )
         .unwrap();
@@ -875,6 +888,7 @@ mod tests {
             None,
             vec![],
             None,
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -904,6 +918,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
             None,
         )
         .unwrap();
@@ -935,6 +950,7 @@ mod tests {
             StdDuration::from_secs(5),
             Some(logger),
             vec![],
+            None,
             None,
         )
         .unwrap();
@@ -972,6 +988,7 @@ mod tests {
             Some(logger),
             vec![],
             None,
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -1007,6 +1024,7 @@ mod tests {
             StdDuration::from_secs(5),
             Some(logger),
             vec![],
+            None,
             None,
         )
         .unwrap();
@@ -1044,6 +1062,7 @@ mod tests {
             Some(logger),
             vec![],
             None,
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -1079,6 +1098,7 @@ mod tests {
             Some(logger),
             vec![],
             None,
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -1110,7 +1130,7 @@ mod tests {
     async fn test_no_audit_when_logger_is_none() {
         let (_tmp, path) = sandbox();
         let executor =
-            ToolExecutor::new(vec![], StdDuration::from_secs(5), None, vec![], None).unwrap();
+            ToolExecutor::new(vec![], StdDuration::from_secs(5), None, vec![], None, None).unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         // Should not panic
@@ -1138,6 +1158,7 @@ mod tests {
             None,
             vec![],
             None,
+            None,
         );
         let err = result.expect_err("should fail");
         assert!(err.to_string().contains("duplicate tool name"));
@@ -1146,7 +1167,7 @@ mod tests {
     #[test]
     fn test_empty_executor() {
         let executor =
-            ToolExecutor::new(vec![], StdDuration::from_secs(5), None, vec![], None).unwrap();
+            ToolExecutor::new(vec![], StdDuration::from_secs(5), None, vec![], None, None).unwrap();
         assert_eq!(executor.tool_count(), 0);
         assert!(executor.tool_definitions().is_empty());
     }
@@ -1154,7 +1175,7 @@ mod tests {
     #[test]
     fn test_get_returns_none_for_unknown() {
         let executor =
-            ToolExecutor::new(vec![], StdDuration::from_secs(5), None, vec![], None).unwrap();
+            ToolExecutor::new(vec![], StdDuration::from_secs(5), None, vec![], None, None).unwrap();
         assert!(executor.get("nonexistent").is_none());
     }
 
@@ -1166,6 +1187,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
             None,
         )
         .unwrap();
@@ -1186,6 +1208,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
             None,
         )
         .unwrap();
@@ -1211,6 +1234,7 @@ mod tests {
             None,
             vec![],
             None,
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead, Capability::FileWrite]);
@@ -1229,6 +1253,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
             None,
         )
         .unwrap();
@@ -1252,6 +1277,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
             None,
         )
         .unwrap();
@@ -1282,6 +1308,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
             None,
         )
         .unwrap();
@@ -1314,6 +1341,7 @@ mod tests {
             None,
             vec![],
             Some(gate),
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -1348,6 +1376,7 @@ mod tests {
                 None,
                 vec![],
                 Some(gate),
+                None,
             )
             .unwrap(),
         );
@@ -1390,6 +1419,7 @@ mod tests {
                 None,
                 vec![],
                 Some(gate),
+                None,
             )
             .unwrap(),
         );
@@ -1430,6 +1460,7 @@ mod tests {
             None,
             vec![],
             Some(gate),
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::ShellExecute]);
@@ -1461,6 +1492,7 @@ mod tests {
                 None,
                 vec![],
                 Some(gate),
+                None,
             )
             .unwrap(),
         );
@@ -1504,6 +1536,7 @@ mod tests {
                 Some(logger),
                 vec![],
                 Some(gate),
+                None,
             )
             .unwrap(),
         );
@@ -1544,6 +1577,7 @@ mod tests {
                 Some(logger),
                 vec![],
                 Some(gate),
+                None,
             )
             .unwrap(),
         );
@@ -1578,8 +1612,15 @@ mod tests {
     #[tokio::test]
     async fn test_consent_respond_unknown_request_returns_false() {
         let (gate, _rx) = ConsentGate::new(RiskLevel::High, StdDuration::from_secs(60), 5);
-        let executor =
-            ToolExecutor::new(vec![], StdDuration::from_secs(5), None, vec![], Some(gate)).unwrap();
+        let executor = ToolExecutor::new(
+            vec![],
+            StdDuration::from_secs(5),
+            None,
+            vec![],
+            Some(gate),
+            None,
+        )
+        .unwrap();
 
         let result = executor
             .consent_respond("nonexistent-id", ConsentResponse::Approved)
@@ -1590,7 +1631,7 @@ mod tests {
     #[tokio::test]
     async fn test_consent_respond_no_gate_returns_false() {
         let executor =
-            ToolExecutor::new(vec![], StdDuration::from_secs(5), None, vec![], None).unwrap();
+            ToolExecutor::new(vec![], StdDuration::from_secs(5), None, vec![], None, None).unwrap();
 
         let result = executor
             .consent_respond("any-id", ConsentResponse::Approved)
@@ -1619,6 +1660,7 @@ mod tests {
             None,
             vec![],
             Some(gate),
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileDelete]);
@@ -1677,6 +1719,7 @@ mod tests {
             None,
             vec![],
             Some(gate),
+            None,
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileDelete]);

@@ -181,6 +181,7 @@ async fn test_consent_request_forwarded_to_channel() {
         None,
         vec![],
         Some(gate),
+        None,
     )
     .expect("executor construction should succeed");
 
@@ -302,6 +303,7 @@ async fn test_consent_approved_executes_tool() {
         None,
         vec![],
         Some(gate),
+        None,
     )
     .expect("executor construction should succeed");
 
@@ -425,6 +427,7 @@ async fn test_consent_denied_returns_error_to_provider() {
         None,
         vec![],
         Some(gate),
+        None,
     )
     .expect("executor construction should succeed");
 
@@ -547,6 +550,7 @@ async fn test_consent_low_risk_no_prompt() {
         None,
         vec![],
         Some(gate),
+        None,
     )
     .expect("executor construction should succeed");
 
@@ -640,6 +644,7 @@ async fn test_consent_no_gate_executes_freely() {
         None,
         vec![],
         None,
+        None,
     )
     .expect("executor construction should succeed");
 
@@ -711,8 +716,15 @@ async fn test_consent_response_unknown_id_logged() {
 
     let (gate, consent_rx) = ConsentGate::new(RiskLevel::High, Duration::from_secs(5), 10);
 
-    let executor = ToolExecutor::new(vec![], Duration::from_secs(30), None, vec![], Some(gate))
-        .expect("executor construction should succeed");
+    let executor = ToolExecutor::new(
+        vec![],
+        Duration::from_secs(30),
+        None,
+        vec![],
+        Some(gate),
+        None,
+    )
+    .expect("executor construction should succeed");
 
     let mut runtime = AgentRuntime::new(
         make_registry(provider),
