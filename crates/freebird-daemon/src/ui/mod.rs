@@ -168,10 +168,12 @@ impl TtyChat {
 
         match action {
             InputAction::Submit(text) => {
-                // Clear the input line and move to a new line for the response.
+                // Clear the input area and echo the user's message permanently
+                // in the scrollback (like Claude Code / ChatGPT).
                 self.save_input_area()?;
-
                 let trimmed = text.trim().to_string();
+                self.echo_user_input(&trimmed)?;
+
                 let parse_result = crate::chat::parse_user_input(&trimmed);
 
                 match parse_result {
@@ -347,6 +349,14 @@ impl TtyChat {
         queue!(self.writer, ResetColor)?;
         writeln!(self.writer)?;
 
+        self.writer.flush()
+    }
+
+    /// Echo the user's submitted message into the scrollback so it stays
+    /// visible above the bot's response.
+    fn echo_user_input(&mut self, text: &str) -> std::io::Result<()> {
+        theme::write_prompt_styled(&mut self.writer)?;
+        writeln!(self.writer, "{text}")?;
         self.writer.flush()
     }
 
