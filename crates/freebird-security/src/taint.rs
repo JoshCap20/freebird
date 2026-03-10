@@ -222,6 +222,33 @@ impl TaintedToolInput {
     ///
     /// Returns `SecurityError::MissingField` if the value is not an array
     /// or any element is not a string.
+    /// Extract an optional unsigned integer field.
+    ///
+    /// Returns `Ok(None)` if the key is absent.
+    /// Returns `Ok(Some(n))` if the key exists and is a valid `u64`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SecurityError::MissingField`] if the key exists but is not a
+    /// valid unsigned integer (e.g., string, float, negative).
+    pub fn extract_u64_optional(&self, key: &str) -> Result<Option<u64>, SecurityError> {
+        self.0.get(key).map_or(Ok(None), |v| {
+            v.as_u64()
+                .map(Some)
+                .ok_or_else(|| SecurityError::MissingField {
+                    field: key.into(),
+                    context: "expected unsigned integer".into(),
+                })
+        })
+    }
+
+    /// Extract an optional string array field, returning an empty `Vec` when
+    /// the key is absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SecurityError::MissingField`] if the key exists but is not an
+    /// array, or if any array element is not a string.
     pub fn extract_string_array_optional(&self, key: &str) -> Result<Vec<Tainted>, SecurityError> {
         match self.0.get(key) {
             None => Ok(vec![]),
@@ -429,5 +456,45 @@ mod tests {
         let input = TaintedToolInput::new(serde_json::json!({"args": []}));
         let result = input.extract_string_array_optional("args").unwrap();
         assert!(result.is_empty());
+    }
+
+    // ── extract_u64_optional tests ────────────────────────────────
+
+    #[test]
+    fn test_extract_u64_optional_present() {
+        let input = TaintedToolInput::new(serde_json::json!({"offset": 42}));
+        let result = input.extract_u64_optional("offset").unwrap();
+        assert_eq!(result, Some(42));
+    }
+
+    #[test]
+    fn test_extract_u64_optional_absent() {
+        let input = TaintedToolInput::new(serde_json::json!({"other": "value"}));
+        let result = input.extract_u64_optional("offset").unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_u64_optional_string_value() {
+        let input = TaintedToolInput::new(serde_json::json!({"offset": "hello"}));
+        let result = input.extract_u64_optional("offset");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SecurityError::MissingField { field, context } => {
+                assert_eq!(field, "offset");
+                assert!(
+                    context.contains("unsigned integer"),
+                    "context should mention unsigned integer: {context}"
+                );
+            }
+            other => panic!("expected MissingField, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_extract_u64_optional_negative_value() {
+        let input = TaintedToolInput::new(serde_json::json!({"offset": -5}));
+        let result = input.extract_u64_optional("offset");
+        assert!(result.is_err());
     }
 }
