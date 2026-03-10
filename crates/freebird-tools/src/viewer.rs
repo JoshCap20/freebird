@@ -137,10 +137,12 @@ fn extract_params(
             reason: e.to_string(),
         })?;
 
-    // Pattern is optional — MissingField means "no pattern provided"
+    // Pattern is optional — MissingField means "no pattern provided".
+    // Empty strings are treated as "no pattern" since `str::contains("")`
+    // matches every line, which is never the intended behavior.
     let pattern = match tainted.extract_file_content("pattern") {
-        Ok(pat) => Some(pat),
-        Err(SecurityError::MissingField { .. }) => None,
+        Ok(pat) if !pat.as_str().is_empty() => Some(pat),
+        Ok(_) | Err(SecurityError::MissingField { .. }) => None,
         Err(e) => {
             return Err(ToolError::InvalidInput {
                 tool: FileViewerTool::NAME.into(),
@@ -823,5 +825,24 @@ mod tests {
                 .contains("jumped to pattern match at line 80")
         );
         assert!(output.content.contains("MARKER_LINE"));
+    }
+
+    #[tokio::test]
+    async fn test_empty_pattern_treated_as_no_pattern() {
+        let h = TestHarness::new();
+        generate_numbered_file(&h, "file.txt", 50);
+
+        let tool = FileViewerTool::new();
+        let output = tool
+            .execute(
+                serde_json::json!({"path": "file.txt", "pattern": ""}),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+
+        // Empty pattern should be ignored — show default view from line 1
+        assert!(output.content.contains("lines 1-50 of 50"));
+        assert!(!output.content.contains("jumped to pattern match"));
     }
 }
