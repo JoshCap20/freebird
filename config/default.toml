@@ -37,7 +37,19 @@ consent_timeout_secs = 60
 max_pending_consent_requests = 5
 
 [security.egress]
-allowed_hosts = ["api.anthropic.com", "api.openai.com"]
+allowed_hosts = [
+    # Provider APIs (required)
+    "api.anthropic.com",
+    "api.openai.com",
+    # Structured data APIs (safe — pure JSON, no user-generated text)
+    "api.open-meteo.com",
+    "api.github.com",
+    "api.exchangerate-api.com",
+    "timeapi.io",
+    # Semi-structured (user-generated text fields — output scanning applies)
+    "en.wikipedia.org",
+    "api.stackexchange.com",
+]
 allowed_ports = [443]
 max_response_bytes = 1048576
 request_timeout_secs = 30

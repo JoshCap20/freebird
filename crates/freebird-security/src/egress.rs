@@ -44,6 +44,18 @@ impl EgressPolicy {
         }
     }
 
+    /// Return the set of allowed hosts.
+    #[must_use]
+    pub const fn allowed_hosts(&self) -> &BTreeSet<String> {
+        &self.allowed_hosts
+    }
+
+    /// Return the set of allowed ports.
+    #[must_use]
+    pub const fn allowed_ports(&self) -> &BTreeSet<u16> {
+        &self.allowed_ports
+    }
+
     /// Validate a parsed URL against this policy.
     ///
     /// Checks that the host is in the allowlist and the port is permitted.

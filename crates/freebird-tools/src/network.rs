@@ -88,21 +88,32 @@ impl HttpRequestTool {
         egress_policy: Arc<EgressPolicy>,
         config: NetworkToolConfig,
     ) -> Self {
+        let hosts: Vec<&str> = egress_policy
+            .allowed_hosts()
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let host_list = hosts.join(", ");
+
+        let description = format!(
+            "Make an HTTP request to an allowlisted host. \
+             Only HTTPS URLs to the following pre-approved hosts are permitted: {host_list}."
+        );
+        let url_description = format!("HTTPS URL to request. Allowed hosts: {host_list}");
+
         Self {
             client,
             egress_policy,
             config,
             info: ToolInfo {
                 name: Self::NAME.into(),
-                description: "Make an HTTP request to an allowlisted host. \
-                    Only HTTPS URLs to pre-approved hosts are permitted."
-                    .into(),
+                description,
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "url": {
                             "type": "string",
-                            "description": "HTTPS URL to request (must be an allowlisted host)"
+                            "description": url_description
                         },
                         "method": {
                             "type": "string",

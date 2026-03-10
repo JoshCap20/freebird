@@ -657,7 +657,16 @@ drain_timeout_secs = 1"#,
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(
             config.security.egress.allowed_hosts,
-            vec!["api.anthropic.com", "api.openai.com"]
+            vec![
+                "api.anthropic.com",
+                "api.openai.com",
+                "api.open-meteo.com",
+                "api.github.com",
+                "api.exchangerate-api.com",
+                "timeapi.io",
+                "en.wikipedia.org",
+                "api.stackexchange.com",
+            ]
         );
         assert_eq!(config.security.egress.allowed_ports, vec![443]);
         assert_eq!(config.security.egress.max_response_bytes, 1_048_576);
