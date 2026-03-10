@@ -7,6 +7,7 @@
 
 pub mod edit;
 pub mod filesystem;
+pub mod grep;
 pub mod knowledge;
 pub mod network;
 pub mod shell;
