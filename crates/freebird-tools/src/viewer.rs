@@ -284,7 +284,9 @@ fn render_view(file_content: &str, params: &ViewerParams) -> ToolOutput {
     let window = lines.get(start_idx..end_idx).unwrap_or_default();
 
     let start_line = offset;
-    let end_line = start_idx + window.len();
+    // window.len() == end_idx - start_idx, so start_idx + window.len() gives
+    // the 1-indexed inclusive end line (by coincidence of 0-indexed math).
+    let end_line_inclusive = start_idx + window.len();
 
     let lines_above = start_idx;
     let lines_below = total_lines.saturating_sub(end_idx);
@@ -292,7 +294,7 @@ fn render_view(file_content: &str, params: &ViewerParams) -> ToolOutput {
     let header = format_header(
         &rel_display,
         start_line,
-        end_line,
+        end_line_inclusive,
         total_lines,
         pattern_match_line,
     );
@@ -825,6 +827,45 @@ mod tests {
                 .contains("jumped to pattern match at line 80")
         );
         assert!(output.content.contains("MARKER_LINE"));
+    }
+
+    #[tokio::test]
+    async fn test_file_exactly_default_limit_lines() {
+        let h = TestHarness::new();
+        generate_numbered_file(&h, "exact.txt", 100);
+
+        let tool = FileViewerTool::new();
+        let output = tool
+            .execute(serde_json::json!({"path": "exact.txt"}), &h.context())
+            .await
+            .unwrap();
+
+        assert!(output.content.contains("lines 1-100 of 100"));
+        assert!(output.content.contains("0 lines above"));
+        assert!(output.content.contains("0 lines below"));
+        assert!(output.content.contains("Line 1"));
+        assert!(output.content.contains("Line 100"));
+    }
+
+    #[tokio::test]
+    async fn test_non_integer_offset_returns_error() {
+        let h = TestHarness::new();
+        generate_numbered_file(&h, "file.txt", 10);
+
+        let tool = FileViewerTool::new();
+        let result = tool
+            .execute(
+                serde_json::json!({"path": "file.txt", "offset": "abc"}),
+                &h.context(),
+            )
+            .await;
+
+        match result {
+            Err(ToolError::InvalidInput { tool, .. }) => {
+                assert_eq!(tool, "file_viewer");
+            }
+            other => panic!("expected InvalidInput, got: {other:?}"),
+        }
     }
 
     #[tokio::test]
