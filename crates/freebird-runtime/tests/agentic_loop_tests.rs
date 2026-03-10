@@ -11,8 +11,7 @@
 
 mod helpers;
 
-use std::collections::{BTreeSet, VecDeque};
-use std::path::PathBuf;
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -28,14 +27,14 @@ use tokio_util::sync::CancellationToken;
 use freebird_memory::in_memory::InMemoryMemory;
 use freebird_runtime::agent::AgentRuntime;
 use freebird_runtime::registry::ProviderRegistry;
-use freebird_runtime::tool_registry::ToolRegistry;
+use freebird_runtime::tool_executor::ToolExecutor;
 use freebird_security::safe_types::ScannedToolOutput;
 use freebird_traits::channel::{InboundEvent, OutboundEvent};
 use freebird_traits::id::{ModelId, ProviderId, SessionId};
 use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary, Turn};
 use freebird_traits::provider::{
     CompletionRequest, CompletionResponse, ContentBlock, Message, NetworkErrorKind, Provider,
-    ProviderError, ProviderFeature, ProviderInfo, Role, StopReason, StreamEvent, TokenUsage,
+    ProviderError, ProviderInfo, Role, StopReason, StreamEvent, TokenUsage,
 };
 use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
@@ -43,38 +42,12 @@ use freebird_traits::tool::{
 };
 use freebird_types::config::{RuntimeConfig, ToolsConfig};
 
-use helpers::{MockChannel, error_text, message_text, without_status_events};
+use helpers::{
+    MockChannel, QueuedProvider, ResponseFactory, default_config, default_tools_config, error_text,
+    make_registry, make_tool_executor, message_text, without_status_events,
+};
 
-// ---------------------------------------------------------------------------
-// QueuedProvider — returns queued responses in order
-// ---------------------------------------------------------------------------
-
-type ResponseFactory = Box<dyn Fn() -> Result<CompletionResponse, ProviderError> + Send + Sync>;
-
-struct QueuedProvider {
-    info: ProviderInfo,
-    responses: TokioMutex<VecDeque<ResponseFactory>>,
-    call_count: AtomicUsize,
-}
-
-impl QueuedProvider {
-    fn new(responses: Vec<ResponseFactory>) -> Self {
-        Self {
-            info: ProviderInfo {
-                id: ProviderId::from("test-provider"),
-                display_name: "Test Provider".into(),
-                supported_models: vec![],
-                features: BTreeSet::from([ProviderFeature::ToolUse]),
-            },
-            responses: TokioMutex::new(VecDeque::from(responses)),
-            call_count: AtomicUsize::new(0),
-        }
-    }
-
-    fn call_count(&self) -> usize {
-        self.call_count.load(Ordering::SeqCst)
-    }
-}
+// QueuedProvider, ArcProvider, ResponseFactory imported from helpers
 
 // ---------------------------------------------------------------------------
 // RequestCapturingProvider — captures requests for inspection
@@ -142,43 +115,6 @@ fn make_capturing_registry(provider: Arc<RequestCapturingProvider>) -> ProviderR
     registry.register(id.clone(), Box::new(ArcCapturingProvider(provider)));
     registry.set_failover_chain(vec![id]);
     registry
-}
-
-/// Wrapper to allow shared access after moving into registry.
-struct ArcProvider(Arc<QueuedProvider>);
-
-#[async_trait]
-impl Provider for ArcProvider {
-    fn info(&self) -> &ProviderInfo {
-        &self.0.info
-    }
-
-    async fn validate_credentials(&self) -> Result<(), ProviderError> {
-        Ok(())
-    }
-
-    async fn complete(
-        &self,
-        _request: CompletionRequest,
-    ) -> Result<CompletionResponse, ProviderError> {
-        self.0.call_count.fetch_add(1, Ordering::SeqCst);
-        let factory = self
-            .0
-            .responses
-            .lock()
-            .await
-            .pop_front()
-            .expect("QueuedProvider: no more queued responses");
-        factory()
-    }
-
-    async fn stream(
-        &self,
-        _request: CompletionRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError>
-    {
-        Err(ProviderError::NotConfigured)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -421,51 +357,20 @@ fn error_response() -> ResponseFactory {
     })
 }
 
-// ---------------------------------------------------------------------------
-// Runtime builder helpers
-// ---------------------------------------------------------------------------
-
-fn default_config() -> RuntimeConfig {
-    RuntimeConfig {
-        default_model: ModelId::from("test-model"),
-        default_provider: ProviderId::from("test-provider"),
-        system_prompt: None,
-        max_output_tokens: 1024,
-        max_tool_rounds: 10,
-        temperature: None,
-        max_turns_per_session: 10,
-        drain_timeout_secs: 1,
-    }
-}
-
-fn default_tools_config() -> ToolsConfig {
-    ToolsConfig {
-        sandbox_root: PathBuf::from("/tmp/test-sandbox"),
-        default_timeout_secs: 30,
-        allowed_directories: vec![],
-        allowed_shell_commands: vec![],
-        max_shell_output_bytes: 1_048_576,
-    }
-}
-
-fn make_registry(provider: Arc<QueuedProvider>) -> ProviderRegistry {
-    let mut registry = ProviderRegistry::new();
-    let id = ProviderId::from("test-provider");
-    registry.register(id.clone(), Box::new(ArcProvider(provider)));
-    registry.set_failover_chain(vec![id]);
-    registry
-}
+// default_config, default_tools_config, make_tool_executor, make_registry
+// imported from helpers
 
 fn make_test_runtime(
     channel: MockChannel,
     provider: Arc<QueuedProvider>,
-    tools: ToolRegistry,
+    tools: ToolExecutor,
     memory: Box<dyn Memory>,
 ) -> AgentRuntime {
     AgentRuntime::new(
         make_registry(provider),
         Box::new(channel),
         tools,
+        None,
         memory,
         default_config(),
         default_tools_config(),
@@ -477,7 +382,7 @@ fn make_test_runtime(
 async fn send_message_and_collect(
     inbound_tx: &mpsc::Sender<InboundEvent>,
     mut outbound_rx: mpsc::Receiver<OutboundEvent>,
-    runtime: AgentRuntime,
+    mut runtime: AgentRuntime,
     text: &str,
 ) -> Vec<OutboundEvent> {
     inbound_tx
@@ -521,7 +426,7 @@ async fn test_single_turn_text_response() {
     let runtime = make_test_runtime(
         channel,
         provider.clone(),
-        ToolRegistry::new(),
+        make_tool_executor(vec![]),
         Box::new(InMemoryMemory::new()),
     );
 
@@ -541,7 +446,7 @@ async fn test_single_turn_max_tokens_appends_truncation_notice() {
     let runtime = make_test_runtime(
         channel,
         provider,
-        ToolRegistry::new(),
+        make_tool_executor(vec![]),
         Box::new(InMemoryMemory::new()),
     );
 
@@ -568,7 +473,7 @@ async fn test_single_turn_stop_sequence_delivers_response() {
     let runtime = make_test_runtime(
         channel,
         provider,
-        ToolRegistry::new(),
+        make_tool_executor(vec![]),
         Box::new(InMemoryMemory::new()),
     );
 
@@ -585,7 +490,7 @@ async fn test_single_turn_empty_response_skipped() {
     let runtime = make_test_runtime(
         channel,
         provider,
-        ToolRegistry::new(),
+        make_tool_executor(vec![]),
         Box::new(InMemoryMemory::new()),
     );
 
@@ -625,11 +530,7 @@ async fn test_tool_use_single_round() {
     let runtime = make_test_runtime(
         channel,
         provider.clone(),
-        {
-            let mut r = ToolRegistry::new();
-            r.register(Box::new(mock_tool));
-            r
-        },
+        make_tool_executor(vec![Box::new(mock_tool)]),
         Box::new(InMemoryMemory::new()),
     );
 
@@ -674,11 +575,7 @@ async fn test_tool_use_multi_round() {
     let runtime = make_test_runtime(
         channel,
         provider.clone(),
-        {
-            let mut r = ToolRegistry::new();
-            r.register(Box::new(mock_tool));
-            r
-        },
+        make_tool_executor(vec![Box::new(mock_tool)]),
         Box::new(InMemoryMemory::new()),
     );
 
@@ -703,7 +600,7 @@ async fn test_tool_use_unknown_tool_returns_error_to_provider() {
     let runtime = make_test_runtime(
         channel,
         provider.clone(),
-        ToolRegistry::new(), // no tools registered
+        make_tool_executor(vec![]), // no tools registered
         Box::new(InMemoryMemory::new()),
     );
 
@@ -736,11 +633,7 @@ async fn test_tool_use_execution_error() {
     let runtime = make_test_runtime(
         channel,
         provider.clone(),
-        {
-            let mut r = ToolRegistry::new();
-            r.register(Box::new(mock_tool));
-            r
-        },
+        make_tool_executor(vec![Box::new(mock_tool)]),
         Box::new(InMemoryMemory::new()),
     );
 
@@ -764,21 +657,28 @@ async fn test_tool_use_timeout() {
     let slow_tool = SlowTool::new("slow_tool", Duration::from_secs(60));
 
     let tools_config = ToolsConfig {
-        sandbox_root: PathBuf::from("/tmp/test-sandbox"),
+        sandbox_root: std::env::temp_dir(),
         default_timeout_secs: 1, // 1 second timeout
         allowed_directories: vec![],
         allowed_shell_commands: vec![],
         max_shell_output_bytes: 1_048_576,
     };
 
+    // Use a 1-second timeout executor to match tools_config
+    let short_timeout_executor = ToolExecutor::new(
+        vec![Box::new(slow_tool)],
+        Duration::from_secs(1),
+        None,
+        vec![],
+        None,
+    )
+    .unwrap();
+
     let runtime = AgentRuntime::new(
         make_registry(provider.clone()),
         Box::new(channel),
-        {
-            let mut r = ToolRegistry::new();
-            r.register(Box::new(slow_tool));
-            r
-        },
+        short_timeout_executor,
+        None,
         Box::new(InMemoryMemory::new()),
         default_config(),
         tools_config,
@@ -830,11 +730,8 @@ async fn test_tool_use_max_rounds_exceeded() {
     let runtime = AgentRuntime::new(
         make_registry(provider.clone()),
         Box::new(channel),
-        {
-            let mut r = ToolRegistry::new();
-            r.register(Box::new(mock_tool));
-            r
-        },
+        make_tool_executor(vec![Box::new(mock_tool)]),
+        None,
         Box::new(InMemoryMemory::new()),
         config,
         default_tools_config(),
@@ -886,12 +783,7 @@ async fn test_tool_use_multiple_tools_per_round() {
     let runtime = make_test_runtime(
         channel,
         provider.clone(),
-        {
-            let mut r = ToolRegistry::new();
-            r.register(Box::new(tool_a));
-            r.register(Box::new(tool_b));
-            r
-        },
+        make_tool_executor(vec![Box::new(tool_a), Box::new(tool_b)]),
         Box::new(InMemoryMemory::new()),
     );
 
@@ -917,7 +809,8 @@ async fn test_conversation_saved_after_turn() {
     let runtime = AgentRuntime::new(
         make_registry(provider),
         Box::new(channel),
-        ToolRegistry::new(),
+        make_tool_executor(vec![]),
+        None,
         Box::new(ArcMemory(Arc::clone(&memory))),
         default_config(),
         default_tools_config(),
@@ -953,11 +846,8 @@ async fn test_tool_invocations_recorded_in_turn() {
     let runtime = AgentRuntime::new(
         make_registry(provider),
         Box::new(channel),
-        {
-            let mut r = ToolRegistry::new();
-            r.register(Box::new(mock_tool));
-            r
-        },
+        make_tool_executor(vec![Box::new(mock_tool)]),
+        None,
         Box::new(ArcMemory(Arc::clone(&memory))),
         default_config(),
         default_tools_config(),
@@ -1019,7 +909,7 @@ async fn test_injection_in_input_rejected() {
     let runtime = make_test_runtime(
         channel,
         provider.clone(),
-        ToolRegistry::new(),
+        make_tool_executor(vec![]),
         Box::new(InMemoryMemory::new()),
     );
 
@@ -1051,7 +941,7 @@ async fn test_clean_input_passes_validation() {
     let runtime = make_test_runtime(
         channel,
         provider.clone(),
-        ToolRegistry::new(),
+        make_tool_executor(vec![]),
         Box::new(InMemoryMemory::new()),
     );
 
@@ -1093,11 +983,8 @@ async fn test_tool_output_injection_replaced_with_error() {
     let runtime = AgentRuntime::new(
         make_capturing_registry(Arc::clone(&provider)),
         Box::new(channel),
-        {
-            let mut r = ToolRegistry::new();
-            r.register(Box::new(mock_tool));
-            r
-        },
+        make_tool_executor(vec![Box::new(mock_tool)]),
+        None,
         Box::new(InMemoryMemory::new()),
         default_config(),
         default_tools_config(),
@@ -1144,7 +1031,8 @@ async fn test_model_output_injection_blocks_delivery() {
     let runtime = AgentRuntime::new(
         make_registry(provider),
         Box::new(channel),
-        ToolRegistry::new(),
+        make_tool_executor(vec![]),
+        None,
         Box::new(ArcMemory(Arc::clone(&memory))),
         default_config(),
         default_tools_config(),
@@ -1187,7 +1075,8 @@ async fn test_truncated_response_injection_blocks_delivery() {
     let runtime = AgentRuntime::new(
         make_registry(provider),
         Box::new(channel),
-        ToolRegistry::new(),
+        make_tool_executor(vec![]),
+        None,
         Box::new(ArcMemory(Arc::clone(&memory))),
         default_config(),
         default_tools_config(),
@@ -1229,7 +1118,7 @@ async fn test_provider_error_sends_error_event() {
     let runtime = make_test_runtime(
         channel,
         provider,
-        ToolRegistry::new(),
+        make_tool_executor(vec![]),
         Box::new(InMemoryMemory::new()),
     );
 
@@ -1252,7 +1141,8 @@ async fn test_memory_load_error_sends_error_event() {
     let runtime = AgentRuntime::new(
         make_registry(provider.clone()),
         Box::new(channel),
-        ToolRegistry::new(),
+        make_tool_executor(vec![]),
+        None,
         Box::new(FailingMemory {
             fail_load: true,
             fail_save: false,
@@ -1285,7 +1175,8 @@ async fn test_memory_save_error_does_not_crash() {
     let runtime = AgentRuntime::new(
         make_registry(provider),
         Box::new(channel),
-        ToolRegistry::new(),
+        make_tool_executor(vec![]),
+        None,
         Box::new(FailingMemory {
             fail_load: false,
             fail_save: true,
@@ -1381,7 +1272,8 @@ async fn test_continuing_session_includes_history_in_request() {
     let runtime = AgentRuntime::new(
         make_capturing_registry(provider.clone()),
         Box::new(channel),
-        ToolRegistry::new(),
+        make_tool_executor(vec![]),
+        None,
         Box::new(PreloadedMemory::new(existing_conv)),
         default_config(),
         default_tools_config(),
@@ -1457,7 +1349,8 @@ async fn test_new_conversation_uses_config_values() {
     let runtime = AgentRuntime::new(
         make_capturing_registry(provider.clone()),
         Box::new(channel),
-        ToolRegistry::new(),
+        make_tool_executor(vec![]),
+        None,
         Box::new(ArcMemory(Arc::clone(&memory))),
         config,
         default_tools_config(),

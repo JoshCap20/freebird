@@ -7,20 +7,18 @@
 
 mod helpers;
 
-use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use freebird_runtime::agent::AgentRuntime;
 use freebird_runtime::registry::ProviderRegistry;
-use freebird_runtime::tool_registry::ToolRegistry;
 use freebird_traits::channel::InboundEvent;
 use freebird_traits::id::{ModelId, ProviderId, SessionId};
 use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary};
 use freebird_types::config::{RuntimeConfig, ToolsConfig};
 use tokio_util::sync::CancellationToken;
 
-use helpers::{MockChannel, error_text, message_text};
+use helpers::{MockChannel, error_text, make_tool_executor, message_text};
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -47,11 +45,14 @@ impl Memory for NoopMemory {
     }
 }
 
+// make_tool_executor imported from helpers
+
 fn make_runtime(channel: MockChannel) -> AgentRuntime {
     AgentRuntime::new(
         ProviderRegistry::new(),
         Box::new(channel),
-        ToolRegistry::new(),
+        make_tool_executor(vec![]),
+        None,
         Box::new(NoopMemory),
         RuntimeConfig {
             default_model: ModelId::from("test-model"),
@@ -64,7 +65,7 @@ fn make_runtime(channel: MockChannel) -> AgentRuntime {
             drain_timeout_secs: 1,
         },
         ToolsConfig {
-            sandbox_root: PathBuf::from("/tmp/test-sandbox"),
+            sandbox_root: std::env::temp_dir(),
             default_timeout_secs: 30,
             allowed_directories: vec![],
             allowed_shell_commands: vec![],
@@ -81,7 +82,7 @@ fn make_runtime(channel: MockChannel) -> AgentRuntime {
 #[tokio::test]
 async fn test_command_quit_sends_goodbye_and_exits() {
     let (channel, inbound_tx, mut outbound_rx, _stopped) = MockChannel::new();
-    let runtime = make_runtime(channel);
+    let mut runtime = make_runtime(channel);
     let cancel = CancellationToken::new();
 
     inbound_tx
@@ -104,7 +105,7 @@ async fn test_command_quit_sends_goodbye_and_exits() {
 #[tokio::test]
 async fn test_command_new_creates_session() {
     let (channel, inbound_tx, mut outbound_rx, _stopped) = MockChannel::new();
-    let runtime = make_runtime(channel);
+    let mut runtime = make_runtime(channel);
     let cancel = CancellationToken::new();
 
     inbound_tx
@@ -141,7 +142,7 @@ async fn test_command_new_creates_session() {
 #[tokio::test]
 async fn test_command_help_sends_help_text() {
     let (channel, inbound_tx, mut outbound_rx, _stopped) = MockChannel::new();
-    let runtime = make_runtime(channel);
+    let mut runtime = make_runtime(channel);
     let cancel = CancellationToken::new();
 
     inbound_tx
@@ -174,7 +175,7 @@ async fn test_command_help_sends_help_text() {
 #[tokio::test]
 async fn test_command_unknown_sends_error() {
     let (channel, inbound_tx, mut outbound_rx, _stopped) = MockChannel::new();
-    let runtime = make_runtime(channel);
+    let mut runtime = make_runtime(channel);
     let cancel = CancellationToken::new();
 
     inbound_tx
@@ -208,7 +209,7 @@ async fn test_command_unknown_sends_error() {
 #[tokio::test]
 async fn test_shutdown_on_cancel() {
     let (channel, _inbound_tx, _outbound_rx, _stopped) = MockChannel::new();
-    let runtime = make_runtime(channel);
+    let mut runtime = make_runtime(channel);
     let cancel = CancellationToken::new();
 
     let cancel_clone = cancel.clone();
@@ -225,7 +226,7 @@ async fn test_shutdown_on_cancel() {
 #[tokio::test]
 async fn test_eof_exits_cleanly() {
     let (channel, inbound_tx, _outbound_rx, _stopped) = MockChannel::new();
-    let runtime = make_runtime(channel);
+    let mut runtime = make_runtime(channel);
     let cancel = CancellationToken::new();
 
     // Drop the sender to close the inbound stream (simulates EOF)
@@ -239,7 +240,7 @@ async fn test_eof_exits_cleanly() {
 #[tokio::test]
 async fn test_channel_stop_called() {
     let (channel, inbound_tx, _outbound_rx, stopped) = MockChannel::new();
-    let runtime = make_runtime(channel);
+    let mut runtime = make_runtime(channel);
     let cancel = CancellationToken::new();
 
     // Drop sender to trigger EOF → clean exit
@@ -257,7 +258,7 @@ async fn test_channel_stop_called() {
 #[tokio::test]
 async fn test_connected_event_no_crash() {
     let (channel, inbound_tx, mut outbound_rx, _stopped) = MockChannel::new();
-    let runtime = make_runtime(channel);
+    let mut runtime = make_runtime(channel);
     let cancel = CancellationToken::new();
 
     inbound_tx
@@ -286,7 +287,7 @@ async fn test_connected_event_no_crash() {
 #[tokio::test]
 async fn test_disconnected_event_no_crash() {
     let (channel, inbound_tx, mut outbound_rx, _stopped) = MockChannel::new();
-    let runtime = make_runtime(channel);
+    let mut runtime = make_runtime(channel);
     let cancel = CancellationToken::new();
 
     inbound_tx

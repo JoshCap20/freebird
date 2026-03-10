@@ -91,6 +91,15 @@ impl ToolRegistry {
     pub fn to_definitions(&self) -> Vec<ToolDefinition> {
         self.iter().map(Tool::to_definition).collect()
     }
+
+    /// Consume the registry and return all tools as a `Vec`.
+    ///
+    /// Used when transferring tools to a `ToolExecutor` which owns them
+    /// in its own `HashMap`.
+    #[must_use]
+    pub fn into_tools(self) -> Vec<Box<dyn Tool>> {
+        self.tools.into_values().collect()
+    }
 }
 
 impl Default for ToolRegistry {

@@ -96,17 +96,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
     ));
 
     // 6. MEMORY
-    let memory_dir = expand_tilde(
-        &config
-            .memory
-            .base_dir
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("~/.freebird/conversations")),
-    )?;
-    let memory = tokio::task::spawn_blocking(move || FileMemory::new(memory_dir))
-        .await
-        .context("file memory init task panicked")?
-        .context("failed to initialize file memory backend")?;
+    let memory = init_memory(&config).await?;
 
     // 7. TOOLS — build registry before moving config.tools
     let tool_registry =
@@ -123,20 +113,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
             )
         })?;
 
-    // Merge CLI --allow-dir flags with any configured allowed_directories.
-    for dir in allow_dirs {
-        let expanded = expand_tilde(&dir)?;
-        let canonical = expanded.canonicalize().with_context(|| {
-            format!(
-                "--allow-dir path `{}` does not exist or cannot be resolved",
-                dir.display()
-            )
-        })?;
-        if !tools_config.allowed_directories.contains(&canonical) {
-            tracing::info!(dir = %canonical.display(), "allowing additional directory");
-            tools_config.allowed_directories.push(canonical);
-        }
-    }
+    merge_allow_dirs(&mut tools_config, allow_dirs)?;
 
     // 8. SHUTDOWN COORDINATOR
     let shutdown = ShutdownCoordinator::new(Duration::from_secs(config.runtime.drain_timeout_secs));
@@ -153,25 +130,49 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         }
     });
 
-    // 9. AGENT RUNTIME
-    let runtime = AgentRuntime::new(
+    // 9. CONSENT GATE — human-in-the-loop for high-risk tools (ASI09)
+    let (consent_gate, consent_rx) = freebird_security::consent::ConsentGate::new(
+        config.security.require_consent_above.clone(),
+        Duration::from_secs(config.security.consent_timeout_secs),
+        config.security.max_pending_consent_requests,
+    );
+    tracing::info!(
+        threshold = ?config.security.require_consent_above,
+        timeout_secs = config.security.consent_timeout_secs,
+        max_pending = config.security.max_pending_consent_requests,
+        "consent gate configured"
+    );
+
+    // 10. TOOL EXECUTOR — consumes the registry, adds security pipeline
+    let tool_executor = freebird_runtime::tool_executor::ToolExecutor::new(
+        tool_registry.into_tools(),
+        std::time::Duration::from_secs(tools_config.default_timeout_secs),
+        None, // audit logger — wired in a later issue
+        tools_config.allowed_directories.clone(),
+        Some(consent_gate),
+    )
+    .context("failed to construct ToolExecutor (duplicate tool names?)")?;
+
+    // 11. AGENT RUNTIME
+    let mut runtime = AgentRuntime::new(
         registry,
         channel,
-        tool_registry,
+        tool_executor,
+        Some(consent_rx),
         Box::new(memory),
         config.runtime,
         tools_config,
         None, // audit logger — wired in a later issue
     );
 
-    // 10. RUN
+    // 12. RUN
     let run_result = runtime.run(token).await;
     match &run_result {
         Ok(()) => tracing::info!("runtime exited cleanly"),
         Err(e) => tracing::error!(%e, "runtime error"),
     }
 
-    // 11. DRAIN
+    // 13. DRAIN
     if drain_timeout > Duration::ZERO {
         tracing::info!(?drain_timeout, "draining in-flight work");
         let _ = tokio::time::timeout(drain_timeout, signal_handle).await;
@@ -254,6 +255,42 @@ fn validate_config(config: &AppConfig) -> Result<()> {
         bail!("at least one provider must be configured in [[providers]]");
     }
 
+    Ok(())
+}
+
+/// Initialize the file-based memory backend from config.
+async fn init_memory(config: &AppConfig) -> Result<FileMemory> {
+    let memory_dir = expand_tilde(
+        &config
+            .memory
+            .base_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("~/.freebird/conversations")),
+    )?;
+    tokio::task::spawn_blocking(move || FileMemory::new(memory_dir))
+        .await
+        .context("file memory init task panicked")?
+        .context("failed to initialize file memory backend")
+}
+
+/// Merge CLI `--allow-dir` flags into the tools configuration.
+fn merge_allow_dirs(
+    tools_config: &mut freebird_types::config::ToolsConfig,
+    allow_dirs: Vec<PathBuf>,
+) -> Result<()> {
+    for dir in allow_dirs {
+        let expanded = expand_tilde(&dir)?;
+        let canonical = expanded.canonicalize().with_context(|| {
+            format!(
+                "--allow-dir path `{}` does not exist or cannot be resolved",
+                dir.display()
+            )
+        })?;
+        if !tools_config.allowed_directories.contains(&canonical) {
+            tracing::info!(dir = %canonical.display(), "allowing additional directory");
+            tools_config.allowed_directories.push(canonical);
+        }
+    }
     Ok(())
 }
 

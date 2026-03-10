@@ -15,6 +15,12 @@ pub enum ClientMessage {
     Command { name: String, args: Vec<String> },
     /// Client is disconnecting gracefully.
     Disconnect,
+    /// User's response to a consent request (approve or deny a high-risk tool).
+    ConsentResponse {
+        request_id: String,
+        approved: bool,
+        reason: Option<String>,
+    },
 }
 
 /// Messages sent by the daemon to a connected client.
@@ -41,6 +47,15 @@ pub enum ServerMessage {
     },
     /// The full agentic turn is complete — client may prompt for next input.
     TurnComplete,
+    /// Consent request — the user must approve or deny a high-risk tool.
+    ConsentRequest {
+        request_id: String,
+        tool_name: String,
+        description: String,
+        risk_level: String,
+        action_summary: String,
+        expires_at: String,
+    },
 }
 
 #[cfg(test)]
@@ -87,6 +102,16 @@ mod tests {
                 args: vec![],
             },
             ClientMessage::Disconnect,
+            ClientMessage::ConsentResponse {
+                request_id: "req-42".into(),
+                approved: true,
+                reason: None,
+            },
+            ClientMessage::ConsentResponse {
+                request_id: "req-43".into(),
+                approved: false,
+                reason: Some("too risky".into()),
+            },
         ] {
             let json = serde_json::to_string(&msg).unwrap();
             let back: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -188,6 +213,14 @@ mod tests {
                 duration_ms: 100,
             },
             ServerMessage::TurnComplete,
+            ServerMessage::ConsentRequest {
+                request_id: "req-99".into(),
+                tool_name: "shell".into(),
+                description: "execute shell commands".into(),
+                risk_level: "high".into(),
+                action_summary: "rm -rf /tmp/test".into(),
+                expires_at: "2026-03-09T12:00:00Z".into(),
+            },
         ] {
             let json = serde_json::to_string(&msg).unwrap();
             let back: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -208,6 +241,52 @@ mod tests {
             !json.contains('\n'),
             "JSON-line must not contain raw newlines"
         );
+    }
+
+    // ── Consent serde ────────────────────────────────────────────────
+
+    #[test]
+    fn client_consent_response_serializes() {
+        let msg = ClientMessage::ConsentResponse {
+            request_id: "req-1".into(),
+            approved: true,
+            reason: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"consent_response","request_id":"req-1","approved":true,"reason":null}"#
+        );
+    }
+
+    #[test]
+    fn client_consent_response_denied_serializes() {
+        let msg = ClientMessage::ConsentResponse {
+            request_id: "req-2".into(),
+            approved: false,
+            reason: Some("dangerous".into()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn server_consent_request_serializes() {
+        let msg = ServerMessage::ConsentRequest {
+            request_id: "req-7".into(),
+            tool_name: "shell".into(),
+            description: "execute commands".into(),
+            risk_level: "high".into(),
+            action_summary: "rm -rf /tmp".into(),
+            expires_at: "2026-03-09T12:00:00Z".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""type":"consent_request""#));
+        assert!(json.contains(r#""request_id":"req-7""#));
+        assert!(json.contains(r#""tool_name":"shell""#));
+        let back: ServerMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, back);
     }
 
     #[test]

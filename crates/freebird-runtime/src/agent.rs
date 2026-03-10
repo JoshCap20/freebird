@@ -5,15 +5,15 @@
 //! routes them to handlers, and shuts down gracefully when the
 //! cancellation token fires or the inbound stream closes.
 
-use std::time::Duration;
+use std::pin::Pin;
 
 use chrono::Utc;
-use freebird_security::audit::{
-    AuditEventType, AuditLogger, CapabilityCheckResult, InjectionSource,
-};
+use freebird_security::audit::{AuditEventType, AuditLogger, InjectionSource};
+use freebird_security::capability::CapabilityGrant;
+use freebird_security::consent::ConsentRequest;
 use freebird_security::error::Severity;
 use freebird_security::injection;
-use freebird_security::safe_types::{SafeMessage, ScannedModelResponse, ScannedToolOutput};
+use freebird_security::safe_types::{SafeMessage, ScannedModelResponse};
 use freebird_security::taint::Tainted;
 use freebird_traits::channel::{
     Channel, ChannelError, ChannelFeature, InboundEvent, OutboundEvent,
@@ -24,7 +24,7 @@ use freebird_traits::provider::{
     CompletionRequest, CompletionResponse, ContentBlock, Message, ProviderError, Role, StopReason,
     StreamEvent, TokenUsage, ToolDefinition,
 };
-use freebird_traits::tool::{Tool, ToolContext, ToolOutcome, ToolOutput};
+use freebird_traits::tool::{Capability, ToolOutcome};
 use freebird_types::config::{RuntimeConfig, ToolsConfig};
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -33,7 +33,6 @@ use tokio_util::sync::CancellationToken;
 use crate::history::conversation_to_messages;
 use crate::registry::ProviderRegistry;
 use crate::stream::StreamAccumulator;
-use crate::tool_registry::ToolRegistry;
 
 use crate::session::SessionManager;
 
@@ -71,7 +70,10 @@ pub enum RuntimeError {
 pub struct AgentRuntime {
     provider_registry: ProviderRegistry,
     channel: Box<dyn Channel>,
-    tools: ToolRegistry,
+    tool_executor: crate::tool_executor::ToolExecutor,
+    /// Receives consent requests from the `ToolExecutor`'s `ConsentGate`.
+    /// Consumed by the third arm of the `run()` select loop.
+    consent_rx: Option<tokio::sync::mpsc::Receiver<ConsentRequest>>,
     memory: Box<dyn Memory>,
     config: RuntimeConfig,
     tools_config: ToolsConfig,
@@ -85,10 +87,12 @@ impl AgentRuntime {
     /// The `SessionManager` is created internally — it's an implementation
     /// detail, not an external dependency.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider_registry: ProviderRegistry,
         channel: Box<dyn Channel>,
-        tools: ToolRegistry,
+        tool_executor: crate::tool_executor::ToolExecutor,
+        consent_rx: Option<tokio::sync::mpsc::Receiver<ConsentRequest>>,
         memory: Box<dyn Memory>,
         config: RuntimeConfig,
         tools_config: ToolsConfig,
@@ -97,7 +101,8 @@ impl AgentRuntime {
         Self {
             provider_registry,
             channel,
-            tools,
+            tool_executor,
+            consent_rx,
             memory,
             config,
             tools_config,
@@ -119,12 +124,17 @@ impl AgentRuntime {
     /// # Errors
     ///
     /// Returns `RuntimeError::Channel` if the channel fails to start or stop.
-    pub async fn run(&self, cancel: CancellationToken) -> Result<(), RuntimeError> {
+    pub async fn run(&mut self, cancel: CancellationToken) -> Result<(), RuntimeError> {
         let handle = self.channel.start().await?;
-        let mut inbound = handle.inbound;
         let outbound = handle.outbound;
 
         tracing::info!("agent runtime started, waiting for messages");
+
+        // Fan-out inbound events into a splitter task and optional consent
+        // bridge task. See `spawn_inbound_splitter` and
+        // `spawn_consent_forwarder` for details.
+        let (mut main_rx, splitter_task, consent_task) =
+            self.spawn_consent_bridge(handle.inbound, &outbound, &cancel);
 
         loop {
             tokio::select! {
@@ -132,7 +142,7 @@ impl AgentRuntime {
                     tracing::info!("shutdown signal received, stopping runtime");
                     break;
                 }
-                event = inbound.next() => {
+                event = main_rx.recv() => {
                     if let Some(event) = event {
                         if matches!(
                             self.handle_event(event, &outbound).await,
@@ -148,8 +158,140 @@ impl AgentRuntime {
             }
         }
 
+        // Clean up spawned tasks
+        splitter_task.abort();
+        if let Some(task) = consent_task {
+            task.abort();
+        }
+
         self.channel.stop().await?;
         Ok(())
+    }
+
+    /// Spawn background tasks for consent bridge plumbing.
+    ///
+    /// Returns a receiver for non-consent inbound events, the splitter task
+    /// handle, and an optional consent-forwarder task handle.
+    ///
+    /// **Splitter task**: reads from the raw inbound stream and routes
+    /// `ConsentResponse` events directly to the consent gate's
+    /// [`ConsentResponder`], bypassing the main event loop. All other
+    /// events are forwarded to the returned `main_rx`. This is necessary
+    /// because `handle_event()` may block on `check_consent()` (awaiting
+    /// user approval via oneshot), and the `ConsentResponse` that unblocks
+    /// it also arrives as an `InboundEvent`.
+    ///
+    /// **Consent-forwarder task**: reads `ConsentRequest`s from the gate's
+    /// mpsc channel and forwards them as `OutboundEvent::ConsentRequest` to
+    /// the user's channel.
+    fn spawn_consent_bridge(
+        &mut self,
+        inbound: Pin<Box<dyn futures::Stream<Item = InboundEvent> + Send>>,
+        outbound: &mpsc::Sender<OutboundEvent>,
+        cancel: &CancellationToken,
+    ) -> (
+        mpsc::Receiver<InboundEvent>,
+        tokio::task::JoinHandle<()>,
+        Option<tokio::task::JoinHandle<()>>,
+    ) {
+        let (main_tx, main_rx) = mpsc::channel::<InboundEvent>(32);
+        let consent_responder = self.tool_executor.consent_responder();
+        let has_consent_gate = consent_responder.is_some();
+
+        let splitter_cancel = cancel.clone();
+        let splitter_outbound = outbound.clone();
+        let splitter_task = tokio::spawn({
+            let mut inbound = inbound;
+            async move {
+                loop {
+                    tokio::select! {
+                        () = splitter_cancel.cancelled() => break,
+                        event = inbound.next() => {
+                            match event {
+                                Some(InboundEvent::ConsentResponse {
+                                    request_id, approved, reason, sender_id,
+                                }) if has_consent_gate => {
+                                    if let Some(ref resp) = consent_responder {
+                                        let response = if approved {
+                                            freebird_security::consent::ConsentResponse::Approved
+                                        } else {
+                                            freebird_security::consent::ConsentResponse::Denied { reason }
+                                        };
+                                        if resp.respond(&request_id, response).await {
+                                            tracing::info!(
+                                                %request_id, %sender_id, approved,
+                                                "consent response delivered"
+                                            );
+                                        } else {
+                                            tracing::warn!(
+                                                %request_id, %sender_id,
+                                                "consent response for unknown or expired request"
+                                            );
+                                            let _ = splitter_outbound.send(
+                                                OutboundEvent::Error {
+                                                    text: format!(
+                                                        "No pending consent request with id `{request_id}` \
+                                                         (expired or already responded)"
+                                                    ),
+                                                    recipient_id: sender_id,
+                                                }
+                                            ).await;
+                                        }
+                                    }
+                                }
+                                Some(event) => {
+                                    if main_tx.send(event).await.is_err() { break; }
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let consent_task = self.consent_rx.take().map(|mut consent_rx| {
+            let consent_cancel = cancel.clone();
+            let consent_outbound = outbound.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        () = consent_cancel.cancelled() => break,
+                        req = consent_rx.recv() => {
+                            match req {
+                                Some(req) => {
+                                    // Serialize risk_level via serde to get the canonical
+                                    // snake_case form ("high", not "High" from Debug).
+                                    let risk_level = serde_json::to_value(&req.risk_level)
+                                        .ok()
+                                        .and_then(|v| v.as_str().map(String::from))
+                                        .unwrap_or_else(|| format!("{:?}", req.risk_level));
+                                    let event = OutboundEvent::ConsentRequest {
+                                        request_id: req.id,
+                                        tool_name: req.tool_name,
+                                        description: req.description,
+                                        risk_level,
+                                        action_summary: req.action_summary,
+                                        expires_at: req.expires_at.to_rfc3339(),
+                                        recipient_id: req.sender_id,
+                                    };
+                                    if consent_outbound.send(event).await.is_err() {
+                                        tracing::warn!(
+                                            "consent outbound channel closed; \
+                                             consent request dropped"
+                                        );
+                                        break;
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                }
+            })
+        });
+
+        (main_rx, splitter_task, consent_task)
     }
 
     /// Route an inbound event to the appropriate handler.
@@ -202,10 +344,21 @@ impl AgentRuntime {
                 tracing::info!(%sender_id, "user disconnected");
                 LoopAction::Continue
             }
-            InboundEvent::ConsentResponse { .. } => {
-                // Consent responses are handled by the consent bridge task,
-                // not the main event loop. Log and continue if one arrives here.
-                tracing::debug!("consent response received in main event loop — ignoring");
+            InboundEvent::ConsentResponse {
+                request_id,
+                sender_id,
+                ..
+            } => {
+                // When a consent gate is configured, ConsentResponse events
+                // are handled by the splitter task (which runs concurrently
+                // and can deliver responses while handle_event is blocked).
+                // This arm only fires when no consent gate is configured
+                // (the splitter passes them through to the main loop).
+                tracing::warn!(
+                    %request_id,
+                    %sender_id,
+                    "consent response received but no consent gate is configured"
+                );
                 LoopAction::Continue
             }
         }
@@ -444,7 +597,7 @@ impl AgentRuntime {
             timestamp: Utc::now(),
         };
 
-        let tool_definitions: Vec<ToolDefinition> = self.tools.to_definitions();
+        let tool_definitions = self.tool_executor.tool_definitions();
 
         let mut messages = conversation_to_messages(conversation);
 
@@ -621,15 +774,14 @@ impl AgentRuntime {
         let mut prompt = base.to_owned();
         let _ = write!(prompt, "\n\nYou are running on model: {model_id}");
 
-        if self.tools.is_empty() {
+        if self.tool_executor.tool_count() == 0 {
             return prompt;
         }
 
         // List available tools by name and description.
         prompt.push_str("\n\nYou have the following tools available:\n");
-        for tool in self.tools.iter() {
-            let info = tool.info();
-            let _ = writeln!(prompt, "- **{}**: {}", info.name, info.description);
+        for def in &self.tool_executor.tool_definitions() {
+            let _ = writeln!(prompt, "- **{}**: {}", def.name, def.description);
         }
 
         // Filesystem access context.
@@ -710,6 +862,38 @@ impl AgentRuntime {
         // Add assistant message with tool_use blocks to conversation
         messages.push(assistant_message.clone());
 
+        // TODO(#27): Replace with per-session capability grants derived from session auth.
+        let grant = match CapabilityGrant::new(
+            [
+                Capability::FileRead,
+                Capability::FileWrite,
+                Capability::FileDelete,
+                Capability::ShellExecute,
+                Capability::ProcessSpawn,
+                Capability::NetworkOutbound,
+                Capability::NetworkListen,
+                Capability::EnvRead,
+            ]
+            .into_iter()
+            .collect(),
+            self.tools_config.sandbox_root.clone(),
+            None,
+        ) {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!(error = %e, "cannot create capability grant — skipping tool execution");
+                send_outbound(
+                    outbound,
+                    OutboundEvent::Error {
+                        text: "Internal error: sandbox root is not accessible".into(),
+                        recipient_id: sender_id.into(),
+                    },
+                )
+                .await;
+                return;
+            }
+        };
+
         // Execute each tool and collect results
         let mut tool_results = Vec::with_capacity(tool_uses.len());
         for (tool_use_id, tool_name, input) in tool_uses {
@@ -724,27 +908,17 @@ impl AgentRuntime {
 
             let start = std::time::Instant::now();
 
-            let output = self.execute_tool(&tool_name, &input, session_id).await;
+            // ToolExecutor handles capability checks, consent gates, timeout,
+            // injection scanning, and audit logging. Output is already scanned.
+            let output = self
+                .tool_executor
+                .execute(&tool_name, input.clone(), &grant, session_id, sender_id)
+                .await;
 
             let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-            // Scan tool output for injection — BLOCK if detected
-            let scanned = ScannedToolOutput::from_raw(&output.content);
-            let (final_content, outcome) = if scanned.injection_detected() {
-                tracing::warn!(tool = %tool_name, "injection detected in tool output, blocking");
-                self.audit(
-                    session_id,
-                    AuditEventType::InjectionDetected {
-                        pattern: "prompt injection in tool output".to_owned(),
-                        source: InjectionSource::ToolOutput,
-                        severity: Severity::High,
-                    },
-                )
-                .await;
-                (scanned.into_content(), ToolOutcome::Error)
-            } else {
-                (scanned.into_content(), output.outcome)
-            };
+            let final_content = output.content;
+            let outcome = output.outcome;
 
             let is_error = outcome == ToolOutcome::Error;
 
@@ -903,65 +1077,6 @@ impl AgentRuntime {
             },
         )
         .await;
-    }
-
-    /// Execute a tool by name, with timeout. Returns `ToolOutput` unconditionally.
-    async fn execute_tool(
-        &self,
-        tool_name: &str,
-        input: &serde_json::Value,
-        session_id: &SessionId,
-    ) -> ToolOutput {
-        let Some(tool) = self.find_tool(tool_name) else {
-            self.audit(
-                session_id,
-                AuditEventType::ToolInvocation {
-                    tool_name: tool_name.into(),
-                    capability_check: CapabilityCheckResult::Denied {
-                        reason: "tool not found".into(),
-                    },
-                },
-            )
-            .await;
-            return ToolOutput {
-                content: format!("Error: tool `{tool_name}` not found"),
-                outcome: ToolOutcome::Error,
-                metadata: None,
-            };
-        };
-
-        self.audit(
-            session_id,
-            AuditEventType::ToolInvocation {
-                tool_name: tool_name.into(),
-                capability_check: CapabilityCheckResult::Granted,
-            },
-        )
-        .await;
-
-        let context = ToolContext {
-            session_id,
-            sandbox_root: &self.tools_config.sandbox_root,
-            // TODO(#27): Use per-session capability grants instead of empty slice
-            granted_capabilities: &[],
-            allowed_directories: &self.tools_config.allowed_directories,
-        };
-
-        let timeout = Duration::from_secs(self.tools_config.default_timeout_secs);
-
-        match tokio::time::timeout(timeout, tool.execute(input.clone(), &context)).await {
-            Ok(Ok(output)) => output,
-            Ok(Err(e)) => ToolOutput {
-                content: format!("Error: {e}"),
-                outcome: ToolOutcome::Error,
-                metadata: None,
-            },
-            Err(_) => ToolOutput {
-                content: format!("Error: tool `{tool_name}` timed out"),
-                outcome: ToolOutcome::Error,
-                metadata: None,
-            },
-        }
     }
 
     /// Check whether any provider in the failover chain supports streaming.
@@ -1180,11 +1295,6 @@ impl AgentRuntime {
         if scanned.injection_detected() {
             self.audit_model_injection(session_id).await;
         }
-    }
-
-    /// Look up a tool by name.
-    fn find_tool(&self, name: &str) -> Option<&dyn Tool> {
-        self.tools.get(name)
     }
 }
 

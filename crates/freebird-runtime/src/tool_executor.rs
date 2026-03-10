@@ -157,6 +157,16 @@ impl ToolExecutor {
         }
     }
 
+    /// Get a [`ConsentResponder`] handle that can be sent to spawned tasks.
+    ///
+    /// Returns `None` if no consent gate is configured. The responder shares
+    /// the same pending-request map as the gate, so calling `respond()` on it
+    /// will unblock a `check()` awaiting approval.
+    #[must_use]
+    pub fn consent_responder(&self) -> Option<freebird_security::consent::ConsentResponder> {
+        self.consent_gate.as_ref().map(ConsentGate::responder)
+    }
+
     /// Execute a tool by name. This is the ONLY entry point for tool execution.
     ///
     /// Enforces the mandatory security sequence from CLAUDE.md §11.2:
@@ -174,6 +184,7 @@ impl ToolExecutor {
         input: serde_json::Value,
         grant: &CapabilityGrant,
         session_id: &SessionId,
+        sender_id: &str,
     ) -> ToolOutput {
         // 1. Tool lookup
         let Some(tool) = self.tools.get(tool_name) else {
@@ -211,7 +222,7 @@ impl ToolExecutor {
 
         // 3. Consent gate for High/Critical risk tools (ASI09)
         if let Some(output) = self
-            .check_consent(tool_name, tool.info(), &input, session_id)
+            .check_consent(tool_name, tool.info(), &input, session_id, sender_id)
             .await
         {
             return output;
@@ -341,6 +352,7 @@ impl ToolExecutor {
         tool_info: &freebird_traits::tool::ToolInfo,
         input: &serde_json::Value,
         session_id: &SessionId,
+        sender_id: &str,
     ) -> Option<ToolOutput> {
         // Truncate action summary to avoid leaking large tool inputs (e.g. file contents)
         // through the consent channel. 512 chars is enough for a human to make a decision.
@@ -350,15 +362,23 @@ impl ToolExecutor {
         let raw_summary =
             serde_json::to_string(input).unwrap_or_else(|_| "<unserializable input>".into());
         let action_summary = if raw_summary.len() > MAX_SUMMARY_LEN {
+            // Find a char-boundary-safe truncation point to avoid panicking
+            // on multi-byte UTF-8 sequences (e.g. CJK, emoji in tool input).
+            let truncate_at = raw_summary
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|&i| i <= MAX_SUMMARY_LEN)
+                .last()
+                .unwrap_or(0);
             format!(
                 "{}… ({} bytes total)",
-                &raw_summary[..MAX_SUMMARY_LEN],
+                &raw_summary[..truncate_at],
                 raw_summary.len()
             )
         } else {
             raw_summary
         };
-        match consent.check(tool_info, action_summary).await {
+        match consent.check(tool_info, action_summary, sender_id).await {
             Ok(()) => {
                 self.audit_consent_granted(session_id, tool_name).await;
                 None
@@ -384,6 +404,12 @@ impl ToolExecutor {
             }
             Err(ConsentError::TooManyPending { tool, max }) => {
                 tracing::warn!(%tool, max, %session_id, "too many pending consent requests");
+                self.audit_consent_denied(
+                    session_id,
+                    &tool,
+                    Some(&format!("too many pending requests (max {max})")),
+                )
+                .await;
                 Some(ToolOutput {
                     content: format!("Too many pending consent requests ({max}); denying `{tool}`"),
                     outcome: ToolOutcome::Error,
@@ -392,6 +418,8 @@ impl ToolExecutor {
             }
             Err(ConsentError::ChannelClosed) => {
                 tracing::warn!(%session_id, "consent channel closed");
+                self.audit_consent_denied(session_id, tool_name, Some("consent channel closed"))
+                    .await;
                 Some(ToolOutput {
                     content: "Consent channel closed — cannot request approval".into(),
                     outcome: ToolOutcome::Error,
@@ -669,7 +697,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let output = executor
-            .execute("nonexistent", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "nonexistent",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Error);
@@ -691,7 +725,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let output = executor
-            .execute("write_file", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "write_file",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Error);
@@ -714,7 +754,13 @@ mod tests {
         let grant = expired_grant(&path, &[Capability::FileRead]);
 
         let output = executor
-            .execute("read_file", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "read_file",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Error);
@@ -741,7 +787,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let output = executor
-            .execute("read_file", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "read_file",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Success);
@@ -768,7 +820,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let output = executor
-            .execute("fail_tool", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "fail_tool",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Error);
@@ -790,7 +848,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let output = executor
-            .execute("slow_tool", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "slow_tool",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Error);
@@ -815,7 +879,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let output = executor
-            .execute("reader", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "reader",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Error);
@@ -839,7 +909,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let output = executor
-            .execute("reader", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "reader",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Error);
@@ -864,7 +940,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let _ = executor
-            .execute("nonexistent", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "nonexistent",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         let events = read_audit_events(&log_path);
@@ -894,7 +976,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let _ = executor
-            .execute("write_file", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "write_file",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         let events = read_audit_events(&log_path);
@@ -924,7 +1012,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let _ = executor
-            .execute("read_file", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "read_file",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         let events = read_audit_events(&log_path);
@@ -954,7 +1048,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let _ = executor
-            .execute("slow_tool", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "slow_tool",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         let events = read_audit_events(&log_path);
@@ -983,7 +1083,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let _ = executor
-            .execute("reader", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "reader",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         let events = read_audit_events(&log_path);
@@ -1008,7 +1114,13 @@ mod tests {
 
         // Should not panic
         let output = executor
-            .execute("nonexistent", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "nonexistent",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
         assert_eq!(output.outcome, ToolOutcome::Error);
     }
@@ -1146,8 +1258,8 @@ mod tests {
         let sid = session_id();
 
         let (out_a, out_b) = tokio::join!(
-            executor.execute("tool_a", serde_json::json!({}), &grant, &sid),
-            executor.execute("tool_b", serde_json::json!({}), &grant, &sid),
+            executor.execute("tool_a", serde_json::json!({}), &grant, &sid, "test-sender"),
+            executor.execute("tool_b", serde_json::json!({}), &grant, &sid, "test-sender"),
         );
 
         assert_eq!(out_a.outcome, ToolOutcome::Success);
@@ -1175,7 +1287,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::ShellExecute]);
 
         let output = executor
-            .execute("shell", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "shell",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Success);
@@ -1200,7 +1318,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
 
         let output = executor
-            .execute("read_file", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "read_file",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Success);
@@ -1231,8 +1355,14 @@ mod tests {
 
         let exec = Arc::clone(&executor);
         let handle = tokio::spawn(async move {
-            exec.execute("shell", serde_json::json!({"cmd": "ls"}), &grant, &sid)
-                .await
+            exec.execute(
+                "shell",
+                serde_json::json!({"cmd": "ls"}),
+                &grant,
+                &sid,
+                "test-sender",
+            )
+            .await
         });
 
         let req = rx.recv().await.unwrap();
@@ -1267,7 +1397,7 @@ mod tests {
 
         let exec = Arc::clone(&executor);
         let handle = tokio::spawn(async move {
-            exec.execute("shell", serde_json::json!({}), &grant, &sid)
+            exec.execute("shell", serde_json::json!({}), &grant, &sid, "test-sender")
                 .await
         });
 
@@ -1304,7 +1434,13 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::ShellExecute]);
 
         let output = executor
-            .execute("shell", serde_json::json!({}), &grant, &session_id())
+            .execute(
+                "shell",
+                serde_json::json!({}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Error);
@@ -1336,7 +1472,7 @@ mod tests {
         let s1 = sid.clone();
         let _h1 = tokio::spawn(async move {
             exec1
-                .execute("shell", serde_json::json!({}), &g1, &s1)
+                .execute("shell", serde_json::json!({}), &g1, &s1, "test-sender")
                 .await
         });
 
@@ -1345,7 +1481,7 @@ mod tests {
 
         // Second request should fail with TooManyPending.
         let output = executor
-            .execute("shell", serde_json::json!({}), &grant, &sid)
+            .execute("shell", serde_json::json!({}), &grant, &sid, "test-sender")
             .await;
 
         assert_eq!(output.outcome, ToolOutcome::Error);
@@ -1375,7 +1511,7 @@ mod tests {
 
         let exec = Arc::clone(&executor);
         let handle = tokio::spawn(async move {
-            exec.execute("shell", serde_json::json!({}), &grant, &sid)
+            exec.execute("shell", serde_json::json!({}), &grant, &sid, "test-sender")
                 .await
         });
 
@@ -1415,7 +1551,7 @@ mod tests {
 
         let exec = Arc::clone(&executor);
         let handle = tokio::spawn(async move {
-            exec.execute("shell", serde_json::json!({}), &grant, &sid)
+            exec.execute("shell", serde_json::json!({}), &grant, &sid, "test-sender")
                 .await
         });
 
@@ -1459,5 +1595,115 @@ mod tests {
             .consent_respond("any-id", ConsentResponse::Approved)
             .await;
         assert!(!result, "no consent gate should return false");
+    }
+
+    // ── Action summary truncation ─────────────────────────────────
+
+    /// Consent request with a very large tool input truncates the action
+    /// summary to avoid leaking oversized payloads through the consent
+    /// channel. The truncation must be char-boundary-safe (no panic on
+    /// multi-byte UTF-8 sequences).
+    #[tokio::test]
+    async fn test_consent_truncates_large_action_summary() {
+        let (_tmp, path) = sandbox();
+        // Build a tool input larger than MAX_SUMMARY_LEN (512 chars)
+        let large_input = "x".repeat(1000);
+        let tool = MockTool::new("risky", Capability::FileDelete).with_risk_level(RiskLevel::High);
+        let executed = tool.executed_flag();
+
+        let (gate, mut rx) = ConsentGate::new(RiskLevel::High, StdDuration::from_secs(5), 5);
+        let executor = ToolExecutor::new(
+            vec![Box::new(tool)],
+            StdDuration::from_secs(5),
+            None,
+            vec![],
+            Some(gate),
+        )
+        .unwrap();
+        let grant = grant_with_caps(&path, &[Capability::FileDelete]);
+
+        let exec_handle = {
+            let sid = session_id();
+            let input = serde_json::json!({ "data": large_input });
+            tokio::spawn(async move {
+                executor
+                    .execute("risky", input, &grant, &sid, "test-sender")
+                    .await
+            })
+        };
+
+        // Receive consent request — action_summary should be truncated
+        let request = tokio::time::timeout(StdDuration::from_secs(2), rx.recv())
+            .await
+            .expect("should receive consent request within timeout")
+            .expect("consent rx should not be closed");
+
+        assert!(
+            request.action_summary.len() < 1000,
+            "action summary should be truncated, got {} bytes",
+            request.action_summary.len()
+        );
+        assert!(
+            request.action_summary.contains("bytes total"),
+            "truncated summary should include byte count indicator"
+        );
+
+        // Approve so the task completes
+        // (the ConsentGate was moved into executor, so we need to use
+        // the rx we have — but we can't respond directly. Let the task
+        // timeout instead by dropping rx)
+        drop(rx);
+
+        let _output = exec_handle.await.expect("task should not panic");
+        // Will get expired/channel-closed error since we dropped rx after
+        // the consent was already sent — that's fine, we're testing truncation
+        assert!(!executed.load(Ordering::Relaxed));
+    }
+
+    /// Multi-byte UTF-8 sequences in tool input don't cause panics
+    /// during action summary truncation (char-boundary-safe slicing).
+    #[tokio::test]
+    async fn test_consent_truncation_multibyte_utf8_safe() {
+        let (_tmp, path) = sandbox();
+        // 🎉 is 4 bytes in UTF-8. 200 of them = 800 bytes > 512 limit
+        let emoji_input = "🎉".repeat(200);
+        let tool = MockTool::new("risky", Capability::FileDelete).with_risk_level(RiskLevel::High);
+
+        let (gate, mut rx) = ConsentGate::new(RiskLevel::High, StdDuration::from_secs(5), 5);
+        let executor = ToolExecutor::new(
+            vec![Box::new(tool)],
+            StdDuration::from_secs(5),
+            None,
+            vec![],
+            Some(gate),
+        )
+        .unwrap();
+        let grant = grant_with_caps(&path, &[Capability::FileDelete]);
+
+        let exec_handle = {
+            let sid = session_id();
+            let input = serde_json::json!({ "data": emoji_input });
+            tokio::spawn(async move {
+                executor
+                    .execute("risky", input, &grant, &sid, "test-sender")
+                    .await
+            })
+        };
+
+        let request = tokio::time::timeout(StdDuration::from_secs(2), rx.recv())
+            .await
+            .expect("should receive consent request")
+            .expect("consent rx should not be closed");
+
+        // Should not have panicked, and should be truncated
+        assert!(
+            request.action_summary.contains("bytes total"),
+            "emoji-heavy summary should be truncated"
+        );
+        // Verify it's valid UTF-8 (if we got here without a panic, slicing was safe)
+        assert!(request.action_summary.is_char_boundary(0));
+
+        drop(rx);
+        let _ = exec_handle.await;
     }
 }
