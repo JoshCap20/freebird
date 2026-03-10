@@ -1781,6 +1781,118 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_format_diff_preview_exact_output() {
+        let content = "aaa\nbbb\nccc\nddd\neee\nfff\nggg\n";
+        let result = format_diff_preview(content, "ddd", "DDD", 4, 1, 2);
+        let expected = "  2│ bbb\n  3│ ccc\n- 4│ ddd\n+ 4│ DDD\n  5│ eee\n  6│ fff";
+        assert_eq!(result, expected);
+    }
+
+    #[tokio::test]
+    async fn test_diff_preview_at_file_start() {
+        let h = TestHarness::new();
+        std::fs::write(
+            h.path().join("src.rs"),
+            "first\nsecond\nthird\nfourth\nfifth\n",
+        )
+        .unwrap();
+
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "path": "src.rs",
+                    "old_string": "first",
+                    "new_string": "FIRST"
+                }),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+
+        // No context before line 1 — only after-context should appear
+        assert!(output.content.contains("- "), "should have removed marker");
+        assert!(output.content.contains("+ "), "should have added marker");
+        assert!(
+            output.content.contains("│ second"),
+            "should have context after change"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_diff_preview_at_file_end() {
+        let h = TestHarness::new();
+        std::fs::write(
+            h.path().join("src.rs"),
+            "first\nsecond\nthird\nfourth\nlast",
+        )
+        .unwrap();
+
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "path": "src.rs",
+                    "old_string": "last",
+                    "new_string": "LAST"
+                }),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+
+        // Context before the last line, no context after
+        assert!(
+            output.content.contains("│ fourth"),
+            "should have context before change"
+        );
+        assert!(output.content.contains("- "), "should have removed marker");
+        assert!(output.content.contains("+ "), "should have added marker");
+    }
+
+    #[tokio::test]
+    async fn test_diff_preview_zero_context_lines() {
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("src.rs"), "aaa\nbbb\nccc\nddd\neee\n").unwrap();
+
+        let tool = SearchReplaceEditTool::new(&EditConfig {
+            diff_preview: true,
+            diff_context_lines: 0,
+        });
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "path": "src.rs",
+                    "old_string": "ccc",
+                    "new_string": "CCC"
+                }),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+
+        let diff_lines: Vec<&str> = output
+            .content
+            .lines()
+            .skip_while(|l| !l.contains("│"))
+            .collect();
+        // With 0 context: only the changed lines, no surrounding context
+        assert_eq!(
+            diff_lines.len(),
+            2,
+            "should have exactly 2 lines (1 removed + 1 added)"
+        );
+        assert!(
+            diff_lines.iter().any(|l| l.starts_with("- ")),
+            "should have removed"
+        );
+        assert!(
+            diff_lines.iter().any(|l| l.starts_with("+ ")),
+            "should have added"
+        );
+    }
+
     // ── Property-based tests ─────────────────────────────────────
 
     mod proptests {
