@@ -117,6 +117,37 @@ pub struct ToolsConfig {
     /// this limit is truncated with a `[output truncated]` marker.
     #[serde(default = "default_max_shell_output_bytes")]
     pub max_shell_output_bytes: usize,
+    /// Edit tool configuration (diff preview, context lines).
+    #[serde(default)]
+    pub edit: EditConfig,
+}
+
+/// Configuration for the search/replace edit tool's diff preview.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditConfig {
+    /// Whether to append a compact diff preview to the edit tool output.
+    #[serde(default = "default_diff_preview")]
+    pub diff_preview: bool,
+    /// Number of unchanged context lines shown before/after the change.
+    #[serde(default = "default_diff_context_lines")]
+    pub diff_context_lines: usize,
+}
+
+impl Default for EditConfig {
+    fn default() -> Self {
+        Self {
+            diff_preview: default_diff_preview(),
+            diff_context_lines: default_diff_context_lines(),
+        }
+    }
+}
+
+const fn default_diff_preview() -> bool {
+    true
+}
+
+const fn default_diff_context_lines() -> usize {
+    3
 }
 
 fn default_allowed_shell_commands() -> Vec<String> {
@@ -643,6 +674,27 @@ drain_timeout_secs = 1"#,
             vec!["ls", "cat", "grep", "head", "tail", "wc"]
         );
         assert_eq!(config.tools.max_shell_output_bytes, 1_048_576);
+    }
+
+    // ── Edit config tests ────────────────────────────────────────
+
+    #[test]
+    fn test_edit_config_defaults_when_absent() {
+        let toml_str = config_toml(&[]);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert!(config.tools.edit.diff_preview);
+        assert_eq!(config.tools.edit.diff_context_lines, 3);
+    }
+
+    #[test]
+    fn test_edit_config_explicit_values() {
+        let toml_str = config_toml(&[(
+            "tools",
+            "sandbox_root = \"/tmp\"\ndefault_timeout_secs = 10\n\n[tools.edit]\ndiff_preview = false\ndiff_context_lines = 5",
+        )]);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert!(!config.tools.edit.diff_preview);
+        assert_eq!(config.tools.edit.diff_context_lines, 5);
     }
 
     // ── Consent config tests ───────────────────────────────────────

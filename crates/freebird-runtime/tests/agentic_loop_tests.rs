@@ -40,7 +40,7 @@ use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
     ToolOutput,
 };
-use freebird_types::config::{KnowledgeConfig, RuntimeConfig, ToolsConfig};
+use freebird_types::config::{EditConfig, KnowledgeConfig, RuntimeConfig, ToolsConfig};
 
 use helpers::{
     MockChannel, QueuedProvider, ResponseFactory, default_config, default_tools_config, error_text,
@@ -664,6 +664,7 @@ async fn test_tool_use_timeout() {
         allowed_directories: vec![],
         allowed_shell_commands: vec![],
         max_shell_output_bytes: 1_048_576,
+        edit: EditConfig::default(),
     };
 
     // Use a 1-second timeout executor to match tools_config
