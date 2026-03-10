@@ -22,7 +22,7 @@ use crossterm::event::{Event, EventStream, KeyEvent};
 use crossterm::terminal;
 use crossterm::{cursor, execute};
 use futures::StreamExt;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
 
 use freebird_types::protocol::{ClientMessage, ServerMessage};
@@ -176,7 +176,8 @@ impl TtyChat {
 
                 match parse_result {
                     crate::chat::ParseResult::Quit => {
-                        send_client_message_async(socket_write, &ClientMessage::Disconnect).await?;
+                        crate::chat::send_client_message(socket_write, &ClientMessage::Disconnect)
+                            .await?;
                         return Ok(LoopControl::Exit);
                     }
                     crate::chat::ParseResult::LocalOutput(output_text) => {
@@ -186,7 +187,7 @@ impl TtyChat {
                         self.input.render(&mut self.writer)?;
                     }
                     crate::chat::ParseResult::Send(msg) => {
-                        send_client_message_async(socket_write, &msg).await?;
+                        crate::chat::send_client_message(socket_write, &msg).await?;
                         // Don't redraw input — wait for server response
                     }
                 }
@@ -195,7 +196,7 @@ impl TtyChat {
                 self.input.render(&mut self.writer)?;
             }
             InputAction::Quit => {
-                send_client_message_async(socket_write, &ClientMessage::Disconnect).await?;
+                crate::chat::send_client_message(socket_write, &ClientMessage::Disconnect).await?;
                 return Ok(LoopControl::Exit);
             }
             InputAction::None => {}
@@ -359,19 +360,4 @@ impl TtyChat {
 enum LoopControl {
     Continue,
     Exit,
-}
-
-/// Send a `ClientMessage` as JSON over an async writer.
-async fn send_client_message_async<W: tokio::io::AsyncWrite + Unpin>(
-    writer: &mut W,
-    msg: &ClientMessage,
-) -> Result<()> {
-    let json = serde_json::to_string(msg).context("serializing client message")?;
-    writer
-        .write_all(json.as_bytes())
-        .await
-        .context("writing to socket")?;
-    writer.write_all(b"\n").await?;
-    writer.flush().await.context("flushing socket")?;
-    Ok(())
 }
