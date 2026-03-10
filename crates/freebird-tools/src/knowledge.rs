@@ -160,12 +160,26 @@ impl Tool for StoreKnowledgeTool {
             },
         );
 
-        // Parse optional confidence
-        let confidence = tainted
-            .extract_file_content("confidence")
-            .ok()
-            .and_then(|s| s.as_str().parse::<f32>().ok())
-            .unwrap_or(0.8);
+        // Parse optional confidence (must be in 0.0..=1.0)
+        let confidence = match tainted.extract_file_content("confidence") {
+            Err(_) => 0.8, // not provided — use default
+            Ok(s) => {
+                let val = s
+                    .as_str()
+                    .parse::<f32>()
+                    .map_err(|_| ToolError::InvalidInput {
+                        tool: Self::NAME.into(),
+                        reason: format!("confidence must be a number, got: {}", s.as_str()),
+                    })?;
+                if !(0.0..=1.0).contains(&val) {
+                    return Err(ToolError::InvalidInput {
+                        tool: Self::NAME.into(),
+                        reason: format!("confidence must be between 0.0 and 1.0, got: {val}"),
+                    });
+                }
+                val
+            }
+        };
 
         let now = Utc::now();
         let id = KnowledgeId::from_string(uuid::Uuid::new_v4().to_string());
@@ -323,7 +337,9 @@ impl Tool for SearchKnowledgeTool {
         // Record access for retrieved entries
         let ids: Vec<KnowledgeId> = filtered.iter().map(|m| m.entry.id.clone()).collect();
         // Best-effort access recording — don't fail the search if this errors
-        let _ = store.record_access(&ids).await;
+        if let Err(e) = store.record_access(&ids).await {
+            tracing::warn!(error = %e, "failed to record access for knowledge entries");
+        }
 
         // Format results
         let mut output = String::new();

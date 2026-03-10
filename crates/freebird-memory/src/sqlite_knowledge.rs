@@ -225,6 +225,11 @@ impl KnowledgeStore for SqliteKnowledgeStore {
             return Ok(Vec::new());
         }
 
+        // Sanitize for FTS5: wrap in double-quotes to treat as phrase query,
+        // escaping any embedded double-quotes. This prevents FTS5 operator
+        // injection (e.g., unbalanced parens, NEAR, AND/OR operators).
+        let sanitized = format!("\"{}\"", query.replace('"', "\"\""));
+
         let conn = self.db.conn().await;
         let qualified_cols = SELECT_COLS.replace(", ", ", k.");
         let mut stmt = conn
@@ -239,7 +244,7 @@ impl KnowledgeStore for SqliteKnowledgeStore {
             .map_err(|e| db_err("prepare search", &e))?;
 
         let rows = stmt
-            .query_map(rusqlite::params![query, limit_i64(limit)], |row| {
+            .query_map(rusqlite::params![sanitized, limit_i64(limit)], |row| {
                 let entry = row_to_entry(row)?;
                 let rank: f64 = row.get(11)?;
                 Ok(KnowledgeMatch { entry, rank })
@@ -379,20 +384,7 @@ impl KnowledgeStore for SqliteKnowledgeStore {
     }
 }
 
-/// Extension trait for optional query results.
-trait OptionalExt<T> {
-    fn optional(self) -> Result<Option<T>, rusqlite::Error>;
-}
-
-impl<T> OptionalExt<T> for Result<T, rusqlite::Error> {
-    fn optional(self) -> Result<Option<T>, rusqlite::Error> {
-        match self {
-            Ok(val) => Ok(Some(val)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-}
+use crate::helpers::OptionalExt as _;
 
 #[cfg(test)]
 #[allow(

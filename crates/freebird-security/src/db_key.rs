@@ -55,47 +55,65 @@ pub fn derive_key(passphrase: &SecretString, salt: &[u8], iterations: u32) -> Se
 ///
 /// Returns `SecurityError::KeyfileError` if the salt file cannot be read or created.
 pub fn load_or_create_salt(salt_path: &Path) -> Result<Vec<u8>, SecurityError> {
-    if salt_path.exists() {
-        std::fs::read(salt_path).map_err(|e| {
-            SecurityError::KeyfileError(format!(
-                "failed to read salt file `{}`: {e}",
-                salt_path.display()
-            ))
-        })
-    } else {
-        let rng = SystemRandom::new();
-        let mut salt = vec![0u8; SALT_LEN];
-        rng.fill(&mut salt)
-            .map_err(|_| SecurityError::KeyfileError("failed to generate random salt".into()))?;
+    use std::io::Write;
 
-        // Create parent directory if needed
-        if let Some(parent) = salt_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                SecurityError::KeyfileError(format!(
-                    "failed to create salt directory `{}`: {e}",
-                    parent.display()
-                ))
-            })?;
-        }
-
-        std::fs::write(salt_path, &salt).map_err(|e| {
+    // Create parent directory if needed (idempotent)
+    if let Some(parent) = salt_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
             SecurityError::KeyfileError(format!(
-                "failed to write salt file `{}`: {e}",
-                salt_path.display()
+                "failed to create salt directory `{}`: {e}",
+                parent.display()
             ))
         })?;
+    }
 
-        // Set permissions to 0600 on Unix
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(salt_path, perms).map_err(|e| {
-                SecurityError::KeyfileError(format!("failed to set salt file permissions: {e}"))
+    // Attempt atomic create — avoids TOCTOU race between exists() and write().
+    // If the file already exists, `create_new` returns AlreadyExists and we
+    // fall through to read the existing salt.
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(salt_path)
+    {
+        Ok(mut file) => {
+            let rng = SystemRandom::new();
+            let mut salt = vec![0u8; SALT_LEN];
+            rng.fill(&mut salt).map_err(|_| {
+                SecurityError::KeyfileError("failed to generate random salt".into())
             })?;
-        }
 
-        Ok(salt)
+            file.write_all(&salt).map_err(|e| {
+                SecurityError::KeyfileError(format!(
+                    "failed to write salt file `{}`: {e}",
+                    salt_path.display()
+                ))
+            })?;
+
+            // Set permissions to 0600 on Unix
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let perms = std::fs::Permissions::from_mode(0o600);
+                std::fs::set_permissions(salt_path, perms).map_err(|e| {
+                    SecurityError::KeyfileError(format!("failed to set salt file permissions: {e}"))
+                })?;
+            }
+
+            Ok(salt)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // File already exists — read it
+            std::fs::read(salt_path).map_err(|e| {
+                SecurityError::KeyfileError(format!(
+                    "failed to read salt file `{}`: {e}",
+                    salt_path.display()
+                ))
+            })
+        }
+        Err(e) => Err(SecurityError::KeyfileError(format!(
+            "failed to create salt file `{}`: {e}",
+            salt_path.display()
+        ))),
     }
 }
 

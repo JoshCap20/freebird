@@ -219,20 +219,7 @@ fn io_err(context: &str, e: &rusqlite::Error) -> MemoryError {
     MemoryError::Io(std::io::Error::other(format!("{context}: {e}")))
 }
 
-/// Extension trait for optional query results.
-trait OptionalExt<T> {
-    fn optional(self) -> Result<Option<T>, rusqlite::Error>;
-}
-
-impl<T> OptionalExt<T> for Result<T, rusqlite::Error> {
-    fn optional(self) -> Result<Option<T>, rusqlite::Error> {
-        match self {
-            Ok(val) => Ok(Some(val)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-}
+use crate::helpers::OptionalExt as _;
 
 #[cfg(test)]
 #[allow(
