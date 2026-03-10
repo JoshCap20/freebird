@@ -178,7 +178,7 @@ impl Tool for GlobFindTool {
         })?;
 
         // Collect, filter, classify
-        let mut entries: Vec<(String, bool)> = Vec::new();
+        let mut entries: Vec<(String, bool)> = Vec::with_capacity(params.max_results.min(256));
         let mut total_found: usize = 0;
 
         for entry in paths {
@@ -261,7 +261,7 @@ impl Tool for GlobFindTool {
         if truncated {
             let _ = write!(
                 output,
-                "\n\nFound {total_found} results matching '{}' (showing first {showing})",
+                "\n\nFound {showing} of {total_found} results matching '{}' (truncated at {showing})",
                 params.pattern
             );
         } else {
@@ -475,7 +475,7 @@ mod tests {
             .count();
         assert_eq!(file_lines, 10, "should cap at 10 results");
         assert!(
-            output.content.contains("showing first 10"),
+            output.content.contains("truncated at 10"),
             "should show truncation message: {}",
             output.content
         );
@@ -549,6 +549,72 @@ mod tests {
             "should skip node_modules: {}",
             output.content
         );
+    }
+
+    #[tokio::test]
+    async fn test_skips_target_directory() {
+        let h = TestHarness::new();
+        let target_dir = h.path().join("target");
+        let debug_dir = target_dir.join("debug");
+        std::fs::create_dir_all(&debug_dir).unwrap();
+        std::fs::write(debug_dir.join("build_artifact"), "").unwrap();
+        std::fs::write(h.path().join("src.rs"), "").unwrap();
+
+        let output = tool()
+            .execute(serde_json::json!({"pattern": "**/*"}), &h.context())
+            .await
+            .unwrap();
+
+        assert!(output.content.contains("src.rs"), "should find source file");
+        assert!(
+            !output.content.contains("target"),
+            "should skip target directory: {}",
+            output.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_default_max_results_is_100() {
+        let h = TestHarness::new();
+        // Create 120 files
+        for i in 0..120 {
+            std::fs::write(h.path().join(format!("file_{i:03}.txt")), "").unwrap();
+        }
+
+        let output = tool()
+            .execute(serde_json::json!({"pattern": "*.txt"}), &h.context())
+            .await
+            .unwrap();
+
+        let file_lines = output
+            .content
+            .lines()
+            .filter(|l| l.starts_with("file  "))
+            .count();
+        assert_eq!(file_lines, 100, "default cap should be 100");
+        assert!(
+            output.content.contains("truncated at 100"),
+            "should truncate at default: {}",
+            output.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_max_results_clamped_to_hard_cap() {
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("only.txt"), "").unwrap();
+
+        // Request 999 max_results — should be clamped to 500
+        let output = tool()
+            .execute(
+                serde_json::json!({"pattern": "*.txt", "max_results": 999}),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+
+        // Should succeed, not error
+        assert!(output.content.contains("Found 1 results"));
     }
 
     // ── Path & Security Tests ───────────────────────────────────────
