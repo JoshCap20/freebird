@@ -361,10 +361,17 @@ impl CargoVerifyTool {
 
         match step {
             VerifyStep::Check => {
-                cmd.args(["check", "--message-format=json"]);
+                cmd.args(["check", "--all-targets", "--message-format=json"]);
             }
             VerifyStep::Clippy => {
-                cmd.args(["clippy", "--message-format=json", "--", "-D", "warnings"]);
+                cmd.args([
+                    "clippy",
+                    "--all-targets",
+                    "--message-format=json",
+                    "--",
+                    "-D",
+                    "warnings",
+                ]);
             }
             VerifyStep::Test => {
                 cmd.arg("test");
@@ -384,7 +391,7 @@ impl CargoVerifyTool {
                 ]);
             }
             VerifyStep::Build => {
-                cmd.args(["build", "--message-format=json"]);
+                cmd.args(["build", "--all-targets", "--message-format=json"]);
             }
         }
 
