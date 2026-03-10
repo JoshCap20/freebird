@@ -100,14 +100,15 @@ pub fn write_session_header_styled<W: Write>(
 #[must_use]
 fn format_number(n: u32) -> String {
     let s = n.to_string();
-    let mut result = String::with_capacity(s.len() + s.len() / 3);
-    for (i, ch) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
+    let len = s.len();
+    let mut result = String::with_capacity(len + len / 3);
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
             result.push(',');
         }
         result.push(ch);
     }
-    result.chars().rev().collect()
+    result
 }
 
 /// Truncate a session ID to the first 8 characters for display.
