@@ -190,8 +190,8 @@ format = "pretty"
         );
         assert!(registry.get("repo_map").is_some(), "missing repo_map");
         assert!(
-            registry.tool_count() >= 13,
-            "expected at least 13 tools, got {}",
+            registry.tool_count() >= 14,
+            "expected at least 14 tools, got {}",
             registry.tool_count()
         );
     }
