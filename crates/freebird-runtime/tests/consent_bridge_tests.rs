@@ -20,119 +20,35 @@
 
 mod helpers;
 
-use std::collections::{BTreeSet, VecDeque};
-use std::pin::Pin;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use futures::Stream;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 
 use freebird_memory::in_memory::InMemoryMemory;
 use freebird_runtime::agent::AgentRuntime;
-use freebird_runtime::registry::ProviderRegistry;
 use freebird_runtime::tool_executor::ToolExecutor;
 use freebird_security::consent::ConsentGate;
 use freebird_traits::channel::{InboundEvent, OutboundEvent};
-use freebird_traits::id::{ModelId, ProviderId};
+use freebird_traits::id::ModelId;
 use freebird_traits::provider::{
-    CompletionRequest, CompletionResponse, ContentBlock, Message, Provider, ProviderError,
-    ProviderFeature, ProviderInfo, Role, StopReason, StreamEvent, TokenUsage,
+    CompletionResponse, ContentBlock, Message, Role, StopReason, TokenUsage,
 };
 use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
     ToolOutput,
 };
-use freebird_types::config::{RuntimeConfig, ToolsConfig};
+use helpers::{
+    MockChannel, QueuedProvider, ResponseFactory, default_config, default_tools_config,
+    make_registry, message_text, without_status_events,
+};
 
-use helpers::MockChannel;
-
-// ---------------------------------------------------------------------------
-// QueuedProvider — returns queued responses in order
-// ---------------------------------------------------------------------------
-
-type ResponseFactory = Box<dyn Fn() -> Result<CompletionResponse, ProviderError> + Send + Sync>;
-
-struct QueuedProvider {
-    info: ProviderInfo,
-    responses: TokioMutex<VecDeque<ResponseFactory>>,
-}
-
-impl QueuedProvider {
-    fn new(responses: Vec<ResponseFactory>) -> Self {
-        Self {
-            info: ProviderInfo {
-                id: ProviderId::from("test-provider"),
-                display_name: "Test Provider".into(),
-                supported_models: vec![],
-                features: BTreeSet::from([ProviderFeature::ToolUse]),
-            },
-            responses: TokioMutex::new(VecDeque::from(responses)),
-        }
-    }
-}
-
-#[async_trait]
-impl Provider for QueuedProvider {
-    fn info(&self) -> &ProviderInfo {
-        &self.info
-    }
-
-    async fn validate_credentials(&self) -> Result<(), ProviderError> {
-        Ok(())
-    }
-
-    async fn complete(
-        &self,
-        _request: CompletionRequest,
-    ) -> Result<CompletionResponse, ProviderError> {
-        let factory = self
-            .responses
-            .lock()
-            .await
-            .pop_front()
-            .expect("QueuedProvider: no more responses");
-        factory()
-    }
-
-    async fn stream(
-        &self,
-        _request: CompletionRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError>
-    {
-        Err(ProviderError::NotConfigured)
-    }
-}
-
-/// Wrapper so `Arc<QueuedProvider>` implements `Provider`.
-struct ArcProvider(Arc<QueuedProvider>);
-
-#[async_trait]
-impl Provider for ArcProvider {
-    fn info(&self) -> &ProviderInfo {
-        self.0.info()
-    }
-    async fn validate_credentials(&self) -> Result<(), ProviderError> {
-        self.0.validate_credentials().await
-    }
-    async fn complete(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<CompletionResponse, ProviderError> {
-        self.0.complete(request).await
-    }
-    async fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError>
-    {
-        self.0.stream(request).await
-    }
-}
+// QueuedProvider, ArcProvider, ResponseFactory imported from helpers
 
 // ---------------------------------------------------------------------------
 // MockTool — configurable risk level + queued outputs + shared invocation counter
@@ -188,7 +104,7 @@ impl Tool for MockTool {
 }
 
 // ---------------------------------------------------------------------------
-// Response builders
+// Response builders (consent-specific response factories)
 // ---------------------------------------------------------------------------
 
 fn text_response(text: &str) -> ResponseFactory {
@@ -227,42 +143,7 @@ fn tool_use_response(tool_name: &str, input: serde_json::Value) -> ResponseFacto
     })
 }
 
-// ---------------------------------------------------------------------------
-// Config + runtime helpers
-// ---------------------------------------------------------------------------
-
-fn default_config() -> RuntimeConfig {
-    RuntimeConfig {
-        default_model: ModelId::from("test-model"),
-        default_provider: ProviderId::from("test-provider"),
-        system_prompt: None,
-        max_output_tokens: 1024,
-        max_tool_rounds: 10,
-        temperature: None,
-        max_turns_per_session: 10,
-        drain_timeout_secs: 1,
-    }
-}
-
-fn default_tools_config() -> ToolsConfig {
-    ToolsConfig {
-        sandbox_root: std::env::temp_dir(),
-        default_timeout_secs: 30,
-        allowed_directories: vec![],
-        allowed_shell_commands: vec![],
-        max_shell_output_bytes: 1_048_576,
-    }
-}
-
-fn make_registry(provider: Arc<QueuedProvider>) -> ProviderRegistry {
-    let mut registry = ProviderRegistry::new();
-    let id = ProviderId::from("test-provider");
-    registry.register(id.clone(), Box::new(ArcProvider(provider)));
-    registry.set_failover_chain(vec![id]);
-    registry
-}
-
-use helpers::{message_text, without_status_events};
+// default_config, default_tools_config, make_registry imported from helpers
 
 // ===========================================================================
 // Tests

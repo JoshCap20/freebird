@@ -44,9 +44,9 @@ use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
     ToolOutput,
 };
-use freebird_types::config::{RuntimeConfig, ToolsConfig};
+use freebird_types::config::RuntimeConfig;
 
-use helpers::{error_text, message_text};
+use helpers::{default_tools_config, error_text, make_tool_executor, message_text};
 
 // ---------------------------------------------------------------------------
 // StreamingMockChannel — a channel that advertises ChannelFeature::Streaming
@@ -485,20 +485,7 @@ impl Memory for SharedMemory {
     }
 }
 
-fn default_tools_config() -> ToolsConfig {
-    ToolsConfig {
-        sandbox_root: std::env::temp_dir(),
-        default_timeout_secs: 30,
-        allowed_directories: vec![],
-        allowed_shell_commands: vec![],
-        max_shell_output_bytes: 1_048_576,
-    }
-}
-
-fn make_tool_executor(tools: Vec<Box<dyn Tool>>) -> ToolExecutor {
-    ToolExecutor::new(tools, Duration::from_secs(30), None, vec![], None)
-        .expect("test tool executor construction should not fail")
-}
+// default_tools_config, make_tool_executor imported from helpers
 
 fn make_stream_registry(provider: Arc<QueuedStreamProvider>) -> ProviderRegistry {
     let mut registry = ProviderRegistry::new();
