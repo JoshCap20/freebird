@@ -11,3 +11,4 @@ pub mod grep;
 pub mod knowledge;
 pub mod network;
 pub mod shell;
+pub mod viewer;
