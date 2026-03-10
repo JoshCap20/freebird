@@ -148,6 +148,17 @@ impl ToolSpinner {
         w.flush()
     }
 
+    /// Pause (hide) the spinner without showing a result line.
+    ///
+    /// Used when a consent request arrives during tool execution — the tool is
+    /// blocked waiting for user input, so the spinner should stop animating.
+    pub fn pause<W: Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.clear(w)?;
+        self.active_tool = None;
+        self.lines_occupied = 0;
+        Ok(())
+    }
+
     /// Clear the spinner line(s).
     fn clear<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
         if self.lines_occupied == 0 {

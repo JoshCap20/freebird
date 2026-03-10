@@ -275,13 +275,18 @@ impl TtyChat {
                     .set_session_info(&mut self.writer, &model_id, &session_id)?;
             }
             ServerMessage::ConsentRequest {
+                request_id,
                 tool_name,
                 action_summary,
                 risk_level,
                 ..
             } => {
+                // Stop the spinner — the tool is paused awaiting consent.
+                if self.spinner.is_active() {
+                    self.spinner.pause(&mut self.writer)?;
+                }
                 self.save_input_area()?;
-                self.render_consent_request(&tool_name, &action_summary, &risk_level)?;
+                self.render_consent_request(&request_id, &tool_name, &action_summary, &risk_level)?;
                 self.input.render(&mut self.writer)?;
             }
         }
@@ -289,9 +294,10 @@ impl TtyChat {
         Ok(())
     }
 
-    /// Render a consent request with risk coloring.
+    /// Render a consent request with risk coloring and request ID.
     fn render_consent_request(
         &mut self,
+        request_id: &str,
         tool_name: &str,
         action_summary: &str,
         risk_level: &str,
@@ -328,8 +334,11 @@ impl TtyChat {
         queue!(self.writer, ResetColor, SetAttribute(Attribute::Reset))?;
 
         writeln!(self.writer)?;
-        queue!(self.writer, SetForegroundColor(Color::DarkGrey),)?;
-        write!(self.writer, "  Reply /approve or /deny")?;
+        queue!(self.writer, SetForegroundColor(Color::DarkGrey))?;
+        write!(
+            self.writer,
+            "  /approve {request_id}  or  /deny {request_id} [reason]"
+        )?;
         queue!(self.writer, ResetColor)?;
         writeln!(self.writer)?;
 
