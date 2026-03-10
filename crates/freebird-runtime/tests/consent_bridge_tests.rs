@@ -262,28 +262,7 @@ fn make_registry(provider: Arc<QueuedProvider>) -> ProviderRegistry {
     registry
 }
 
-/// Helper: extract text from an `OutboundEvent::Message`.
-fn message_text(event: &OutboundEvent) -> Option<&str> {
-    match event {
-        OutboundEvent::Message { text, .. } => Some(text.as_str()),
-        _ => None,
-    }
-}
-
-/// Filter out status/control events, keeping only content events.
-fn without_status_events(events: Vec<OutboundEvent>) -> Vec<OutboundEvent> {
-    events
-        .into_iter()
-        .filter(|e| {
-            !matches!(
-                e,
-                OutboundEvent::ToolStart { .. }
-                    | OutboundEvent::ToolEnd { .. }
-                    | OutboundEvent::TurnComplete { .. }
-            )
-        })
-        .collect()
-}
+use helpers::{message_text, without_status_events};
 
 // ===========================================================================
 // Tests
