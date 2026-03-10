@@ -66,7 +66,9 @@ impl SearchReplaceEditTool {
 
 /// Count the line number (1-indexed) where `needle` first appears in `haystack`.
 fn line_number_of_match(haystack: &str, byte_offset: usize) -> usize {
-    haystack[..byte_offset]
+    haystack
+        .get(..byte_offset)
+        .unwrap_or(haystack)
         .chars()
         .filter(|&c| c == '\n')
         .count()
@@ -192,7 +194,7 @@ fn apply_indentation(matched_first_line: &str, new_string: &str) -> String {
         return new_string.to_string();
     }
 
-    let match_prefix = &matched_first_line[..match_indent];
+    let match_prefix = matched_first_line.get(..match_indent).unwrap_or("");
 
     new_lines
         .iter()
