@@ -764,4 +764,70 @@ mod tests {
             ConsentResponse::Approved => panic!("expected Denied"),
         }
     }
+
+    // ── ConsentResponder ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_responder_delivers_response() {
+        let (gate, mut rx) = ConsentGate::new(RiskLevel::High, Duration::from_secs(60), 5);
+        let gate = Arc::new(gate);
+        let responder = gate.responder();
+        let tool = make_tool_info("shell", RiskLevel::High);
+
+        let gate_clone = Arc::clone(&gate);
+        let tool_clone = tool.clone();
+        let handle = tokio::spawn(async move {
+            gate_clone
+                .check(&tool_clone, "action".into(), "test-sender")
+                .await
+        });
+
+        let req = rx.recv().await.unwrap();
+
+        // Respond via the ConsentResponder (not the gate directly)
+        let delivered = responder.respond(&req.id, ConsentResponse::Approved).await;
+        assert!(delivered, "responder should deliver to pending request");
+
+        assert!(handle.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_responder_unknown_id_returns_false() {
+        let (gate, _rx) = ConsentGate::new(RiskLevel::High, Duration::from_secs(60), 5);
+        let responder = gate.responder();
+
+        let delivered = responder
+            .respond("nonexistent", ConsentResponse::Approved)
+            .await;
+        assert!(!delivered);
+    }
+
+    #[tokio::test]
+    async fn test_responder_clone_shares_state() {
+        let (gate, mut rx) = ConsentGate::new(RiskLevel::High, Duration::from_secs(60), 5);
+        let gate = Arc::new(gate);
+        let responder1 = gate.responder();
+        let responder2 = responder1.clone();
+        let tool = make_tool_info("shell", RiskLevel::High);
+
+        let gate_clone = Arc::clone(&gate);
+        let tool_clone = tool.clone();
+        let handle = tokio::spawn(async move {
+            gate_clone
+                .check(&tool_clone, "action".into(), "test-sender")
+                .await
+        });
+
+        let req = rx.recv().await.unwrap();
+
+        // Respond via the cloned responder
+        let delivered = responder2.respond(&req.id, ConsentResponse::Approved).await;
+        assert!(delivered);
+
+        assert!(handle.await.unwrap().is_ok());
+
+        // Original responder should also see the request as gone
+        let re_deliver = responder1.respond(&req.id, ConsentResponse::Approved).await;
+        assert!(!re_deliver, "already consumed");
+    }
 }

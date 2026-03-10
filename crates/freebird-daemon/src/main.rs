@@ -182,7 +182,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         Err(e) => tracing::error!(%e, "runtime error"),
     }
 
-    // 11. DRAIN
+    // 12. DRAIN
     if drain_timeout > Duration::ZERO {
         tracing::info!(?drain_timeout, "draining in-flight work");
         let _ = tokio::time::timeout(drain_timeout, signal_handle).await;

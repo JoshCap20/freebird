@@ -216,7 +216,12 @@ impl AgentRuntime {
                                         } else {
                                             freebird_security::consent::ConsentResponse::Denied { reason }
                                         };
-                                        if !resp.respond(&request_id, response).await {
+                                        if resp.respond(&request_id, response).await {
+                                            tracing::info!(
+                                                %request_id, %sender_id, approved,
+                                                "consent response delivered"
+                                            );
+                                        } else {
                                             tracing::warn!(
                                                 %request_id, %sender_id,
                                                 "consent response for unknown or expired request"
