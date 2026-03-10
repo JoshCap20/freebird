@@ -616,10 +616,17 @@ drain_timeout_secs = 1"#,
     fn test_shell_config_from_default_toml() {
         let toml_str = include_str!("../../../config/default.toml");
         let config: AppConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(
-            config.tools.allowed_shell_commands,
-            vec!["ls", "cat", "grep", "head", "tail", "wc"]
-        );
+        let cmds = &config.tools.allowed_shell_commands;
+        // Must include original read-only commands plus build/vcs/file-mgmt commands
+        for expected in &[
+            "ls", "cat", "grep", "head", "tail", "wc", "cargo", "rustfmt", "git", "find", "diff",
+            "mkdir", "rm", "cp", "mv", "touch", "sort", "uniq", "sed", "awk", "tr", "cut",
+        ] {
+            assert!(
+                cmds.contains(&expected.to_string()),
+                "missing command: {expected}"
+            );
+        }
         assert_eq!(config.tools.max_shell_output_bytes, 1_048_576);
     }
 
