@@ -47,6 +47,19 @@ pub enum ServerMessage {
     },
     /// The full agentic turn is complete — client may prompt for next input.
     TurnComplete,
+    /// Token usage for the completed turn.
+    TokenUsage {
+        input_tokens: u32,
+        output_tokens: u32,
+        cache_read_tokens: Option<u32>,
+        cache_creation_tokens: Option<u32>,
+    },
+    /// Session metadata, sent once on connection or session change.
+    SessionInfo {
+        session_id: String,
+        model_id: String,
+        provider_id: String,
+    },
     /// Consent request — the user must approve or deny a high-risk tool.
     ConsentRequest {
         request_id: String,

@@ -29,6 +29,7 @@ use freebird_types::config::AppConfig;
 mod chat;
 mod providers;
 mod tools;
+mod ui;
 
 /// `Freebird` AI agent daemon.
 #[derive(Parser)]
@@ -184,7 +185,10 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
     run_result.map_err(Into::into)
 }
 
-/// `freebird chat` — thin TCP client that connects to the daemon.
+/// `freebird chat` — interactive client that connects to the daemon.
+///
+/// Uses the rich TUI mode when connected to a real terminal, otherwise
+/// falls back to plain pipe mode.
 async fn cmd_chat() -> Result<()> {
     let config = load_config()?;
     let addr = format!("{}:{}", config.daemon.host, config.daemon.port);
@@ -193,13 +197,13 @@ async fn cmd_chat() -> Result<()> {
         .await
         .with_context(|| format!("failed to connect to daemon at {addr}"))?;
 
-    eprintln!("\x1b[1m\x1b[32mFreebird\x1b[0m connected to {addr}");
-    eprintln!("\x1b[2mType /quit to disconnect, /help for commands.\x1b[0m\n");
+    let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
 
-    let stdin = tokio::io::BufReader::new(tokio::io::stdin());
-    let stdout = tokio::io::stdout();
+    if !is_tty {
+        eprintln!("Connected to {addr}");
+    }
 
-    chat::run_chat_with_io(stream, stdin, stdout, true).await
+    chat::run_chat(stream, is_tty).await
 }
 
 /// `freebird status` — check if daemon is running by probing the TCP port.

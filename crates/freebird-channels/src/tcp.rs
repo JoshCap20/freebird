@@ -381,6 +381,34 @@ fn outbound_to_server_message(event: OutboundEvent) -> (String, ServerMessage) {
             },
         ),
         OutboundEvent::TurnComplete { recipient_id } => (recipient_id, ServerMessage::TurnComplete),
+        OutboundEvent::TokenUsage {
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+            recipient_id,
+        } => (
+            recipient_id,
+            ServerMessage::TokenUsage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+            },
+        ),
+        OutboundEvent::SessionInfo {
+            session_id,
+            model_id,
+            provider_id,
+            recipient_id,
+        } => (
+            recipient_id,
+            ServerMessage::SessionInfo {
+                session_id,
+                model_id,
+                provider_id,
+            },
+        ),
         OutboundEvent::ConsentRequest {
             request_id,
             tool_name,

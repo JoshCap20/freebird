@@ -2,6 +2,11 @@
 //!
 //! Connects to a running daemon, bridges user input/output to the JSON-line
 //! protocol defined in [`freebird_types::protocol`].
+//!
+//! Two modes:
+//! - **TTY mode** (`is_tty == true`): Uses the interactive TUI via [`crate::ui::TtyChat`]
+//!   with crossterm raw mode, multi-line editing, spinners, etc.
+//! - **Pipe mode** (`is_tty == false`): Plain text I/O for tests and piped usage.
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -9,12 +14,12 @@ use tokio::net::TcpStream;
 
 use freebird_types::protocol::{ClientMessage, ServerMessage};
 
-// ── ANSI styling ─────────────────────────────────────────────────────────────
+use crate::ui;
 
-/// Raw ANSI escape codes for terminal styling.
-///
-/// Only used when `is_tty == true` — non-tty output stays plain for test
-/// determinism and piped usage.
+// ── ANSI styling (pipe mode only) ────────────────────────────────────────────
+
+/// Raw ANSI escape codes for pipe-mode styling fallback.
+/// The TTY mode uses crossterm styling via `ui::theme` instead.
 mod style {
     pub const RESET: &str = "\x1b[0m";
     pub const BOLD: &str = "\x1b[1m";
@@ -42,12 +47,12 @@ mod style {
 
     #[must_use]
     pub fn tool_start(name: &str) -> String {
-        format!("{DIM}{YELLOW}  ⚙ {name}...{RESET}\n")
+        format!("{DIM}{YELLOW}  \u{2699} {name}...{RESET}\n")
     }
 
     #[must_use]
     pub fn tool_end(name: &str, outcome: &str, ms: u64) -> String {
-        format!("{DIM}{YELLOW}  ✓ {name} ({outcome}, {ms}ms){RESET}\n")
+        format!("{DIM}{YELLOW}  \u{2713} {name} ({outcome}, {ms}ms){RESET}\n")
     }
 
     #[must_use]
@@ -68,7 +73,7 @@ Available commands:
   /quit, /exit       Disconnect from the daemon
 ";
 
-// ── Input parsing ─────────────────────────────────────────────────────────────
+// ── Input parsing ────────────────────────────────────────────────────────────
 
 /// The result of parsing a line of user input.
 ///
@@ -157,15 +162,17 @@ pub fn parse_user_input(line: &str) -> ParseResult {
     )
 }
 
-// ── Rendering ─────────────────────────────────────────────────────────────────
+// ── Rendering (pipe mode) ────────────────────────────────────────────────────
 
-/// Render a [`ServerMessage`] as user-facing text.
+/// Render a [`ServerMessage`] as user-facing text (pipe mode only).
 ///
 /// Streaming chunks are returned as-is (no trailing newline) so they can be
 /// printed incrementally. The caller is responsible for printing the
 /// `Freebird: ` prefix before the first chunk of each response.
 ///
 /// When `is_tty` is true, ANSI styling is applied to errors and tool events.
+/// Note: this function is only called in pipe mode (`is_tty = false`) now,
+/// but we keep the `is_tty` parameter for backward compatibility in tests.
 #[must_use]
 pub fn render_server_message(msg: &ServerMessage, is_tty: bool) -> String {
     match msg {
@@ -201,6 +208,39 @@ pub fn render_server_message(msg: &ServerMessage, is_tty: bool) -> String {
         }
         // TurnComplete is a control signal — no visible output.
         ServerMessage::TurnComplete => String::new(),
+        // New protocol variants — render as plain text in pipe mode.
+        ServerMessage::TokenUsage {
+            input_tokens,
+            output_tokens,
+            ..
+        } => {
+            if is_tty {
+                format!(
+                    "{}{} tokens in \u{2022} {} tokens out{}\n",
+                    style::DIM,
+                    input_tokens,
+                    output_tokens,
+                    style::RESET,
+                )
+            } else {
+                format!("[tokens: {input_tokens} in, {output_tokens} out]\n")
+            }
+        }
+        ServerMessage::SessionInfo {
+            model_id,
+            session_id,
+            ..
+        } => {
+            if is_tty {
+                format!(
+                    "{}model: {model_id} \u{2022} session: {session_id}{}\n",
+                    style::DIM,
+                    style::RESET,
+                )
+            } else {
+                format!("[session: {session_id}, model: {model_id}]\n")
+            }
+        }
         ServerMessage::ConsentRequest {
             request_id,
             tool_name,
@@ -230,9 +270,23 @@ pub fn render_server_message(msg: &ServerMessage, is_tty: bool) -> String {
     }
 }
 
-// ── Chat loop ─────────────────────────────────────────────────────────────────
+// ── Chat loop ────────────────────────────────────────────────────────────────
 
-/// Run the chat client loop with injectable I/O (for testing).
+/// Run the chat client.
+///
+/// - If `is_tty == true`, launches the interactive TUI mode with crossterm.
+/// - If `is_tty == false`, uses the plain pipe mode (for tests and piped usage).
+pub async fn run_chat(stream: TcpStream, is_tty: bool) -> Result<()> {
+    if is_tty {
+        ui::TtyChat::run(stream).await
+    } else {
+        let stdin = tokio::io::BufReader::new(tokio::io::stdin());
+        let stdout = tokio::io::stdout();
+        run_chat_with_io(stream, stdin, stdout, false).await
+    }
+}
+
+/// Run the chat client loop with injectable I/O (for testing / pipe mode).
 ///
 /// Reads lines from `user_input`, sends them as JSON-line [`ClientMessage`]s
 /// to the daemon via `stream`, reads JSON-line [`ServerMessage`]s from the
@@ -305,7 +359,7 @@ where
                 } else {
                     // Server disconnected — tell the user and suggest next steps.
                     let notice = if is_tty {
-                        style::system_msg("daemon disconnected — run 'freebird serve' to restart")
+                        style::system_msg("daemon disconnected \u{2014} run 'freebird serve' to restart")
                     } else {
                         "[daemon disconnected]\nRun 'freebird serve' to start the daemon.\n"
                             .to_string()
@@ -319,7 +373,7 @@ where
     }
 }
 
-// ── Wire helpers ──────────────────────────────────────────────────────────────
+// ── Wire helpers ─────────────────────────────────────────────────────────────
 
 /// Process a single JSON-line from the daemon.
 ///
@@ -413,7 +467,7 @@ pub async fn send_client_message<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
@@ -433,7 +487,7 @@ mod tests {
         (listener, port)
     }
 
-    // ── parse_user_input unit tests ────────────────────────────────────
+    // ── parse_user_input unit tests ────────────────────────────────
 
     #[test]
     fn parse_plain_message() {
@@ -503,7 +557,7 @@ mod tests {
         }
     }
 
-    // ── render_server_message unit tests ───────────────────────────────
+    // ── render_server_message unit tests ───────────────────────────
 
     #[test]
     fn render_message() {
@@ -670,6 +724,33 @@ mod tests {
             matches!(result, ParseResult::LocalOutput(ref text) if text.contains("/deny")),
             "bare /deny should show usage hint, got {result:?}"
         );
+    }
+
+    // ── TokenUsage / SessionInfo rendering tests ──────────────────
+
+    #[test]
+    fn render_token_usage_plain() {
+        let msg = ServerMessage::TokenUsage {
+            input_tokens: 1234,
+            output_tokens: 567,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
+        };
+        let rendered = render_server_message(&msg, false);
+        assert!(rendered.contains("1234"));
+        assert!(rendered.contains("567"));
+    }
+
+    #[test]
+    fn render_session_info_plain() {
+        let msg = ServerMessage::SessionInfo {
+            session_id: "abc123".into(),
+            model_id: "claude-sonnet-4-6".into(),
+            provider_id: "anthropic".into(),
+        };
+        let rendered = render_server_message(&msg, false);
+        assert!(rendered.contains("abc123"));
+        assert!(rendered.contains("claude-sonnet-4-6"));
     }
 
     // ── Consent rendering tests ─────────────────────────────────────

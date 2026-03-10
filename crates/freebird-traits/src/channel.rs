@@ -117,6 +117,21 @@ pub enum OutboundEvent {
     TurnComplete {
         recipient_id: String,
     },
+    /// Token usage for the completed turn.
+    TokenUsage {
+        input_tokens: u32,
+        output_tokens: u32,
+        cache_read_tokens: Option<u32>,
+        cache_creation_tokens: Option<u32>,
+        recipient_id: String,
+    },
+    /// Session metadata, sent once on connection or session change.
+    SessionInfo {
+        session_id: String,
+        model_id: String,
+        provider_id: String,
+        recipient_id: String,
+    },
     /// A consent request for the user to approve or deny a high-risk tool.
     ConsentRequest {
         request_id: String,
