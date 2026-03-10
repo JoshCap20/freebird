@@ -14,8 +14,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
+rusqlite = { workspace = true }
+chrono = { workspace = true }
+secrecy = { workspace = true }
 
 [dev-dependencies]
-chrono = { workspace = true }
 tempfile = { workspace = true }
 proptest = { workspace = true }
+ring = { workspace = true }
+hex = { workspace = true }

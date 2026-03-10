@@ -8,3 +8,4 @@
 pub mod file;
 mod helpers;
 pub mod in_memory;
+pub mod sqlite;

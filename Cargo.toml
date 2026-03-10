@@ -44,6 +44,9 @@ secrecy = { version = "0.10", features = ["serde"] }
 ring = "0.17"
 hex = "0.4"
 
+# Database
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher", "column_decltype"] }
+
 # HTTP client (for providers)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 
