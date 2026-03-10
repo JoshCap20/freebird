@@ -7,6 +7,7 @@
 //! - Inline token usage and session info display
 
 pub mod completion;
+pub mod consent;
 pub mod input;
 pub mod output;
 pub mod raw_writer;
@@ -27,6 +28,7 @@ use tokio::net::TcpStream;
 
 use freebird_types::protocol::{ClientMessage, ServerMessage};
 
+use self::consent::{ConsentAction, ConsentSelector};
 use self::input::{InputAction, InputEditor};
 use self::output::OutputRenderer;
 use self::raw_writer::RawWriter;
@@ -48,6 +50,8 @@ pub struct TtyChat {
     spinner: ToolSpinner,
     /// Session/token info display.
     status: StatusBar,
+    /// Active consent selector (None when in normal input mode).
+    consent: Option<ConsentSelector>,
 }
 
 impl TtyChat {
@@ -61,6 +65,7 @@ impl TtyChat {
             output: OutputRenderer::new(),
             spinner: ToolSpinner::new(),
             status: StatusBar::new(),
+            consent: None,
         })
     }
 
@@ -135,7 +140,11 @@ impl TtyChat {
                 // ── Server messages ──────────────────────────────────────
                 line = socket_lines.next_line() => {
                     if let Some(line) = line.context("reading from daemon")? {
-                        self.handle_server_line(&line)?;
+                        // handle_server_line may return a pending message to send
+                        // (e.g., auto-deny of a superseded consent request).
+                        if let Some(pending) = self.handle_server_line(&line)? {
+                            crate::chat::send_client_message(&mut socket_write, &pending).await?;
+                        }
                     } else {
                         // Server disconnected.
                         self.save_input_area()?;
@@ -148,9 +157,21 @@ impl TtyChat {
                     }
                 }
 
-                // ── Spinner tick ─────────────────────────────────────────
-                _ = spinner_interval.tick(), if self.spinner.is_active() => {
-                    self.spinner.tick(&mut self.writer)?;
+                // ── Spinner / consent expiry tick ─────────────────────────
+                _ = spinner_interval.tick(), if self.spinner.is_active() || self.consent.is_some() => {
+                    if self.spinner.is_active() {
+                        self.spinner.tick(&mut self.writer)?;
+                    }
+                    // Check consent expiry on each tick (~80ms granularity).
+                    if self.consent.as_ref().is_some_and(ConsentSelector::is_expired) {
+                        if let Some(sel) = self.consent.take() {
+                            if let Some(msg) = Self::consent_action_to_message(sel.auto_deny("timeout")) {
+                                crate::chat::send_client_message(&mut socket_write, &msg).await?;
+                            }
+                            theme::write_error_styled(&mut self.writer, "consent request expired")?;
+                            self.input.render(&mut self.writer)?;
+                        }
+                    }
                 }
             }
         }
@@ -164,6 +185,39 @@ impl TtyChat {
         key_event: KeyEvent,
         socket_write: &mut W,
     ) -> Result<LoopControl> {
+        // If consent selector is active, route key events there instead.
+        if let Some(sel) = &mut self.consent {
+            let consent_action = sel.handle_key(key_event);
+            match consent_action {
+                ConsentAction::Redraw => {
+                    // Temporarily take the selector to avoid borrow conflict
+                    // with save_input_area (which borrows &mut self).
+                    let sel = self.consent.take();
+                    self.save_input_area()?;
+                    if let Some(ref s) = sel {
+                        s.render(&mut self.writer)?;
+                    }
+                    self.consent = sel;
+                }
+                ConsentAction::Confirmed {
+                    request_id,
+                    approved,
+                    reason,
+                } => {
+                    self.consent = None;
+                    let msg = ClientMessage::ConsentResponse {
+                        request_id,
+                        approved,
+                        reason,
+                    };
+                    crate::chat::send_client_message(socket_write, &msg).await?;
+                    self.input.render(&mut self.writer)?;
+                }
+                ConsentAction::None => {}
+            }
+            return Ok(LoopControl::Continue);
+        }
+
         let action = self.input.handle_key(key_event);
 
         match action {
@@ -208,16 +262,20 @@ impl TtyChat {
     }
 
     /// Handle a JSON-line from the server.
-    fn handle_server_line(&mut self, line: &str) -> Result<()> {
+    ///
+    /// Returns an optional `ClientMessage` that must be sent to the daemon
+    /// (used for auto-deny of superseded consent requests).
+    fn handle_server_line(&mut self, line: &str) -> Result<Option<ClientMessage>> {
         let msg: ServerMessage = match serde_json::from_str(line) {
             Ok(msg) => msg,
             Err(e) => {
                 self.save_input_area()?;
                 theme::write_error_styled(&mut self.writer, &format!("protocol error: {e}"))?;
                 self.input.render(&mut self.writer)?;
-                return Ok(());
+                return Ok(None);
             }
         };
+        let mut pending_send: Option<ClientMessage> = None;
 
         match msg {
             ServerMessage::Message { text } => {
@@ -286,25 +344,39 @@ impl TtyChat {
                 tool_name,
                 action_summary,
                 risk_level,
+                expires_at,
                 ..
             } => {
                 // Stop the spinner — the tool is paused awaiting consent.
                 if self.spinner.is_active() {
                     self.spinner.pause(&mut self.writer)?;
                 }
+                // If there's already a pending consent, auto-deny it.
+                if let Some(prev) = self.consent.take() {
+                    pending_send = Self::consent_action_to_message(prev.auto_deny("superseded"));
+                }
                 self.save_input_area()?;
-                self.render_consent_request(&request_id, &tool_name, &action_summary, &risk_level)?;
-                self.input.render(&mut self.writer)?;
+                self.render_consent_header(&tool_name, &action_summary, &risk_level)?;
+                // Create the interactive selector (falls back to text hint if expired/unparseable).
+                if let Some(sel) = ConsentSelector::new(request_id.clone(), &expires_at) {
+                    sel.render(&mut self.writer)?;
+                    self.consent = Some(sel);
+                } else {
+                    // Expired or unparseable — show the old text-based hint as fallback.
+                    self.render_consent_fallback(&request_id)?;
+                    self.input.render(&mut self.writer)?;
+                }
             }
         }
 
-        Ok(())
+        Ok(pending_send)
     }
 
-    /// Render a consent request with risk coloring and request ID.
-    fn render_consent_request(
+    /// Render the consent request header (tool name, risk, action summary).
+    ///
+    /// The interactive selector or text-based fallback is rendered separately.
+    fn render_consent_header(
         &mut self,
-        request_id: &str,
         tool_name: &str,
         action_summary: &str,
         risk_level: &str,
@@ -341,6 +413,16 @@ impl TtyChat {
         queue!(self.writer, ResetColor, SetAttribute(Attribute::Reset))?;
 
         writeln!(self.writer)?;
+        self.writer.flush()
+    }
+
+    /// Fallback text hint when the consent selector can't be created
+    /// (expired or unparseable timestamp).
+    fn render_consent_fallback(&mut self, request_id: &str) -> std::io::Result<()> {
+        use crossterm::{
+            queue,
+            style::{Color, ResetColor, SetForegroundColor},
+        };
         queue!(self.writer, SetForegroundColor(Color::DarkGrey))?;
         write!(
             self.writer,
@@ -348,8 +430,27 @@ impl TtyChat {
         )?;
         queue!(self.writer, ResetColor)?;
         writeln!(self.writer)?;
-
         self.writer.flush()
+    }
+
+    /// Convert a [`ConsentAction::Confirmed`] into a [`ClientMessage`].
+    ///
+    /// Returns `None` for non-Confirmed actions.
+    fn consent_action_to_message(action: ConsentAction) -> Option<ClientMessage> {
+        if let ConsentAction::Confirmed {
+            request_id,
+            approved,
+            reason,
+        } = action
+        {
+            Some(ClientMessage::ConsentResponse {
+                request_id,
+                approved,
+                reason,
+            })
+        } else {
+            None
+        }
     }
 
     /// Echo the user's submitted message into the scrollback so it stays
