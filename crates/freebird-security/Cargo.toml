@@ -19,6 +19,7 @@ ring = { workspace = true }
 hex = { workspace = true }
 secrecy = { workspace = true }
 uuid = { workspace = true }
+regex = { workspace = true }
 tokio = { version = "1", default-features = false, features = ["sync", "time"] }
 
 [dev-dependencies]
