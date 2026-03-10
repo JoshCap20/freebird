@@ -31,6 +31,11 @@ const MAX_RESULTS_HARD_CAP: usize = 200;
 /// Number of bytes to check for null bytes when detecting binary files.
 const BINARY_CHECK_BYTES: usize = 8 * 1024;
 
+/// Maximum compiled regex size (bytes). Defense-in-depth against patterns
+/// that cause excessive NFA construction. The `regex` crate already prevents
+/// catastrophic backtracking, but this limits resource usage during compilation.
+const REGEX_SIZE_LIMIT: usize = 256 * 1024;
+
 /// Directories to always skip during recursive search.
 const SKIP_DIRS: &[&str] = &[
     ".git",
@@ -142,14 +147,8 @@ impl MatchResult {
             return out;
         }
 
-        // Header: file:line: matching_line
-        let _ = write!(
-            out,
-            "{}:{}: {}",
-            self.relative_path, self.line_number, self.matching_line
-        );
-
         // Context before
+        let _ = write!(out, "{}:{}", self.relative_path, self.line_number);
         for (num, line) in &self.before {
             let _ = write!(out, "\n    {num}: {line}");
         }
@@ -178,11 +177,8 @@ fn extract_optional_bool(input: &serde_json::Value, key: &str) -> Option<bool> {
     input.get(key).and_then(serde_json::Value::as_bool)
 }
 
-fn extract_optional_string(input: &serde_json::Value, key: &str) -> Option<String> {
-    input
-        .get(key)
-        .and_then(serde_json::Value::as_str)
-        .map(String::from)
+fn extract_optional_str<'a>(input: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    input.get(key).and_then(serde_json::Value::as_str)
 }
 
 /// Check if a file appears to be binary by looking for null bytes in the first 8KB.
@@ -206,7 +202,15 @@ fn collect_files_recursive(
 ) -> Result<(), std::io::Error> {
     let entries = std::fs::read_dir(dir)?;
 
-    let mut sorted_entries: Vec<std::fs::DirEntry> = entries.filter_map(Result::ok).collect();
+    let mut sorted_entries: Vec<std::fs::DirEntry> = entries
+        .filter_map(|entry| match entry {
+            Ok(e) => Some(e),
+            Err(e) => {
+                tracing::debug!(dir = %dir.display(), error = %e, "skipping unreadable dir entry");
+                None
+            }
+        })
+        .collect();
     sorted_entries.sort_by_key(std::fs::DirEntry::file_name);
 
     for entry in sorted_entries {
@@ -339,6 +343,7 @@ impl Tool for GrepSearchTool {
         // Compile regex
         let regex = RegexBuilder::new(&params.pattern)
             .case_insensitive(params.case_insensitive)
+            .size_limit(REGEX_SIZE_LIMIT)
             .build()
             .map_err(|e| ToolError::InvalidInput {
                 tool: Self::NAME.into(),
@@ -359,7 +364,7 @@ impl Tool for GrepSearchTool {
         };
 
         // Search files and collect results
-        let mut all_results: Vec<MatchResult> = Vec::new();
+        let mut all_results: Vec<MatchResult> = Vec::with_capacity(params.max_results);
         let mut total_match_count: usize = 0;
         let mut files_with_matches: usize = 0;
 
@@ -372,9 +377,12 @@ impl Tool for GrepSearchTool {
                 &params.display_root,
                 remaining,
             )
-            .unwrap_or(FileSearchResult {
-                matches: Vec::new(),
-                total_count: 0,
+            .unwrap_or_else(|e| {
+                tracing::debug!(file = %file.display(), error = %e, "skipping unreadable file");
+                FileSearchResult {
+                    matches: Vec::new(),
+                    total_count: 0,
+                }
             });
 
             if file_result.total_count > 0 {
@@ -471,8 +479,8 @@ fn parse_grep_params(
     };
 
     // Optional: file_glob
-    let file_glob = match extract_optional_string(input, "file_glob") {
-        Some(g) => Some(glob::Pattern::new(&g).map_err(|e| ToolError::InvalidInput {
+    let file_glob = match extract_optional_str(input, "file_glob") {
+        Some(g) => Some(glob::Pattern::new(g).map_err(|e| ToolError::InvalidInput {
             tool: GrepSearchTool::NAME.into(),
             reason: format!("invalid file glob: {e}"),
         })?),
@@ -648,6 +656,8 @@ mod tests {
             .await
             .unwrap();
 
+        // Header with file:line
+        assert!(output.content.contains("ctx.txt:4"), "missing header");
         // Context before
         assert!(
             output.content.contains("1: line1"),
@@ -1057,6 +1067,87 @@ mod tests {
                 assert_eq!(tool, "grep_search");
             }
             other => panic!("expected InvalidInput or ExecutionFailed, got: {other:?}"),
+        }
+    }
+
+    // ── Edge Case Tests ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_empty_sandbox_returns_no_matches() {
+        let h = TestHarness::new();
+        // No files created — empty directory
+
+        let output = tool()
+            .execute(serde_json::json!({"pattern": "anything"}), &h.context())
+            .await
+            .unwrap();
+
+        assert!(
+            output.content.contains("No matches found"),
+            "empty sandbox should return no-match message, got: {}",
+            output.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_context_lines_clamped_to_max() {
+        let h = TestHarness::new();
+        let content = "line1\nline2\nTARGET\nline4\nline5\n";
+        std::fs::write(h.path().join("clamp.txt"), content).unwrap();
+
+        // Request 100 context lines — should be clamped to MAX_CONTEXT_LINES (10)
+        let output = tool()
+            .execute(
+                serde_json::json!({"pattern": "TARGET", "context_lines": 100}),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+
+        // Should succeed, not error — and show context (clamped)
+        assert!(output.content.contains("TARGET"));
+        assert!(output.content.contains("Found 1 matches"));
+    }
+
+    #[tokio::test]
+    async fn test_max_results_clamped_to_hard_cap() {
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("cap.txt"), "match\n").unwrap();
+
+        // Request 999 max_results — should be clamped to MAX_RESULTS_HARD_CAP (200)
+        let output = tool()
+            .execute(
+                serde_json::json!({"pattern": "match", "max_results": 999, "context_lines": 0}),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+
+        // Should succeed, not error
+        assert!(output.content.contains("Found 1 matches"));
+    }
+
+    #[tokio::test]
+    async fn test_regex_size_limit_rejects_huge_pattern() {
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("a.txt"), "x\n").unwrap();
+
+        // A pattern that would produce a large NFA
+        let huge_pattern = format!("({})", "a?".repeat(10_000));
+        let err = tool()
+            .execute(serde_json::json!({"pattern": huge_pattern}), &h.context())
+            .await
+            .unwrap_err();
+
+        match err {
+            ToolError::InvalidInput { tool, reason } => {
+                assert_eq!(tool, "grep_search");
+                assert!(
+                    reason.contains("invalid regex"),
+                    "should mention regex issue: {reason}"
+                );
+            }
+            other => panic!("expected InvalidInput, got: {other:?}"),
         }
     }
 
