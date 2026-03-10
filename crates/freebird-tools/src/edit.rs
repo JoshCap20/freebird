@@ -7,6 +7,8 @@
 //! Research shows search/replace format has a 23–27 percentage point improvement
 //! over unified diff and line-based diff formats (Meta agentic repair paper).
 
+use std::fmt::Write;
+
 use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 
@@ -15,6 +17,7 @@ use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
     ToolOutput,
 };
+use freebird_types::config::EditConfig;
 
 /// Maximum file size the edit tool will read (10 MiB).
 ///
@@ -24,21 +27,25 @@ const MAX_EDIT_FILE_BYTES: usize = 10 * 1024 * 1024;
 
 /// Returns the search/replace edit tool as a trait object.
 #[must_use]
-pub fn edit_tools() -> Vec<Box<dyn Tool>> {
-    vec![Box::new(SearchReplaceEditTool::new())]
+pub fn edit_tools(config: &EditConfig) -> Vec<Box<dyn Tool>> {
+    vec![Box::new(SearchReplaceEditTool::new(config))]
 }
 
 // ── SearchReplaceEditTool ──────────────────────────────────────────
 
 struct SearchReplaceEditTool {
     info: ToolInfo,
+    diff_preview: bool,
+    diff_context_lines: usize,
 }
 
 impl SearchReplaceEditTool {
     const NAME: &str = "search_replace_edit";
 
-    fn new() -> Self {
+    fn new(config: &EditConfig) -> Self {
         Self {
+            diff_preview: config.diff_preview,
+            diff_context_lines: config.diff_context_lines,
             info: ToolInfo {
                 name: Self::NAME.into(),
                 description: "Replace an exact string in a file with new content. \
@@ -347,11 +354,26 @@ impl Tool for SearchReplaceEditTool {
             });
         }
 
+        let mut message = format!(
+            "Edited {relative}: replaced {} lines starting at line {}",
+            result.replaced_lines, result.start_line
+        );
+
+        if self.diff_preview {
+            let diff = format_diff_preview(
+                &file_content,
+                &result.matched_text,
+                &result.adjusted_new,
+                result.start_line,
+                result.replaced_lines,
+                self.diff_context_lines,
+            );
+            message.push_str("\n\n");
+            message.push_str(&diff);
+        }
+
         Ok(ToolOutput {
-            content: format!(
-                "Edited {relative}: replaced {} lines starting at line {}",
-                result.replaced_lines, result.start_line
-            ),
+            content: message,
             outcome: ToolOutcome::Success,
             metadata: None,
         })
@@ -368,11 +390,86 @@ fn relative_path_display(safe_path: &freebird_security::safe_types::SafeFilePath
         .to_string()
 }
 
+/// Format a compact diff preview showing what changed with context lines.
+///
+/// Produces git-style output: ` ` prefix for context, `-` for removed, `+` for
+/// added, with line numbers for orientation.
+fn format_diff_preview(
+    file_content: &str,
+    matched_text: &str,
+    adjusted_new: &str,
+    start_line: usize,
+    replaced_lines: usize,
+    context_lines: usize,
+) -> String {
+    let file_lines: Vec<&str> = file_content.lines().collect();
+    let total_lines = file_lines.len();
+
+    let old_lines: Vec<&str> = if matched_text.is_empty() {
+        vec![]
+    } else {
+        matched_text.lines().collect()
+    };
+    let new_lines: Vec<&str> = if adjusted_new.is_empty() {
+        vec![]
+    } else {
+        adjusted_new.lines().collect()
+    };
+
+    // Context window (1-indexed → 0-indexed for vec access)
+    let ctx_start = start_line.saturating_sub(context_lines).max(1);
+    let change_end = start_line + replaced_lines.saturating_sub(1);
+    let ctx_end = (change_end + context_lines).min(total_lines);
+
+    // Line number width for alignment — use the highest line number we might display
+    let last_possible = ctx_end
+        .max(start_line + new_lines.len().saturating_sub(1))
+        .max(1);
+    let width = last_possible.to_string().len();
+
+    let mut out = String::new();
+
+    // Context lines before the change
+    for line_num in ctx_start..start_line {
+        if let Some(text) = file_lines.get(line_num - 1) {
+            let _ = writeln!(out, "{line_num:>width$}│ {text}");
+        }
+    }
+
+    // Removed lines
+    for (i, line) in old_lines.iter().enumerate() {
+        let line_num = start_line + i;
+        let _ = writeln!(out, "{line_num:>width$}│-{line}");
+    }
+
+    // Added lines
+    for (i, line) in new_lines.iter().enumerate() {
+        let line_num = start_line + i;
+        let _ = writeln!(out, "{line_num:>width$}│+{line}");
+    }
+
+    // Context lines after the change
+    for line_num in (change_end + 1)..=ctx_end {
+        if let Some(text) = file_lines.get(line_num - 1) {
+            let _ = writeln!(out, "{line_num:>width$}│ {text}");
+        }
+    }
+
+    // Remove trailing newline
+    if out.ends_with('\n') {
+        out.pop();
+    }
+
+    out
+}
+
 /// Result of a successful match+replace operation.
 struct ReplaceResult {
     content: String,
     start_line: usize,
     replaced_lines: usize,
+    matched_text: String,
+    adjusted_new: String,
 }
 
 /// Build a replaced string from the file content given a byte range and replacement.
@@ -398,6 +495,8 @@ fn build_replacement(
         content: result,
         start_line,
         replaced_lines,
+        matched_text: matched_region.to_string(),
+        adjusted_new,
     }
 }
 
@@ -610,7 +709,7 @@ mod tests {
 
     #[test]
     fn test_edit_tool_info() {
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         let info = tool.info();
         assert_eq!(info.name, "search_replace_edit");
         assert_eq!(info.required_capability, Capability::FileWrite);
@@ -629,7 +728,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         let output = tool
             .execute(
                 serde_json::json!({
@@ -653,7 +752,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("file.rs"), "fn main() {}\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         let err = tool
             .execute(
                 serde_json::json!({
@@ -683,7 +782,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         let err = tool
             .execute(
                 serde_json::json!({
@@ -709,7 +808,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("file.rs"), "line1\nDELETE_ME\nline3\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         let output = tool
             .execute(
                 serde_json::json!({
@@ -732,7 +831,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("file.rs"), "content\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         let err = tool
             .execute(
                 serde_json::json!({
@@ -759,7 +858,7 @@ mod tests {
         let original = "fn main() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n    let d = 4;\n    let e = 5;\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         let output = tool
             .execute(
                 serde_json::json!({
@@ -786,7 +885,7 @@ mod tests {
         let original = "BEFORE\nTARGET\nAFTER\n";
         std::fs::write(h.path().join("file.txt"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         tool.execute(
             serde_json::json!({
                 "path": "file.txt",
@@ -812,7 +911,7 @@ mod tests {
         // File has single spaces
         std::fs::write(h.path().join("file.rs"), "fn main() {\n    let x = 1;\n}\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         // old_string has extra spaces — exact match fails, normalized match succeeds
         let output = tool
             .execute(
@@ -837,7 +936,7 @@ mod tests {
         // File has 2-space indent
         std::fs::write(h.path().join("file.rs"), "fn main() {\n  let x = 1;\n}\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         // old_string has 4-space indent — normalized match should work
         let output = tool
             .execute(
@@ -866,7 +965,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         // All three lines normalize to "let x = 1;"
         let err = tool
             .execute(
@@ -899,7 +998,7 @@ mod tests {
         let original = "fn main() {\n    if true {\n        let x = 1;\n    }\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         let output = tool
             .execute(
                 serde_json::json!({
@@ -925,7 +1024,7 @@ mod tests {
             "fn main() {\n    if true {\n        old_line_1\n        old_line_2\n    }\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         // new_string has no indentation — indentation preservation should add 8 spaces
         let output = tool
             .execute(
@@ -953,7 +1052,7 @@ mod tests {
     #[tokio::test]
     async fn test_path_traversal_rejected() {
         let h = TestHarness::new();
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
 
         let err = tool
             .execute(
@@ -976,7 +1075,7 @@ mod tests {
     #[tokio::test]
     async fn test_nonexistent_file_returns_error() {
         let h = TestHarness::new();
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
 
         let err = tool
             .execute(
@@ -1001,7 +1100,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("src.rs"), "old\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1034,7 +1133,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("clean.rs"), "old_text\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         tool.execute(
             serde_json::json!({
                 "path": "clean.rs",
@@ -1063,7 +1162,7 @@ mod tests {
         let original = "unchanged content\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         let _ = tool
             .execute(
                 serde_json::json!({
@@ -1091,7 +1190,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         // Use normalized fallback (extra spaces)
         let output = tool
             .execute(
@@ -1118,7 +1217,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("file.rs"), "content\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         let err = tool
             .execute(
                 serde_json::json!({
@@ -1142,7 +1241,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_edit_tools_factory() {
-        let tools = edit_tools();
+        let tools = edit_tools(&EditConfig::default());
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].info().name, "search_replace_edit");
 
@@ -1165,7 +1264,7 @@ mod tests {
             f.set_len((super::MAX_EDIT_FILE_BYTES + 1) as u64).unwrap();
         }
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         let err = tool
             .execute(
                 serde_json::json!({
@@ -1199,7 +1298,7 @@ mod tests {
             f.write_all(&[0xFF, 0xFE, 0x00, 0x01]).unwrap();
         }
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         let err = tool
             .execute(
                 serde_json::json!({
@@ -1235,7 +1334,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1266,7 +1365,7 @@ mod tests {
             "fn main() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n    let w = 4;\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         // old_string has one line wrong ("let y = 999" instead of "let y = 2")
         // 4 out of 5 lines match (80%) — should fuzzy match
         let output = tool
@@ -1293,7 +1392,7 @@ mod tests {
         let original = "fn main() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         // old_string has 2 out of 3 lines wrong — below 60% threshold
         let err = tool
             .execute(
@@ -1322,7 +1421,7 @@ mod tests {
         let original = "fn a() {\n    let x = 1;\n    let y = 2;\n}\nfn b() {\n    let x = 1;\n    let y = 2;\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new();
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
         // Fuzzy search with one wrong line — matches both blocks equally
         let err = tool
             .execute(
@@ -1423,6 +1522,257 @@ mod tests {
         assert_eq!(detect_indent_char("\t  "), ' ');
     }
 
+    // ── Diff preview tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_diff_preview_in_success_output() {
+        let h = TestHarness::new();
+        std::fs::write(
+            h.path().join("src.rs"),
+            "aaa\nbbb\nccc\nddd\neee\nfff\nggg\n",
+        )
+        .unwrap();
+
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "path": "src.rs",
+                    "old_string": "ddd",
+                    "new_string": "DDD"
+                }),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+
+        // Output must contain removed and added lines
+        assert!(output.content.contains("│-ddd"), "missing removed line");
+        assert!(output.content.contains("│+DDD"), "missing added line");
+    }
+
+    #[tokio::test]
+    async fn test_context_lines_around_diff() {
+        let h = TestHarness::new();
+        std::fs::write(
+            h.path().join("src.rs"),
+            "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\n",
+        )
+        .unwrap();
+
+        let tool = SearchReplaceEditTool::new(&EditConfig {
+            diff_preview: true,
+            diff_context_lines: 3,
+        });
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "path": "src.rs",
+                    "old_string": "line5",
+                    "new_string": "LINE5"
+                }),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+
+        // 3 context lines before (line2, line3, line4) and after (line6, line7, line8)
+        assert!(output.content.contains(" line2"), "missing context line2");
+        assert!(output.content.contains(" line3"), "missing context line3");
+        assert!(output.content.contains(" line4"), "missing context line4");
+        assert!(output.content.contains(" line6"), "missing context line6");
+        assert!(output.content.contains(" line7"), "missing context line7");
+        assert!(output.content.contains(" line8"), "missing context line8");
+        // line1 is 4 lines away — should NOT be shown with 3 context lines
+        assert!(
+            !output.content.contains(" line1"),
+            "line1 should not appear with context=3"
+        );
+        assert!(
+            !output.content.contains(" line9"),
+            "line9 should not appear with context=3"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multiline_diff() {
+        let h = TestHarness::new();
+        std::fs::write(
+            h.path().join("src.rs"),
+            "aaa\nbbb\nccc\nddd\neee\nfff\nggg\n",
+        )
+        .unwrap();
+
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "path": "src.rs",
+                    "old_string": "ccc\nddd\neee",
+                    "new_string": "CCC\nDDD\nEEE"
+                }),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+
+        assert!(output.content.contains("│-ccc"), "missing -ccc");
+        assert!(output.content.contains("│-ddd"), "missing -ddd");
+        assert!(output.content.contains("│-eee"), "missing -eee");
+        assert!(output.content.contains("│+CCC"), "missing +CCC");
+        assert!(output.content.contains("│+DDD"), "missing +DDD");
+        assert!(output.content.contains("│+EEE"), "missing +EEE");
+    }
+
+    #[tokio::test]
+    async fn test_single_line_diff() {
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("src.rs"), "aaa\nbbb\nccc\nddd\neee\n").unwrap();
+
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "path": "src.rs",
+                    "old_string": "ccc",
+                    "new_string": "CCC"
+                }),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+
+        // Single-line change: exactly 1 removed, 1 added
+        let lines: Vec<&str> = output.content.lines().collect();
+        let minus_count = lines.iter().filter(|l| l.contains("│-")).count();
+        let plus_count = lines.iter().filter(|l| l.contains("│+")).count();
+        assert_eq!(minus_count, 1, "single line edit should have 1 minus line");
+        assert_eq!(plus_count, 1, "single line edit should have 1 plus line");
+    }
+
+    #[tokio::test]
+    async fn test_deletion_shows_minus_only() {
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("src.rs"), "aaa\nbbb\nccc\nddd\neee\n").unwrap();
+
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "path": "src.rs",
+                    "old_string": "bbb\nccc",
+                    "new_string": ""
+                }),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+
+        let lines: Vec<&str> = output.content.lines().collect();
+        let minus_count = lines.iter().filter(|l| l.contains("│-")).count();
+        let plus_count = lines.iter().filter(|l| l.contains("│+")).count();
+        assert_eq!(minus_count, 2, "deletion should show 2 minus lines");
+        assert_eq!(plus_count, 0, "deletion should show no plus lines");
+    }
+
+    #[tokio::test]
+    async fn test_insertion_shows_plus_only() {
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("src.rs"), "aaa\nbbb\nccc\nddd\neee\n").unwrap();
+
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "path": "src.rs",
+                    "old_string": "bbb",
+                    "new_string": "bbb\nnew1\nnew2"
+                }),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+
+        // old "bbb" is replaced by "bbb\nnew1\nnew2", so 1 minus and 3 plus
+        let lines: Vec<&str> = output.content.lines().collect();
+        let minus_count = lines.iter().filter(|l| l.contains("│-")).count();
+        let plus_count = lines.iter().filter(|l| l.contains("│+")).count();
+        assert_eq!(
+            minus_count, 1,
+            "insertion should show 1 minus line (old bbb)"
+        );
+        assert_eq!(plus_count, 3, "insertion should show 3 plus lines");
+    }
+
+    #[tokio::test]
+    async fn test_line_numbers_correct() {
+        let h = TestHarness::new();
+        std::fs::write(
+            h.path().join("src.rs"),
+            "line1\nline2\nline3\nline4\nline5\n",
+        )
+        .unwrap();
+
+        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "path": "src.rs",
+                    "old_string": "line3",
+                    "new_string": "LINE3"
+                }),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+
+        // The diff should show the removed line at line 3
+        assert!(
+            output.content.contains("3│-line3"),
+            "line number 3 should prefix removed line"
+        );
+        assert!(
+            output.content.contains("3│+LINE3"),
+            "line number 3 should prefix added line"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_disabled_no_diff() {
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("src.rs"), "aaa\nbbb\nccc\n").unwrap();
+
+        let tool = SearchReplaceEditTool::new(&EditConfig {
+            diff_preview: false,
+            diff_context_lines: 3,
+        });
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "path": "src.rs",
+                    "old_string": "bbb",
+                    "new_string": "BBB"
+                }),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+
+        // Should just have the summary line, no diff markers
+        assert!(
+            !output.content.contains("│-"),
+            "disabled should have no diff markers"
+        );
+        assert!(
+            !output.content.contains("│+"),
+            "disabled should have no diff markers"
+        );
+        assert!(
+            output.content.starts_with("Edited"),
+            "should have summary line"
+        );
+    }
+
     // ── Property-based tests ─────────────────────────────────────
 
     mod proptests {
@@ -1455,7 +1805,7 @@ mod tests {
                     .unwrap();
                 rt.block_on(async {
                     let h = TestHarness::new();
-                    let tool = SearchReplaceEditTool::new();
+                    let tool = SearchReplaceEditTool::new(&EditConfig::default());
 
                     let traversal = format!("{}{}", "../".repeat(depth), suffix);
                     let result = tool
@@ -1500,7 +1850,7 @@ mod tests {
                     let content = format!("{prefix}\n{old_text}\n{suffix}\n");
                     std::fs::write(h.path().join(&name), &content).unwrap();
 
-                    let tool = SearchReplaceEditTool::new();
+                    let tool = SearchReplaceEditTool::new(&EditConfig::default());
                     let result = tool
                         .execute(
                             serde_json::json!({
@@ -1537,7 +1887,7 @@ mod tests {
                     let h = TestHarness::new();
                     std::fs::write(h.path().join(&name), "old_unique_sentinel\n").unwrap();
 
-                    let tool = SearchReplaceEditTool::new();
+                    let tool = SearchReplaceEditTool::new(&EditConfig::default());
                     let output = tool
                         .execute(
                             serde_json::json!({
