@@ -23,6 +23,7 @@ use freebird_types::config::AppConfig;
 /// - Shell tool (`shell`)
 /// - Network tool (`http_request`) — gated by [`EgressPolicy`] built from
 ///   `config.security.egress`
+/// - Repo map tool (`repo_map`) — AST-based codebase overview
 pub fn build_tool_registry(config: &AppConfig) -> Result<ToolRegistry> {
     let mut registry = ToolRegistry::new();
 
@@ -59,6 +60,9 @@ pub fn build_tool_registry(config: &AppConfig) -> Result<ToolRegistry> {
 
     // Knowledge tools — store, search, update, delete.
     registry.register_all(freebird_tools::knowledge::knowledge_tools());
+
+    // Repo map tool — AST-based codebase overview.
+    registry.register_all(freebird_tools::repo_map::repo_map_tools());
 
     tracing::info!(
         tool_count = registry.tool_count(),
@@ -179,9 +183,10 @@ format = "pretty"
             registry.get("search_knowledge").is_some(),
             "missing search_knowledge"
         );
+        assert!(registry.get("repo_map").is_some(), "missing repo_map");
         assert!(
-            registry.tool_count() >= 12,
-            "expected at least 12 tools, got {}",
+            registry.tool_count() >= 13,
+            "expected at least 13 tools, got {}",
             registry.tool_count()
         );
     }
