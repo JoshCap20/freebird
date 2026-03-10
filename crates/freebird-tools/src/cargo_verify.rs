@@ -238,7 +238,11 @@ impl CargoVerifyTool {
                 reason: e.to_string(),
             })?;
 
-        // Determine steps and whether to stop on failure
+        // Determine steps and whether to stop on failure.
+        //
+        // The `extract_string_array_optional` call above validates the field is a
+        // string array (rejecting non-string elements). We re-read from raw JSON
+        // for the values because `Tainted::inner()` is `pub(crate)`.
         let (steps, stop_on_failure) = if check_strings.is_empty() {
             // Default: "all" pipeline
             (
@@ -254,21 +258,6 @@ impl CargoVerifyTool {
             let mut steps = Vec::new();
             let mut has_all = false;
 
-            for tainted_str in &check_strings {
-                // Access the tainted string's content for validation.
-                // We validate against a fixed set of known values.
-                let raw = format!("{tainted_str:?}");
-                // TaintedToolInput gives us Tainted values; we need to match
-                // against known enum values. Use extract_string_array_optional
-                // which returns Vec<Tainted>. We need the inner string.
-                // Since Tainted::inner() is pub(crate), we match via Debug output
-                // or we can use the extract approach differently.
-                //
-                // Actually, the correct approach: re-read from the raw JSON input.
-                drop(raw);
-            }
-
-            // Re-extract from raw JSON since Tainted::inner() is pub(crate)
             let checks_arr = input
                 .get("checks")
                 .and_then(serde_json::Value::as_array)
