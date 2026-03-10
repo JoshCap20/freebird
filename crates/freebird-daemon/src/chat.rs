@@ -61,9 +61,11 @@ mod style {
 /// Client-side help text printed by `/help` without a daemon round-trip.
 const HELP_TEXT: &str = "\
 Available commands:
-  /help            Show this help message
-  /new             Start a new conversation
-  /quit, /exit     Disconnect from the daemon
+  /help              Show this help message
+  /new               Start a new conversation
+  /approve <id>      Approve a consent request
+  /deny <id> [reason] Deny a consent request
+  /quit, /exit       Disconnect from the daemon
 ";
 
 // ── Input parsing ─────────────────────────────────────────────────────────────
@@ -100,6 +102,40 @@ pub fn parse_user_input(line: &str) -> ParseResult {
             );
         }
         _ => {}
+    }
+
+    // Consent commands — handled before the generic command parser because
+    // they produce a ConsentResponse (not a Command) on the wire.
+    if let Some(rest) = line.strip_prefix("/approve ") {
+        let id = rest.trim();
+        if id.is_empty() {
+            return ParseResult::LocalOutput("Usage: /approve <request-id>\n".to_string());
+        }
+        return ParseResult::Send(ClientMessage::ConsentResponse {
+            request_id: id.to_string(),
+            approved: true,
+            reason: None,
+        });
+    }
+    if line == "/approve" {
+        return ParseResult::LocalOutput("Usage: /approve <request-id>\n".to_string());
+    }
+    if let Some(rest) = line.strip_prefix("/deny ") {
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return ParseResult::LocalOutput("Usage: /deny <request-id> [reason]\n".to_string());
+        }
+        let mut parts = rest.splitn(2, ' ');
+        let id = parts.next().unwrap_or_default().to_string();
+        let reason = parts.next().map(|s| s.trim().to_string());
+        return ParseResult::Send(ClientMessage::ConsentResponse {
+            request_id: id,
+            approved: false,
+            reason,
+        });
+    }
+    if line == "/deny" {
+        return ParseResult::LocalOutput("Usage: /deny <request-id> [reason]\n".to_string());
     }
 
     line.strip_prefix('/').map_or_else(
@@ -165,6 +201,32 @@ pub fn render_server_message(msg: &ServerMessage, is_tty: bool) -> String {
         }
         // TurnComplete is a control signal — no visible output.
         ServerMessage::TurnComplete => String::new(),
+        ServerMessage::ConsentRequest {
+            request_id,
+            tool_name,
+            risk_level,
+            action_summary,
+            ..
+        } => {
+            if is_tty {
+                format!(
+                    "{bold}{yellow}\u{26a0} CONSENT REQUIRED{reset}\n\
+                     {bold}Tool:{reset}   {tool_name} (risk: {risk_level})\n\
+                     {bold}Action:{reset} {action_summary}\n\
+                     {dim}Reply: /approve {request_id}  or  /deny {request_id} [reason]{reset}\n",
+                    bold = style::BOLD,
+                    yellow = style::YELLOW,
+                    reset = style::RESET,
+                    dim = style::DIM,
+                )
+            } else {
+                format!(
+                    "[CONSENT REQUIRED] tool={tool_name} risk={risk_level} \
+                     action={action_summary}\n\
+                     /approve {request_id} or /deny {request_id} [reason]\n"
+                )
+            }
+        }
     }
 }
 
@@ -310,10 +372,12 @@ async fn handle_daemon_line<O: AsyncWrite + Unpin>(
         .context("writing to output")?;
     user_output.flush().await.context("flushing output")?;
 
-    // Only print the "You: " prompt after TurnComplete — the server signals
-    // when the entire agentic turn is done. Intermediate messages, stream ends,
-    // and tool events do NOT trigger a prompt.
-    if matches!(&msg, ServerMessage::TurnComplete) {
+    // Print "You: " prompt after TurnComplete (turn is done, user may type)
+    // and after ConsentRequest (user needs to type /approve or /deny).
+    if matches!(
+        &msg,
+        ServerMessage::TurnComplete | ServerMessage::ConsentRequest { .. }
+    ) {
         write_prompt(user_output, is_tty).await?;
     }
 
@@ -549,6 +613,118 @@ mod tests {
         assert_eq!(
             render_server_message(&ServerMessage::TurnComplete, true),
             ""
+        );
+    }
+
+    // ── Consent parsing tests ─────────────────────────────────────────
+
+    #[test]
+    fn parse_approve_command() {
+        assert_eq!(
+            parse_user_input("/approve req-123"),
+            ParseResult::Send(ClientMessage::ConsentResponse {
+                request_id: "req-123".into(),
+                approved: true,
+                reason: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_deny_command_with_reason() {
+        assert_eq!(
+            parse_user_input("/deny req-123 too risky"),
+            ParseResult::Send(ClientMessage::ConsentResponse {
+                request_id: "req-123".into(),
+                approved: false,
+                reason: Some("too risky".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_deny_command_no_reason() {
+        assert_eq!(
+            parse_user_input("/deny req-456"),
+            ParseResult::Send(ClientMessage::ConsentResponse {
+                request_id: "req-456".into(),
+                approved: false,
+                reason: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_approve_bare_shows_usage() {
+        let result = parse_user_input("/approve");
+        assert!(
+            matches!(result, ParseResult::LocalOutput(ref text) if text.contains("/approve")),
+            "bare /approve should show usage hint, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn parse_deny_bare_shows_usage() {
+        let result = parse_user_input("/deny");
+        assert!(
+            matches!(result, ParseResult::LocalOutput(ref text) if text.contains("/deny")),
+            "bare /deny should show usage hint, got {result:?}"
+        );
+    }
+
+    // ── Consent rendering tests ─────────────────────────────────────
+
+    #[test]
+    fn render_consent_request_plain() {
+        let msg = ServerMessage::ConsentRequest {
+            request_id: "req-42".into(),
+            tool_name: "shell".into(),
+            description: "execute commands".into(),
+            risk_level: "high".into(),
+            action_summary: "rm -rf /tmp".into(),
+            expires_at: "2026-03-09T12:00:00Z".into(),
+        };
+        let rendered = render_server_message(&msg, false);
+        assert!(
+            rendered.contains("CONSENT REQUIRED"),
+            "should contain header"
+        );
+        assert!(rendered.contains("shell"), "should contain tool name");
+        assert!(rendered.contains("high"), "should contain risk level");
+        assert!(rendered.contains("rm -rf /tmp"), "should contain action");
+        assert!(
+            rendered.contains("/approve req-42"),
+            "should contain approve command with id"
+        );
+        assert!(
+            rendered.contains("/deny req-42"),
+            "should contain deny command with id"
+        );
+    }
+
+    #[test]
+    fn render_consent_request_tty_has_ansi() {
+        let msg = ServerMessage::ConsentRequest {
+            request_id: "req-42".into(),
+            tool_name: "shell".into(),
+            description: "execute commands".into(),
+            risk_level: "high".into(),
+            action_summary: "rm -rf /tmp".into(),
+            expires_at: "2026-03-09T12:00:00Z".into(),
+        };
+        let rendered = render_server_message(&msg, true);
+        assert!(
+            rendered.contains("\x1b["),
+            "tty consent should contain ANSI codes"
+        );
+        assert!(
+            rendered.contains("CONSENT REQUIRED"),
+            "should contain header"
+        );
+        assert!(rendered.contains("shell"), "should contain tool name");
+        assert!(
+            rendered.contains("/approve req-42"),
+            "should contain approve command"
         );
     }
 
