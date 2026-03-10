@@ -19,6 +19,7 @@ use freebird_types::config::AppConfig;
 /// - Filesystem tools (`read_file`, `write_file`, `list_directory`)
 /// - Edit tool (`search_replace_edit`)
 /// - Grep search tool (`grep_search`)
+/// - Viewer tool (`file_viewer`) — windowed file reading
 /// - Shell tool (`shell`)
 /// - Network tool (`http_request`) — gated by [`EgressPolicy`] built from
 ///   `config.security.egress`
@@ -33,6 +34,9 @@ pub fn build_tool_registry(config: &AppConfig) -> Result<ToolRegistry> {
 
     // Grep search tool — regex-based code search with context lines.
     registry.register_all(freebird_tools::grep::grep_tools());
+
+    // Viewer tool — windowed file reading with line numbers and pattern jump.
+    registry.register_all(freebird_tools::viewer::viewer_tools());
 
     // Shell tool — allowed commands and output limit from ToolsConfig.
     registry.register(freebird_tools::shell::shell_tool(
@@ -166,6 +170,7 @@ format = "pretty"
             registry.get("http_request").is_some(),
             "missing http_request"
         );
+        assert!(registry.get("file_viewer").is_some(), "missing file_viewer");
         assert!(
             registry.get("store_knowledge").is_some(),
             "missing store_knowledge"
@@ -175,8 +180,8 @@ format = "pretty"
             "missing search_knowledge"
         );
         assert!(
-            registry.tool_count() >= 11,
-            "expected at least 11 tools, got {}",
+            registry.tool_count() >= 12,
+            "expected at least 12 tools, got {}",
             registry.tool_count()
         );
     }
