@@ -5,6 +5,7 @@
 #![deny(clippy::indexing_slicing)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod edit;
 pub mod filesystem;
 pub mod network;
 pub mod shell;
