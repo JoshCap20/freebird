@@ -21,6 +21,8 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 regex = { workspace = true }
 glob = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-rust = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

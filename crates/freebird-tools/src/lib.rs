@@ -10,5 +10,6 @@ pub mod filesystem;
 pub mod grep;
 pub mod knowledge;
 pub mod network;
+pub mod repo_map;
 pub mod shell;
 pub mod viewer;
