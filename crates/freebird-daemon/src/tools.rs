@@ -17,6 +17,8 @@ use freebird_types::config::AppConfig;
 ///
 /// Registers:
 /// - Filesystem tools (`read_file`, `write_file`, `list_directory`)
+/// - Edit tool (`search_replace_edit`)
+/// - Grep search tool (`grep_search`)
 /// - Shell tool (`shell`)
 /// - Network tool (`http_request`) — gated by [`EgressPolicy`] built from
 ///   `config.security.egress`
@@ -25,6 +27,12 @@ pub fn build_tool_registry(config: &AppConfig) -> Result<ToolRegistry> {
 
     // Filesystem tools — no config needed beyond ToolsConfig (passed at runtime).
     registry.register_all(freebird_tools::filesystem::filesystem_tools());
+
+    // Edit tool — search/replace for surgical code modifications.
+    registry.register_all(freebird_tools::edit::edit_tools());
+
+    // Grep search tool — regex-based code search with context lines.
+    registry.register_all(freebird_tools::grep::grep_tools());
 
     // Shell tool — allowed commands and output limit from ToolsConfig.
     registry.register(freebird_tools::shell::shell_tool(
@@ -141,13 +149,18 @@ format = "pretty"
         let config = test_config();
         let registry = build_tool_registry(&config).unwrap();
 
-        // Must include filesystem, shell, network, and knowledge tools
+        // Must include filesystem, edit, grep, shell, network, and knowledge tools
         assert!(registry.get("read_file").is_some(), "missing read_file");
         assert!(registry.get("write_file").is_some(), "missing write_file");
         assert!(
             registry.get("list_directory").is_some(),
             "missing list_directory"
         );
+        assert!(
+            registry.get("search_replace_edit").is_some(),
+            "missing search_replace_edit"
+        );
+        assert!(registry.get("grep_search").is_some(), "missing grep_search");
         assert!(registry.get("shell").is_some(), "missing shell");
         assert!(
             registry.get("http_request").is_some(),
@@ -162,8 +175,8 @@ format = "pretty"
             "missing search_knowledge"
         );
         assert!(
-            registry.tool_count() >= 9,
-            "expected at least 9 tools, got {}",
+            registry.tool_count() >= 11,
+            "expected at least 11 tools, got {}",
             registry.tool_count()
         );
     }
