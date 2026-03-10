@@ -252,11 +252,15 @@ impl RustMapper {
                 let name = Self::extract_name(node, source);
                 format!("macro_rules! {name}")
             }
-            SymbolKind::Const | SymbolKind::Static | SymbolKind::TypeAlias => {
-                Self::slice_source(source, node.start_byte(), node.end_byte())
-                    .trim_end()
-                    .to_owned()
+            SymbolKind::Const | SymbolKind::Static => {
+                // Strip initializer value: "pub const MAX: u64 = 42;" → "pub const MAX: u64"
+                // Prevents leaking hardcoded secrets/values to the LLM.
+                let full = Self::slice_source(source, node.start_byte(), node.end_byte());
+                full.split('=').next().unwrap_or(full).trim_end().to_owned()
             }
+            SymbolKind::TypeAlias => Self::slice_source(source, node.start_byte(), node.end_byte())
+                .trim_end()
+                .to_owned(),
             _ => body_node.map_or_else(
                 || {
                     Self::slice_source(source, node.start_byte(), node.end_byte())
@@ -1039,14 +1043,55 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_const_and_static() {
-        let source = "pub const MAX: u64 = 42;\npub static GLOBAL: &str = \"hi\";";
-        let symbols = extract(source, Depth::Signatures);
-        assert_eq!(symbols.len(), 2);
+    fn test_extract_const_strips_value() {
+        let symbols = extract("pub const MAX: u64 = 42;", Depth::Signatures);
+        assert_eq!(symbols.len(), 1);
         assert_eq!(symbols[0].kind, SymbolKind::Const);
         assert_eq!(symbols[0].name, "MAX");
-        assert_eq!(symbols[1].kind, SymbolKind::Static);
-        assert_eq!(symbols[1].name, "GLOBAL");
+        assert!(
+            symbols[0].signature.contains("pub const MAX: u64"),
+            "signature should contain type declaration"
+        );
+        assert!(
+            !symbols[0].signature.contains("42"),
+            "signature must NOT contain initializer value: {}",
+            symbols[0].signature
+        );
+    }
+
+    #[test]
+    fn test_extract_static_strips_value() {
+        let symbols = extract(
+            "pub static GLOBAL: &str = \"secret_api_key\";",
+            Depth::Signatures,
+        );
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].kind, SymbolKind::Static);
+        assert_eq!(symbols[0].name, "GLOBAL");
+        assert!(
+            symbols[0].signature.contains("pub static GLOBAL: &str"),
+            "signature should contain type declaration"
+        );
+        assert!(
+            !symbols[0].signature.contains("secret_api_key"),
+            "signature must NOT contain initializer value: {}",
+            symbols[0].signature
+        );
+    }
+
+    #[test]
+    fn test_extract_type_alias_keeps_definition() {
+        let symbols = extract(
+            "pub type Result<T> = std::result::Result<T, Error>;",
+            Depth::Signatures,
+        );
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].kind, SymbolKind::TypeAlias);
+        assert!(
+            symbols[0].signature.contains("std::result::Result"),
+            "type alias should keep full definition: {}",
+            symbols[0].signature
+        );
     }
 
     #[test]
