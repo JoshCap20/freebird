@@ -8,12 +8,19 @@
 //! over unified diff and line-based diff formats (Meta agentic repair paper).
 
 use async_trait::async_trait;
+use tokio::io::AsyncReadExt;
 
 use freebird_security::taint::TaintedToolInput;
 use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
     ToolOutput,
 };
+
+/// Maximum file size the edit tool will read (10 MiB).
+///
+/// Matches `read_file`'s limit. Prevents OOM on huge files — the LLM
+/// context window can't usefully represent files larger than this anyway.
+const MAX_EDIT_FILE_BYTES: usize = 10 * 1024 * 1024;
 
 /// Returns the search/replace edit tool as a trait object.
 #[must_use]
@@ -88,10 +95,16 @@ fn line_count(s: &str) -> usize {
 /// - Collapse runs of inline whitespace to a single space
 /// - Preserve line boundaries
 fn normalize_whitespace(s: &str) -> String {
-    s.lines()
+    let mut result: String = s
+        .lines()
         .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    // Preserve trailing newline so normalization is idempotent
+    if s.ends_with('\n') {
+        result.push('\n');
+    }
+    result
 }
 
 /// A line from the original haystack, remembering its byte offset.
@@ -103,7 +116,13 @@ struct SourceLine<'a> {
 /// Split `haystack` into lines that remember their byte offsets.
 /// Handles both `\n` and `\r\n`. Does NOT use `str::lines()` because that
 /// erases terminator length information needed for correct byte-offset math.
+///
+/// `split_inclusive('\n')` returns the last segment even without a trailing
+/// newline, so no special end-of-input handling is needed.
 fn split_source_lines(haystack: &str) -> Vec<SourceLine<'_>> {
+    if haystack.is_empty() {
+        return vec![];
+    }
     let mut lines = Vec::new();
     let mut offset = 0;
     for line_with_term in haystack.split_inclusive('\n') {
@@ -114,17 +133,6 @@ fn split_source_lines(haystack: &str) -> Vec<SourceLine<'_>> {
             byte_offset: offset,
         });
         offset += line_with_term.len();
-    }
-    // If file has no trailing newline, split_inclusive won't have caught the
-    // last segment. Check if we've consumed all bytes.
-    if offset < haystack.len() {
-        let remaining = haystack.get(offset..).unwrap_or("");
-        if !remaining.is_empty() {
-            lines.push(SourceLine {
-                text: remaining,
-                byte_offset: offset,
-            });
-        }
     }
     lines
 }
@@ -175,8 +183,19 @@ fn find_normalized_matches(haystack: &str, needle: &str) -> Vec<(usize, usize)> 
     matches
 }
 
+/// Detect the indentation character used in a whitespace prefix.
+/// Returns `'\t'` if tabs dominate, `' '` otherwise.
+fn detect_indent_char(prefix: &str) -> char {
+    let tabs = prefix.chars().filter(|&c| c == '\t').count();
+    let spaces = prefix.chars().filter(|&c| c == ' ').count();
+    if tabs > spaces { '\t' } else { ' ' }
+}
+
 /// Apply indentation preservation: detect the indentation delta between the
 /// matched block and the replacement, then shift all replacement lines.
+///
+/// Tab-aware: detects whether the matched region uses tabs or spaces and
+/// replicates the same character for relative indentation offsets.
 fn apply_indentation(matched_first_line: &str, new_string: &str) -> String {
     if new_string.is_empty() {
         return String::new();
@@ -195,6 +214,7 @@ fn apply_indentation(matched_first_line: &str, new_string: &str) -> String {
     }
 
     let match_prefix = matched_first_line.get(..match_indent).unwrap_or("");
+    let indent_char = detect_indent_char(match_prefix);
 
     new_lines
         .iter()
@@ -208,14 +228,11 @@ fn apply_indentation(matched_first_line: &str, new_string: &str) -> String {
                 String::new()
             } else {
                 // Other lines: compute relative indent from first line and apply
+                // using the same indent character as the matched region
                 let line_indent = line.len() - line.trim_start().len();
                 let relative = line_indent.saturating_sub(new_indent);
-                format!(
-                    "{}{}{}",
-                    match_prefix,
-                    " ".repeat(relative),
-                    line.trim_start()
-                )
+                let relative_str: String = std::iter::repeat_n(indent_char, relative).collect();
+                format!("{}{}{}", match_prefix, relative_str, line.trim_start())
             }
         })
         .collect::<Vec<_>>()
@@ -270,13 +287,35 @@ impl Tool for SearchReplaceEditTool {
             });
         }
 
-        // Read file content
-        let file_content = tokio::fs::read_to_string(safe_path.as_path())
+        // Read file content with size cap (same pattern as read_file)
+        let file = tokio::fs::File::open(safe_path.as_path())
             .await
             .map_err(|e| ToolError::ExecutionFailed {
                 tool: Self::NAME.into(),
                 reason: e.to_string(),
             })?;
+
+        let cap = MAX_EDIT_FILE_BYTES + 1;
+        let mut buf = Vec::with_capacity(cap.min(8 * 1024));
+        file.take(cap as u64)
+            .read_to_end(&mut buf)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                tool: Self::NAME.into(),
+                reason: e.to_string(),
+            })?;
+
+        if buf.len() > MAX_EDIT_FILE_BYTES {
+            return Err(ToolError::ExecutionFailed {
+                tool: Self::NAME.into(),
+                reason: format!("file exceeds {MAX_EDIT_FILE_BYTES} byte limit"),
+            });
+        }
+
+        let file_content = String::from_utf8(buf).map_err(|_| ToolError::ExecutionFailed {
+            tool: Self::NAME.into(),
+            reason: "file is not valid UTF-8".into(),
+        })?;
 
         let relative = relative_path_display(&safe_path);
         let result = find_and_replace(&file_content, old_str, new_str, &relative)?;
@@ -362,8 +401,92 @@ fn build_replacement(
     }
 }
 
+/// Minimum fraction of lines that must match (after normalization) for a
+/// fuzzy window to be considered a candidate. 0.6 allows up to 40% of lines
+/// to differ, which handles common LLM errors (wrong variable names, slight
+/// reformatting) while still being selective enough to avoid false positives.
+const FUZZY_MATCH_THRESHOLD: f64 = 0.6;
+
+/// Compute the fraction of lines in `needle_lines` that match `window_lines`
+/// after whitespace normalization. Both slices must have the same length.
+fn line_similarity(window_lines: &[&str], needle_lines: &[&str]) -> f64 {
+    if window_lines.is_empty() {
+        return 0.0;
+    }
+    let matching = window_lines
+        .iter()
+        .zip(needle_lines.iter())
+        .filter(|(w, n)| normalize_whitespace(w) == normalize_whitespace(n))
+        .count();
+    #[allow(clippy::cast_precision_loss)]
+    // line counts are small; f64 mantissa overflow is not a concern
+    {
+        matching as f64 / window_lines.len() as f64
+    }
+}
+
+/// Find the best fuzzy match: a window of N lines where at least
+/// `FUZZY_MATCH_THRESHOLD` of lines match after normalization.
+///
+/// Returns `Some((byte_start, byte_len, score))` if exactly one window
+/// achieves the best score above the threshold. Returns `None` if no window
+/// passes the threshold, or if multiple windows tie for the best score
+/// (ambiguous).
+fn find_fuzzy_match(haystack: &str, needle: &str) -> Option<(usize, usize)> {
+    let needle_lines: Vec<&str> = needle.lines().collect();
+    if needle_lines.is_empty() {
+        return None;
+    }
+
+    let source_lines = split_source_lines(haystack);
+    if source_lines.len() < needle_lines.len() {
+        return None;
+    }
+
+    let mut best_score: f64 = 0.0;
+    let mut best_match: Option<(usize, usize)> = None;
+    let mut best_is_unique = true;
+
+    for start_idx in 0..=source_lines.len() - needle_lines.len() {
+        let window_slice = source_lines
+            .get(start_idx..start_idx + needle_lines.len())
+            .unwrap_or(&[]);
+        let window_texts: Vec<&str> = window_slice.iter().map(|sl| sl.text).collect();
+        let score = line_similarity(&window_texts, &needle_lines);
+
+        if score >= FUZZY_MATCH_THRESHOLD {
+            if score > best_score {
+                best_score = score;
+                let byte_start = window_slice.first().map_or(0, |sl| sl.byte_offset);
+                let byte_len = if let (Some(first), Some(last)) =
+                    (window_slice.first(), window_slice.last())
+                {
+                    (last.byte_offset + last.text.len()) - first.byte_offset
+                } else {
+                    0
+                };
+                best_match = Some((byte_start, byte_len));
+                best_is_unique = true;
+            } else if (score - best_score).abs() < f64::EPSILON {
+                // Tie — ambiguous, can't pick one
+                best_is_unique = false;
+            }
+        }
+    }
+
+    if best_is_unique { best_match } else { None }
+}
+
 /// Find the replacement for the given old/new strings in the file content.
 /// Returns the replaced file content and metadata, or a `ToolError`.
+///
+/// Matching strategy (layered, most precise first):
+/// 1. **Exact match** — literal string comparison
+/// 2. **Whitespace-normalized match** — collapse whitespace per line, compare
+/// 3. **Fuzzy line-level match** — per-line similarity scoring with threshold
+///
+/// Each layer requires a unique match. Ambiguous matches (>1 candidate)
+/// always return an error asking the agent to provide more context.
 fn find_and_replace(
     file_content: &str,
     old_str: &str,
@@ -388,27 +511,44 @@ fn find_and_replace(
             ))
         }
         0 => {
-            // Try whitespace-normalized fallback
+            // Layer 2: whitespace-normalized match
             let norm_matches = find_normalized_matches(file_content, old_str);
-            match norm_matches.first() {
-                None => Err(ToolError::ExecutionFailed {
-                    tool: SearchReplaceEditTool::NAME.into(),
-                    reason: format!("old_string not found in {relative_path}"),
-                }),
-                Some(&(byte_start, byte_len)) if norm_matches.len() == 1 => Ok(build_replacement(
+            match norm_matches.len() {
+                1 => {
+                    if let Some(&(byte_start, byte_len)) = norm_matches.first() {
+                        return Ok(build_replacement(
+                            file_content,
+                            byte_start,
+                            byte_len,
+                            new_str,
+                        ));
+                    }
+                }
+                n if n > 1 => {
+                    return Err(ToolError::ExecutionFailed {
+                        tool: SearchReplaceEditTool::NAME.into(),
+                        reason: format!(
+                            "old_string matches {n} locations in {relative_path} after whitespace normalization, provide more surrounding context"
+                        ),
+                    });
+                }
+                _ => {} // 0 normalized matches — fall through to fuzzy
+            }
+
+            // Layer 3: fuzzy line-level match
+            if let Some((byte_start, byte_len)) = find_fuzzy_match(file_content, old_str) {
+                return Ok(build_replacement(
                     file_content,
                     byte_start,
                     byte_len,
                     new_str,
-                )),
-                Some(_) => Err(ToolError::ExecutionFailed {
-                    tool: SearchReplaceEditTool::NAME.into(),
-                    reason: format!(
-                        "old_string matches {} locations in {relative_path} after whitespace normalization, provide more surrounding context",
-                        norm_matches.len()
-                    ),
-                }),
+                ));
             }
+
+            Err(ToolError::ExecutionFailed {
+                tool: SearchReplaceEditTool::NAME.into(),
+                reason: format!("old_string not found in {relative_path}"),
+            })
         }
         n => Err(ToolError::ExecutionFailed {
             tool: SearchReplaceEditTool::NAME.into(),
@@ -1010,5 +1150,434 @@ mod tests {
         assert_eq!(def.name, "search_replace_edit");
         assert!(!def.description.is_empty());
         assert!(def.input_schema.is_object());
+    }
+
+    // ── File size limit tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_file_exceeding_size_limit_rejected() {
+        let h = TestHarness::new();
+        let file_path = h.path().join("huge.rs");
+        {
+            let f = std::fs::File::create(&file_path).unwrap();
+            // Set file size to just over 10 MiB without writing all bytes
+            f.set_len((super::MAX_EDIT_FILE_BYTES + 1) as u64).unwrap();
+        }
+
+        let tool = SearchReplaceEditTool::new();
+        let err = tool
+            .execute(
+                serde_json::json!({
+                    "path": "huge.rs",
+                    "old_string": "x",
+                    "new_string": "y"
+                }),
+                &h.context(),
+            )
+            .await
+            .unwrap_err();
+
+        match &err {
+            ToolError::ExecutionFailed { reason, .. } => {
+                assert!(
+                    reason.contains("exceeds"),
+                    "error should mention limit: {reason}"
+                );
+            }
+            other => panic!("expected ExecutionFailed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_non_utf8_file_rejected() {
+        use std::io::Write as _;
+        let h = TestHarness::new();
+        let file_path = h.path().join("binary.bin");
+        {
+            let mut f = std::fs::File::create(&file_path).unwrap();
+            f.write_all(&[0xFF, 0xFE, 0x00, 0x01]).unwrap();
+        }
+
+        let tool = SearchReplaceEditTool::new();
+        let err = tool
+            .execute(
+                serde_json::json!({
+                    "path": "binary.bin",
+                    "old_string": "x",
+                    "new_string": "y"
+                }),
+                &h.context(),
+            )
+            .await
+            .unwrap_err();
+
+        match &err {
+            ToolError::ExecutionFailed { reason, .. } => {
+                assert!(
+                    reason.contains("UTF-8"),
+                    "error should mention UTF-8: {reason}"
+                );
+            }
+            other => panic!("expected ExecutionFailed, got: {other:?}"),
+        }
+    }
+
+    // ── Tab indentation tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_tab_indentation_preserved() {
+        let h = TestHarness::new();
+        // File uses tab indentation
+        std::fs::write(
+            h.path().join("file.go"),
+            "func main() {\n\toldLine1\n\toldLine2\n}\n",
+        )
+        .unwrap();
+
+        let tool = SearchReplaceEditTool::new();
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "path": "file.go",
+                    "old_string": "\toldLine1\n\toldLine2",
+                    "new_string": "newLine1\nnewLine2\nnewLine3"
+                }),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(output.outcome, ToolOutcome::Success));
+        let content = std::fs::read_to_string(h.path().join("file.go")).unwrap();
+        // All replacement lines should have tab indentation, not spaces
+        assert!(
+            content.contains("\tnewLine1\n\tnewLine2\n\tnewLine3"),
+            "content: {content:?}"
+        );
+    }
+
+    // ── Fuzzy matching tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_fuzzy_match_one_line_wrong() {
+        let h = TestHarness::new();
+        let original =
+            "fn main() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n    let w = 4;\n}\n";
+        std::fs::write(h.path().join("file.rs"), original).unwrap();
+
+        let tool = SearchReplaceEditTool::new();
+        // old_string has one line wrong ("let y = 999" instead of "let y = 2")
+        // 4 out of 5 lines match (80%) — should fuzzy match
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "path": "file.rs",
+                    "old_string": "    let x = 1;\n    let y = 999;\n    let z = 3;\n    let w = 4;",
+                    "new_string": "    let sum = 10;"
+                }),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(output.outcome, ToolOutcome::Success));
+        let content = std::fs::read_to_string(h.path().join("file.rs")).unwrap();
+        assert!(content.contains("let sum = 10;"));
+        assert!(!content.contains("let x = 1;"));
+    }
+
+    #[tokio::test]
+    async fn test_fuzzy_match_too_many_lines_wrong_fails() {
+        let h = TestHarness::new();
+        let original = "fn main() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n}\n";
+        std::fs::write(h.path().join("file.rs"), original).unwrap();
+
+        let tool = SearchReplaceEditTool::new();
+        // old_string has 2 out of 3 lines wrong — below 60% threshold
+        let err = tool
+            .execute(
+                serde_json::json!({
+                    "path": "file.rs",
+                    "old_string": "    let a = 99;\n    let b = 88;\n    let z = 3;",
+                    "new_string": "    let sum = 6;"
+                }),
+                &h.context(),
+            )
+            .await
+            .unwrap_err();
+
+        match err {
+            ToolError::ExecutionFailed { reason, .. } => {
+                assert!(reason.contains("not found"), "error: {reason}");
+            }
+            other => panic!("expected ExecutionFailed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fuzzy_match_ambiguous_returns_error() {
+        let h = TestHarness::new();
+        // Two identical blocks — fuzzy match should be ambiguous
+        let original = "fn a() {\n    let x = 1;\n    let y = 2;\n}\nfn b() {\n    let x = 1;\n    let y = 2;\n}\n";
+        std::fs::write(h.path().join("file.rs"), original).unwrap();
+
+        let tool = SearchReplaceEditTool::new();
+        // Fuzzy search with one wrong line — matches both blocks equally
+        let err = tool
+            .execute(
+                serde_json::json!({
+                    "path": "file.rs",
+                    "old_string": "    let x = 1;\n    let y = 999;",
+                    "new_string": "    let z = 3;"
+                }),
+                &h.context(),
+            )
+            .await
+            .unwrap_err();
+
+        match err {
+            ToolError::ExecutionFailed { reason, .. } => {
+                assert!(reason.contains("not found"), "error: {reason}");
+            }
+            other => panic!("expected ExecutionFailed, got: {other:?}"),
+        }
+    }
+
+    // ── Unit tests for internal helpers ──────────────────────────
+
+    #[test]
+    fn test_split_source_lines_lf() {
+        let lines = split_source_lines("abc\ndef\n");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "abc");
+        assert_eq!(lines[0].byte_offset, 0);
+        assert_eq!(lines[1].text, "def");
+        assert_eq!(lines[1].byte_offset, 4);
+    }
+
+    #[test]
+    fn test_split_source_lines_crlf() {
+        let lines = split_source_lines("abc\r\ndef\r\n");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "abc");
+        assert_eq!(lines[0].byte_offset, 0);
+        assert_eq!(lines[1].text, "def");
+        assert_eq!(lines[1].byte_offset, 5); // "abc\r\n" = 5 bytes
+    }
+
+    #[test]
+    fn test_split_source_lines_no_trailing_newline() {
+        let lines = split_source_lines("abc\ndef");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "abc");
+        assert_eq!(lines[1].text, "def");
+        assert_eq!(lines[1].byte_offset, 4);
+    }
+
+    #[test]
+    fn test_split_source_lines_empty() {
+        let lines = split_source_lines("");
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn test_line_similarity_perfect() {
+        let score = line_similarity(&["let x = 1;", "let y = 2;"], &["let x = 1;", "let y = 2;"]);
+        assert!((score - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_line_similarity_partial() {
+        let score = line_similarity(
+            &["let x = 1;", "let y = 2;", "let z = 3;"],
+            &["let x = 1;", "let WRONG = 2;", "let z = 3;"],
+        );
+        // 2 out of 3 match
+        assert!((score - 2.0 / 3.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_line_similarity_none() {
+        let score = line_similarity(&["aaa", "bbb"], &["xxx", "yyy"]);
+        assert!((score - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_detect_indent_char_spaces() {
+        assert_eq!(detect_indent_char("    "), ' ');
+        assert_eq!(detect_indent_char("  "), ' ');
+    }
+
+    #[test]
+    fn test_detect_indent_char_tabs() {
+        assert_eq!(detect_indent_char("\t\t"), '\t');
+        assert_eq!(detect_indent_char("\t"), '\t');
+    }
+
+    #[test]
+    fn test_detect_indent_char_mixed_prefers_majority() {
+        // More tabs than spaces → tab
+        assert_eq!(detect_indent_char("\t\t "), '\t');
+        // More spaces than tabs → space
+        assert_eq!(detect_indent_char("\t  "), ' ');
+    }
+
+    // ── Property-based tests ─────────────────────────────────────
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Strategy that generates safe filenames.
+        fn safe_filename() -> impl Strategy<Value = String> {
+            "[a-zA-Z0-9_-]{1,64}\\.(rs|txt|go|py)"
+        }
+
+        /// Strategy that generates lines of visible ASCII.
+        fn visible_line() -> impl Strategy<Value = String> {
+            // At least one non-space printable char so indentation preservation
+            // doesn't trim the entire string (pure-whitespace "code" is not a
+            // realistic edit scenario).
+            "[\\x21-\\x7E][\\x20-\\x7E]{0,79}"
+        }
+
+        proptest! {
+            /// Path traversal never succeeds, regardless of depth or suffix.
+            #[test]
+            fn path_traversal_always_rejected(
+                depth in 1usize..20,
+                suffix in "[a-z]{1,10}",
+            ) {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    let h = TestHarness::new();
+                    let tool = SearchReplaceEditTool::new();
+
+                    let traversal = format!("{}{}", "../".repeat(depth), suffix);
+                    let result = tool
+                        .execute(
+                            serde_json::json!({
+                                "path": &traversal,
+                                "old_string": "x",
+                                "new_string": "y"
+                            }),
+                            &h.context(),
+                        )
+                        .await;
+                    prop_assert!(result.is_err());
+                    Ok(())
+                })?;
+            }
+
+            /// Editing a file then reading it back always yields content
+            /// that contains new_string and does not contain old_string.
+            #[test]
+            fn edit_roundtrip_replaces_correctly(
+                name in safe_filename(),
+                prefix in visible_line(),
+                old_text in visible_line(),
+                suffix in visible_line(),
+                new_text in visible_line(),
+            ) {
+                // Skip if old_text == new_text (identity edit rejected)
+                // or old_text appears in prefix/suffix (ambiguous match)
+                if old_text == new_text
+                    || prefix.contains(&old_text)
+                    || suffix.contains(&old_text)
+                {
+                    return Ok(());
+                }
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    let h = TestHarness::new();
+                    let content = format!("{prefix}\n{old_text}\n{suffix}\n");
+                    std::fs::write(h.path().join(&name), &content).unwrap();
+
+                    let tool = SearchReplaceEditTool::new();
+                    let result = tool
+                        .execute(
+                            serde_json::json!({
+                                "path": &name,
+                                "old_string": &old_text,
+                                "new_string": &new_text
+                            }),
+                            &h.context(),
+                        )
+                        .await;
+                    prop_assert!(result.is_ok(), "edit failed: {:?}", result.err());
+
+                    let after = std::fs::read_to_string(h.path().join(&name)).unwrap();
+                    prop_assert!(after.contains(&new_text), "new_text not in result");
+                    // Only assert old_text is gone when it's not a substring of new_text,
+                    // because replacement naturally re-introduces it in that case.
+                    if !new_text.contains(&old_text) {
+                        prop_assert!(!after.contains(&old_text), "old_text still in result");
+                    }
+                    Ok(())
+                })?;
+            }
+
+            /// Output never leaks the sandbox root path.
+            #[test]
+            fn output_never_leaks_sandbox_root(
+                name in safe_filename(),
+            ) {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    let h = TestHarness::new();
+                    std::fs::write(h.path().join(&name), "old_unique_sentinel\n").unwrap();
+
+                    let tool = SearchReplaceEditTool::new();
+                    let output = tool
+                        .execute(
+                            serde_json::json!({
+                                "path": &name,
+                                "old_string": "old_unique_sentinel",
+                                "new_string": "new_sentinel"
+                            }),
+                            &h.context(),
+                        )
+                        .await
+                        .unwrap();
+                    let sandbox_str = h.path().to_string_lossy();
+                    prop_assert!(
+                        !output.content.contains(sandbox_str.as_ref()),
+                        "output leaked sandbox root: {}",
+                        output.content
+                    );
+                    Ok(())
+                })?;
+            }
+
+            /// Normalize whitespace is idempotent — normalizing twice
+            /// gives the same result as normalizing once.
+            #[test]
+            fn normalize_whitespace_idempotent(input in "[ \\t\\n\\x20-\\x7E]{0,200}") {
+                let once = normalize_whitespace(&input);
+                let twice = normalize_whitespace(&once);
+                prop_assert_eq!(once, twice);
+            }
+
+            /// split_source_lines byte offsets reconstruct original text.
+            #[test]
+            fn source_lines_cover_text(input in "[\\x20-\\x7E\\n]{1,200}") {
+                let lines = split_source_lines(&input);
+                for sl in &lines {
+                    // Each line's text must be at its stated byte offset
+                    let actual = input.get(sl.byte_offset..sl.byte_offset + sl.text.len());
+                    prop_assert_eq!(actual, Some(sl.text),
+                        "offset {} len {} doesn't match", sl.byte_offset, sl.text.len());
+                }
+            }
+        }
     }
 }
