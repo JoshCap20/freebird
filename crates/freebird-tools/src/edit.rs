@@ -92,9 +92,47 @@ fn normalize_whitespace(s: &str) -> String {
         .join("\n")
 }
 
+/// A line from the original haystack, remembering its byte offset.
+struct SourceLine<'a> {
+    text: &'a str,
+    byte_offset: usize,
+}
+
+/// Split `haystack` into lines that remember their byte offsets.
+/// Handles both `\n` and `\r\n`. Does NOT use `str::lines()` because that
+/// erases terminator length information needed for correct byte-offset math.
+fn split_source_lines(haystack: &str) -> Vec<SourceLine<'_>> {
+    let mut lines = Vec::new();
+    let mut offset = 0;
+    for line_with_term in haystack.split_inclusive('\n') {
+        let text = line_with_term.strip_suffix('\n').unwrap_or(line_with_term);
+        let text = text.strip_suffix('\r').unwrap_or(text);
+        lines.push(SourceLine {
+            text,
+            byte_offset: offset,
+        });
+        offset += line_with_term.len();
+    }
+    // If file has no trailing newline, split_inclusive won't have caught the
+    // last segment. Check if we've consumed all bytes.
+    if offset < haystack.len() {
+        let remaining = haystack.get(offset..).unwrap_or("");
+        if !remaining.is_empty() {
+            lines.push(SourceLine {
+                text: remaining,
+                byte_offset: offset,
+            });
+        }
+    }
+    lines
+}
+
 /// Find all byte-offset positions where `needle` appears in `haystack` using
 /// normalized (whitespace-collapsed) comparison. Returns the byte offsets and
 /// byte lengths in the *original* haystack.
+///
+/// Correctly handles `\r\n` line endings by tracking actual terminator byte
+/// lengths instead of assuming 1-byte `\n`.
 fn find_normalized_matches(haystack: &str, needle: &str) -> Vec<(usize, usize)> {
     let norm_needle = normalize_whitespace(needle);
     if norm_needle.is_empty() {
@@ -102,40 +140,32 @@ fn find_normalized_matches(haystack: &str, needle: &str) -> Vec<(usize, usize)> 
     }
 
     let needle_line_count = norm_needle.lines().count();
-    let haystack_lines: Vec<&str> = haystack.lines().collect();
+    let source_lines = split_source_lines(haystack);
 
     let mut matches = Vec::new();
 
-    if haystack_lines.len() < needle_line_count {
+    if source_lines.len() < needle_line_count {
         return matches;
     }
 
-    for start_idx in 0..=haystack_lines.len() - needle_line_count {
-        let window_slice = haystack_lines
+    for start_idx in 0..=source_lines.len() - needle_line_count {
+        let window_slice = source_lines
             .get(start_idx..start_idx + needle_line_count)
             .unwrap_or(&[]);
-        let window: String = window_slice.to_vec().join("\n");
+        let window_texts: Vec<&str> = window_slice.iter().map(|sl| sl.text).collect();
+        let window = window_texts.join("\n");
         let norm_window = normalize_whitespace(&window);
 
         if norm_window == norm_needle {
-            // Compute byte offset of this line range in the original haystack
-            let byte_start: usize = haystack_lines
-                .get(..start_idx)
-                .unwrap_or(&[])
-                .iter()
-                .map(|l| l.len() + 1) // +1 for '\n'
-                .sum();
-            let byte_len: usize = window_slice
-                .iter()
-                .enumerate()
-                .map(|(i, l)| {
-                    if i + 1 < needle_line_count {
-                        l.len() + 1 // +1 for '\n' between lines
-                    } else {
-                        l.len()
-                    }
-                })
-                .sum();
+            let byte_start = window_slice.first().map_or(0, |sl| sl.byte_offset);
+            // Total bytes from start of first matched line to end of last matched line's text
+            // (excluding the last line's terminator, since we're replacing the text content).
+            let byte_len: usize =
+                if let (Some(first), Some(last)) = (window_slice.first(), window_slice.last()) {
+                    (last.byte_offset + last.text.len()) - first.byte_offset
+                } else {
+                    0
+                };
             matches.push((byte_start, byte_len));
         }
     }
@@ -904,5 +934,79 @@ mod tests {
 
         let content = std::fs::read_to_string(h.path().join("file.rs")).unwrap();
         assert_eq!(content, original);
+    }
+
+    // ── Edge case tests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_crlf_line_endings_normalized_fallback() {
+        let h = TestHarness::new();
+        // Write a file with \r\n line endings
+        std::fs::write(
+            h.path().join("crlf.rs"),
+            "fn main() {\r\n    let x = 1;\r\n}\r\n",
+        )
+        .unwrap();
+
+        let tool = SearchReplaceEditTool::new();
+        // Use normalized fallback (extra spaces)
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "path": "crlf.rs",
+                    "old_string": "let  x  =  1;",
+                    "new_string": "let x = 2;"
+                }),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(output.outcome, ToolOutcome::Success));
+        let content = std::fs::read_to_string(h.path().join("crlf.rs")).unwrap();
+        assert!(content.contains("let x = 2;"), "content: {content:?}");
+        // Verify surrounding content isn't corrupted
+        assert!(content.contains("fn main()"), "content: {content:?}");
+        assert!(content.contains('}'), "content: {content:?}");
+    }
+
+    #[tokio::test]
+    async fn test_empty_old_string_returns_error() {
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("file.rs"), "content\n").unwrap();
+
+        let tool = SearchReplaceEditTool::new();
+        let err = tool
+            .execute(
+                serde_json::json!({
+                    "path": "file.rs",
+                    "old_string": "",
+                    "new_string": "inserted"
+                }),
+                &h.context(),
+            )
+            .await
+            .unwrap_err();
+
+        // Empty string matches at every position, so >1 matches → error
+        match err {
+            ToolError::ExecutionFailed { reason, .. } => {
+                assert!(reason.contains("locations"), "error: {reason}");
+            }
+            other => panic!("expected ExecutionFailed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_edit_tools_factory() {
+        let tools = edit_tools();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].info().name, "search_replace_edit");
+
+        // Verify to_definition() produces a valid tool definition
+        let def = tools[0].to_definition();
+        assert_eq!(def.name, "search_replace_edit");
+        assert!(!def.description.is_empty());
+        assert!(def.input_schema.is_object());
     }
 }
