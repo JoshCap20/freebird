@@ -223,6 +223,20 @@ async fn read_client_lines(
                             })
                             .await;
                     }
+                    Ok(ClientMessage::ConsentResponse {
+                        request_id,
+                        approved,
+                        reason,
+                    }) => {
+                        let _ = inbound_tx
+                            .send(InboundEvent::ConsentResponse {
+                                request_id,
+                                approved,
+                                reason,
+                                sender_id: sender_id.clone(),
+                            })
+                            .await;
+                    }
                     Ok(ClientMessage::Disconnect) => {
                         break;
                     }
@@ -368,18 +382,22 @@ fn outbound_to_server_message(event: OutboundEvent) -> (String, ServerMessage) {
         ),
         OutboundEvent::TurnComplete { recipient_id } => (recipient_id, ServerMessage::TurnComplete),
         OutboundEvent::ConsentRequest {
+            request_id,
             tool_name,
-            action_summary,
+            description,
             risk_level,
+            action_summary,
+            expires_at,
             recipient_id,
-            ..
         } => (
             recipient_id,
-            ServerMessage::Message {
-                text: format!(
-                    "[CONSENT REQUIRED] Tool `{tool_name}` (risk: {risk_level}) \
-                     wants to: {action_summary}\nReply /approve or /deny"
-                ),
+            ServerMessage::ConsentRequest {
+                request_id,
+                tool_name,
+                description,
+                risk_level,
+                action_summary,
+                expires_at,
             },
         ),
     }
@@ -799,6 +817,28 @@ mod tests {
                 },
                 ("tcp-6".to_string(), ServerMessage::TurnComplete),
             ),
+            (
+                OutboundEvent::ConsentRequest {
+                    request_id: "req-42".into(),
+                    tool_name: "shell".into(),
+                    description: "execute commands".into(),
+                    risk_level: "high".into(),
+                    action_summary: "rm -rf /tmp".into(),
+                    expires_at: "2026-03-09T12:00:00Z".into(),
+                    recipient_id: "tcp-7".into(),
+                },
+                (
+                    "tcp-7".to_string(),
+                    ServerMessage::ConsentRequest {
+                        request_id: "req-42".into(),
+                        tool_name: "shell".into(),
+                        description: "execute commands".into(),
+                        risk_level: "high".into(),
+                        action_summary: "rm -rf /tmp".into(),
+                        expires_at: "2026-03-09T12:00:00Z".into(),
+                    },
+                ),
+            ),
         ];
 
         for (input, (expected_id, expected_msg)) in cases {
@@ -839,6 +879,86 @@ mod tests {
                 assert_eq!(raw_text, "valid");
             }
             other => panic!("expected Message, got {other:?}"),
+        }
+
+        channel.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_consent_response_from_client_becomes_inbound_event() {
+        let (listener, port) = bind_random().await;
+        let channel = TcpChannel::new("127.0.0.1", port);
+        let mut handle = channel.start_with_listener(listener);
+
+        let mut client = connect_test_client(port).await;
+
+        // Consume Connected
+        let _ = handle.inbound.next().await.unwrap();
+
+        // Send a ConsentResponse from the client
+        send_json(
+            &mut client,
+            &ClientMessage::ConsentResponse {
+                request_id: "req-42".into(),
+                approved: true,
+                reason: None,
+            },
+        )
+        .await;
+
+        let event = handle.inbound.next().await.unwrap();
+        match event {
+            InboundEvent::ConsentResponse {
+                request_id,
+                approved,
+                reason,
+                sender_id,
+            } => {
+                assert_eq!(request_id, "req-42");
+                assert!(approved);
+                assert!(reason.is_none());
+                assert_eq!(sender_id, "tcp-0");
+            }
+            other => panic!("expected ConsentResponse, got {other:?}"),
+        }
+
+        channel.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_consent_response_denied_from_client() {
+        let (listener, port) = bind_random().await;
+        let channel = TcpChannel::new("127.0.0.1", port);
+        let mut handle = channel.start_with_listener(listener);
+
+        let mut client = connect_test_client(port).await;
+
+        // Consume Connected
+        let _ = handle.inbound.next().await.unwrap();
+
+        send_json(
+            &mut client,
+            &ClientMessage::ConsentResponse {
+                request_id: "req-99".into(),
+                approved: false,
+                reason: Some("too dangerous".into()),
+            },
+        )
+        .await;
+
+        let event = handle.inbound.next().await.unwrap();
+        match event {
+            InboundEvent::ConsentResponse {
+                request_id,
+                approved,
+                reason,
+                ..
+            } => {
+                assert_eq!(request_id, "req-99");
+                assert!(!approved);
+                assert_eq!(reason.unwrap(), "too dangerous");
+            }
+            other => panic!("expected ConsentResponse, got {other:?}"),
         }
 
         channel.stop().await.unwrap();
