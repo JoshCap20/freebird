@@ -30,6 +30,7 @@ impl ConsentChoice {
 
 /// Result of handling a key event in consent mode.
 #[derive(Debug)]
+#[must_use]
 pub enum ConsentAction {
     /// User confirmed their choice — send this response.
     Confirmed {
@@ -62,6 +63,7 @@ impl ConsentSelector {
     ///
     /// `expires_at_str` is the RFC 3339 timestamp from the server.
     /// Returns `None` if the timestamp is unparseable or already expired.
+    #[must_use]
     pub fn new(request_id: String, expires_at_str: &str) -> Option<Self> {
         let expires_at = expires_at_str.parse::<DateTime<Utc>>().ok()?;
         if expires_at <= Utc::now() {
@@ -105,8 +107,8 @@ impl ConsentSelector {
     ///
     /// Outputs two lines:
     /// ```text
-    ///   > Approve [y]
-    ///     Deny    [n]
+    ///   > Approve [y]    ← selected (bold cyan)
+    ///     Deny [n]       ← unselected (grey)
     /// ```
     pub fn render<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
         // Approve line
@@ -125,7 +127,6 @@ impl ConsentSelector {
     }
 
     /// Build a [`ConsentAction::Confirmed`] for auto-deny (timeout or superseded).
-    #[must_use]
     pub fn auto_deny(&self, reason: &str) -> ConsentAction {
         ConsentAction::Confirmed {
             request_id: self.request_id.clone(),
@@ -158,7 +159,7 @@ impl ConsentSelector {
                 SetAttribute(Attribute::Bold),
                 SetForegroundColor(Color::Cyan),
             )?;
-            write!(w, "  > {label}")?;
+            write!(w, "  > {label} {hint}")?;
             queue!(w, ResetColor, SetAttribute(Attribute::Reset))?;
         } else {
             queue!(w, SetForegroundColor(Color::DarkGrey))?;
@@ -262,7 +263,7 @@ mod tests {
     #[test]
     fn test_enter_confirms_deny() {
         let mut sel = make_selector("req-1");
-        sel.handle_key(key(KeyCode::Down)); // Toggle to Deny
+        let _ = sel.handle_key(key(KeyCode::Down)); // Toggle to Deny
         let action = sel.handle_key(key(KeyCode::Enter));
         match action {
             ConsentAction::Confirmed {
@@ -353,8 +354,6 @@ mod tests {
 
     #[test]
     fn test_is_expired() {
-        // Create a selector that expires immediately (1 second ago for safety).
-        let past = (Utc::now() - Duration::seconds(1)).to_rfc3339();
         // Can't construct via new() (it rejects expired), so test via a future
         // expiry and check the inverse.
         let sel = make_selector("req-1");
@@ -368,7 +367,6 @@ mod tests {
             expires_at: Utc::now() - Duration::seconds(1),
         };
         assert!(expired_sel.is_expired());
-        let _ = past; // suppress unused warning
     }
 
     // ── auto_deny tests ──────────────────────────────────────────────
@@ -399,25 +397,25 @@ mod tests {
         let mut buf = Vec::new();
         sel.render(&mut buf).unwrap();
         let output = String::from_utf8_lossy(&buf);
-        assert!(output.contains("> Approve"), "got: {output}");
+        assert!(output.contains("> Approve [y]"), "got: {output}");
         // Deny should not have the `>` indicator
         assert!(
             !output.contains("> Deny"),
             "Deny should not be selected, got: {output}"
         );
-        assert!(output.contains("Deny"), "Deny option should be present");
+        assert!(output.contains("Deny [n]"), "Deny option should be present");
     }
 
     #[test]
     fn test_render_deny_selected() {
         let mut sel = make_selector("req-1");
-        sel.handle_key(key(KeyCode::Down)); // Toggle to Deny
+        let _ = sel.handle_key(key(KeyCode::Down)); // Toggle to Deny
         let mut buf = Vec::new();
         sel.render(&mut buf).unwrap();
         let output = String::from_utf8_lossy(&buf);
-        assert!(output.contains("> Deny"), "got: {output}");
+        assert!(output.contains("> Deny [n]"), "got: {output}");
         assert!(
-            !output.contains("> Approve"),
+            !output.contains("> Approve [y]"),
             "Approve should not be selected, got: {output}"
         );
     }
