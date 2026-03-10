@@ -289,11 +289,14 @@ impl RustMapper {
 
         let mut children = Vec::new();
         let mut body_cursor = body.walk();
-        let mut prev_end: Option<usize> = None;
+        // Track end of previous *symbol* node, not all children.
+        // This keeps doc comments (which are also children) inside the
+        // search region for collect_doc_comment_before.
+        let mut prev_sym_end: Option<usize> = None;
         for child in body.children(&mut body_cursor) {
             if let Some(sym_kind) = Self::node_kind_to_symbol(child.kind()) {
                 let doc = if depth == Depth::Full {
-                    Self::collect_doc_comment_before(body, child, source, prev_end)
+                    Self::collect_doc_comment_before(body, child, source, prev_sym_end)
                 } else {
                     None
                 };
@@ -308,8 +311,8 @@ impl RustMapper {
                     #[cfg(test)]
                     visibility: Self::extract_visibility(child, source),
                 });
+                prev_sym_end = Some(child.end_byte());
             }
-            prev_end = Some(child.end_byte());
         }
         children
     }
@@ -1154,10 +1157,16 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_handles_parse_errors() {
+    fn test_extract_handles_parse_errors_gracefully() {
         let source = "pub fn broken( { struct { enum }";
         let symbols = extract(source, Depth::Signatures);
-        let _ = symbols;
+        // Parser should return partial results or empty — never panic.
+        // The exact count depends on tree-sitter error recovery, but it
+        // must be finite and not crash.
+        assert!(
+            symbols.len() <= 10,
+            "unexpectedly many symbols from broken source"
+        );
     }
 
     #[test]
@@ -1431,6 +1440,122 @@ mod tests {
         assert_eq!(info.side_effects, SideEffects::None);
     }
 
+    // ── parse_max_files tests ──────────────────────────────────────
+
+    #[test]
+    fn test_parse_max_files_defaults_when_absent() {
+        assert_eq!(
+            RepoMapTool::parse_max_files(&serde_json::json!({})),
+            DEFAULT_MAX_FILES
+        );
+    }
+
+    #[test]
+    fn test_parse_max_files_clamps_zero_to_one() {
+        assert_eq!(
+            RepoMapTool::parse_max_files(&serde_json::json!({"max_files": 0})),
+            1
+        );
+    }
+
+    #[test]
+    fn test_parse_max_files_clamps_above_cap() {
+        assert_eq!(
+            RepoMapTool::parse_max_files(&serde_json::json!({"max_files": 9999})),
+            MAX_FILES_CAP
+        );
+    }
+
+    #[test]
+    fn test_parse_max_files_handles_non_integer() {
+        assert_eq!(
+            RepoMapTool::parse_max_files(&serde_json::json!({"max_files": "abc"})),
+            DEFAULT_MAX_FILES
+        );
+    }
+
+    #[test]
+    fn test_parse_max_files_handles_negative() {
+        // serde_json::Value::as_u64() returns None for negative numbers
+        assert_eq!(
+            RepoMapTool::parse_max_files(&serde_json::json!({"max_files": -5})),
+            DEFAULT_MAX_FILES
+        );
+    }
+
+    // ── Additional extraction tests ──────────────────────────────
+
+    #[test]
+    fn test_extract_impl_without_trait() {
+        let source = "struct Foo;\nimpl Foo { fn bar(&self) {} }";
+        let symbols = extract(source, Depth::Signatures);
+        let impl_sym = symbols.iter().find(|s| s.kind == SymbolKind::Impl).unwrap();
+        assert_eq!(impl_sym.name, "Foo");
+        assert!(
+            !impl_sym.name.contains("for"),
+            "plain impl should not contain 'for': {}",
+            impl_sym.name
+        );
+    }
+
+    #[test]
+    fn test_extract_trait_method_doc_comments_full_depth() {
+        let source =
+            "pub trait Foo {\n    /// Method doc\n    fn bar(&self);\n    fn baz(&self);\n}";
+        let symbols = extract(source, Depth::Full);
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].children.len(), 2);
+        let bar = &symbols[0].children[0];
+        assert!(
+            bar.doc_comment.is_some(),
+            "method bar should have doc comment at Full depth"
+        );
+        assert!(bar.doc_comment.as_ref().unwrap().contains("Method doc"));
+        let baz = &symbols[0].children[1];
+        assert!(
+            baz.doc_comment.is_none(),
+            "method baz should have no doc comment"
+        );
+    }
+
+    // ── Additional integration tests ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_repo_map_file_path_rejected() {
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("lib.rs"), "pub fn foo() {}").unwrap();
+
+        let tool = RepoMapTool::new();
+        let err = tool
+            .execute(serde_json::json!({"path": "lib.rs"}), &h.context())
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput { tool, reason } => {
+                assert_eq!(tool, "repo_map");
+                assert!(
+                    reason.contains("not a directory"),
+                    "expected 'not a directory' error, got: {reason}"
+                );
+            }
+            other => panic!("expected InvalidInput, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_repo_map_rust_language_accepted() {
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("lib.rs"), "pub fn foo() {}").unwrap();
+
+        let tool = RepoMapTool::new();
+        let output = tool
+            .execute(serde_json::json!({"language": "rust"}), &h.context())
+            .await
+            .unwrap();
+        assert!(matches!(output.outcome, ToolOutcome::Success));
+        assert!(output.content.contains("pub fn foo()"));
+    }
+
     #[test]
     fn test_discover_skips_symlinks() {
         let h = TestHarness::new();
@@ -1514,7 +1639,10 @@ mod tests {
                 let bytes = source.as_bytes();
                 if let Some(tree) = parser.parse(bytes, None) {
                     let mapper = RustMapper;
+                    // Test all depth variants, not just Signatures
+                    let _ = mapper.extract_symbols(&tree, bytes, Depth::Outline);
                     let _ = mapper.extract_symbols(&tree, bytes, Depth::Signatures);
+                    let _ = mapper.extract_symbols(&tree, bytes, Depth::Full);
                 }
             }
         }
