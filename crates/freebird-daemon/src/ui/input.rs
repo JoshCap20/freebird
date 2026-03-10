@@ -267,19 +267,43 @@ impl InputEditor {
             }
         }
 
-        // Position cursor correctly
-        let lines_below = self.lines.len().saturating_sub(1) - self.cursor_row;
-        if lines_below > 0 {
-            // We need u16, and lines_below is bounded by the number of editor lines
-            // which will never exceed u16::MAX in practice.
-            let below = u16::try_from(lines_below).unwrap_or(u16::MAX);
-            queue!(w, MoveUp(below))?;
+        // Position cursor correctly, accounting for visual line wrapping.
+        let cursor_indent = if self.cursor_row == 0 {
+            prompt_width
+        } else {
+            3u16
+        };
+
+        // Compute visual rows below cursor (wrapped lines count as multiple rows).
+        let mut visual_below: u16 = 0;
+        // Rows from the cursor line itself that are below the cursor position.
+        let cursor_col_u16 = u16::try_from(self.cursor_col).unwrap_or(u16::MAX);
+        let full_line_chars = u16::try_from(self.current_line_len()).unwrap_or(u16::MAX);
+        let cursor_line_rows = visual_rows(cursor_indent, full_line_chars, self.term_width);
+        let cursor_visual_row = if self.term_width > 0 {
+            cursor_indent.saturating_add(cursor_col_u16) / self.term_width
+        } else {
+            0
+        };
+        visual_below =
+            visual_below.saturating_add(cursor_line_rows.saturating_sub(cursor_visual_row + 1));
+
+        // Rows from lines below the cursor row.
+        for i in (self.cursor_row + 1)..self.lines.len() {
+            let chars = u16::try_from(self.lines.get(i).map_or(0, |l| l.chars().count()))
+                .unwrap_or(u16::MAX);
+            visual_below = visual_below.saturating_add(visual_rows(3, chars, self.term_width));
         }
 
-        let col_offset = if self.cursor_row == 0 {
-            prompt_width + u16::try_from(self.cursor_col).unwrap_or(u16::MAX)
+        if visual_below > 0 {
+            queue!(w, MoveUp(visual_below))?;
+        }
+
+        let raw_col = cursor_indent.saturating_add(cursor_col_u16);
+        let col_offset = if self.term_width > 0 {
+            raw_col % self.term_width
         } else {
-            3 + u16::try_from(self.cursor_col).unwrap_or(u16::MAX)
+            raw_col
         };
         queue!(w, MoveToColumn(col_offset))?;
 
@@ -505,6 +529,19 @@ fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
         .map_or(s.len(), |(byte_idx, _)| byte_idx)
 }
 
+/// How many visual terminal rows a line occupies, given a left indent
+/// of `indent` chars and a terminal width of `tw` columns.
+const fn visual_rows(indent: u16, char_count: u16, tw: u16) -> u16 {
+    if tw == 0 {
+        return 1;
+    }
+    let total = indent.saturating_add(char_count);
+    if total == 0 {
+        return 1;
+    }
+    total.div_ceil(tw)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
@@ -641,5 +678,58 @@ mod tests {
         editor.push_history("same");
         editor.push_history("same");
         assert_eq!(editor.history.len(), 1);
+    }
+
+    #[test]
+    fn visual_rows_basic() {
+        // 3 indent + 10 chars = 13, fits in 80 cols = 1 row
+        assert_eq!(visual_rows(3, 10, 80), 1);
+        // 3 indent + 77 chars = 80, exactly fits = 1 row
+        assert_eq!(visual_rows(3, 77, 80), 1);
+        // 3 indent + 78 chars = 81, wraps to 2 rows
+        assert_eq!(visual_rows(3, 78, 80), 2);
+        // 3 indent + 157 chars = 160, exactly 2 rows
+        assert_eq!(visual_rows(3, 157, 80), 2);
+    }
+
+    #[test]
+    fn visual_rows_zero_width_safe() {
+        // Should not panic on zero terminal width
+        assert_eq!(visual_rows(3, 10, 0), 1);
+        assert_eq!(visual_rows(0, 0, 0), 1);
+    }
+
+    #[test]
+    fn cursor_wraps_at_term_width() {
+        let mut editor = InputEditor::new(20);
+        // Type 25 characters — prompt(3) + 25 = 28, wraps on a 20-col terminal
+        for _ in 0..25 {
+            editor.insert_char('x');
+        }
+        let mut buf = Vec::new();
+        editor.render(&mut buf).unwrap();
+        let output = String::from_utf8_lossy(&buf);
+        // The cursor should be at column (3+25) % 20 = 8
+        // MoveToColumn uses 0-indexed crossterm column positioning
+        assert!(
+            output.contains("\x1b[9G") || output.contains("\x1b[8G"),
+            "cursor should wrap to column 8 on 20-col terminal, got: {output:?}"
+        );
+    }
+
+    #[test]
+    fn cursor_no_wrap_short_input() {
+        let mut editor = InputEditor::new(80);
+        for _ in 0..5 {
+            editor.insert_char('a');
+        }
+        let mut buf = Vec::new();
+        editor.render(&mut buf).unwrap();
+        let output = String::from_utf8_lossy(&buf);
+        // prompt(3) + 5 = 8, MoveToColumn(8) = \x1b[9G (1-indexed in escape)
+        assert!(
+            output.contains("\x1b[9G"),
+            "cursor at col 8 on 80-col terminal, got: {output:?}"
+        );
     }
 }
