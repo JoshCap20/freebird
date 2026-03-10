@@ -15,6 +15,8 @@ pub struct AppConfig {
     pub channels: Vec<ChannelConfig>,
     pub tools: ToolsConfig,
     pub memory: MemoryConfig,
+    #[serde(default)]
+    pub knowledge: KnowledgeConfig,
     pub security: SecurityConfig,
     pub logging: LoggingConfig,
     #[serde(default)]
@@ -132,19 +134,66 @@ const fn default_max_shell_output_bytes() -> usize {
     1_048_576 // 1 MiB
 }
 
-/// Which memory storage backend to use.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MemoryKind {
-    File,
-    Sqlite,
-}
-
-/// Memory backend configuration.
+/// Memory backend configuration (`SQLCipher` encrypted `SQLite`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
-    pub kind: MemoryKind,
-    pub base_dir: Option<PathBuf>,
+    /// Path to the `SQLite` database file. Default: `~/.freebird/freebird.db`.
+    pub db_path: Option<PathBuf>,
+    /// Path to the encryption keyfile. If not set, falls back to
+    /// `FREEBIRD_DB_KEY` env var or interactive prompt.
+    pub keyfile_path: Option<PathBuf>,
+    /// PBKDF2 iteration count for key derivation. Default: 100,000.
+    #[serde(default = "default_pbkdf2_iterations")]
+    pub pbkdf2_iterations: u32,
+}
+
+const fn default_pbkdf2_iterations() -> u32 {
+    100_000
+}
+
+/// Knowledge retrieval behavior configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeConfig {
+    /// Whether to auto-retrieve knowledge on every user message.
+    #[serde(default = "default_auto_retrieve")]
+    pub auto_retrieve: bool,
+    /// Max entries injected into context per message.
+    #[serde(default = "default_max_context_entries")]
+    pub max_context_entries: usize,
+    /// BM25 rank threshold. Entries with rank worse (higher) than this are excluded.
+    /// FTS5 BM25: lower (more negative) = more relevant. Default: -0.5.
+    #[serde(default = "default_relevance_threshold")]
+    pub relevance_threshold: f64,
+    /// Max approximate tokens for injected knowledge context.
+    #[serde(default = "default_max_context_tokens")]
+    pub max_context_tokens: usize,
+}
+
+impl Default for KnowledgeConfig {
+    fn default() -> Self {
+        Self {
+            auto_retrieve: default_auto_retrieve(),
+            max_context_entries: default_max_context_entries(),
+            relevance_threshold: default_relevance_threshold(),
+            max_context_tokens: default_max_context_tokens(),
+        }
+    }
+}
+
+const fn default_auto_retrieve() -> bool {
+    true
+}
+
+const fn default_max_context_entries() -> usize {
+    5
+}
+
+const fn default_relevance_threshold() -> f64 {
+    -0.5
+}
+
+const fn default_max_context_tokens() -> usize {
+    2000
 }
 
 /// Security policy configuration.
@@ -299,8 +348,11 @@ max_shell_output_bytes = 1048576"#,
         );
 
         let daemon = overrides.iter().find(|(k, _)| *k == "daemon");
+        let knowledge = overrides.iter().find(|(k, _)| *k == "knowledge");
 
         let daemon_section = daemon.map_or(String::new(), |(_, v)| format!("\n[daemon]\n{v}\n"));
+        let knowledge_section =
+            knowledge.map_or(String::new(), |(_, v)| format!("\n[knowledge]\n{v}\n"));
 
         format!(
             r#"
@@ -319,8 +371,8 @@ kind = "cli"
 {tools}
 
 [memory]
-kind = "file"
-
+db_path = "~/.freebird/freebird.db"
+{knowledge_section}
 [security]
 {security}
 {daemon_section}
@@ -687,5 +739,56 @@ drain_timeout_secs = 1"#,
         assert_eq!(back.allowed_ports, vec![443, 8080]);
         assert_eq!(back.max_response_bytes, 512_000);
         assert_eq!(back.request_timeout_secs, 15);
+    }
+
+    // ── Knowledge config tests ─────────────────────────────────
+
+    #[test]
+    fn test_knowledge_config_defaults_when_absent() {
+        let toml_str = config_toml(&[]);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert!(config.knowledge.auto_retrieve);
+        assert_eq!(config.knowledge.max_context_entries, 5);
+        assert!((config.knowledge.relevance_threshold - (-0.5)).abs() < f64::EPSILON);
+        assert_eq!(config.knowledge.max_context_tokens, 2000);
+    }
+
+    #[test]
+    fn test_knowledge_config_explicit_values() {
+        let toml_str = config_toml(&[(
+            "knowledge",
+            "auto_retrieve = false\nmax_context_entries = 10\nrelevance_threshold = -1.0\nmax_context_tokens = 4000",
+        )]);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert!(!config.knowledge.auto_retrieve);
+        assert_eq!(config.knowledge.max_context_entries, 10);
+        assert!((config.knowledge.relevance_threshold - (-1.0)).abs() < f64::EPSILON);
+        assert_eq!(config.knowledge.max_context_tokens, 4000);
+    }
+
+    #[test]
+    fn test_memory_config_pbkdf2_default() {
+        let toml_str = config_toml(&[]);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(config.memory.pbkdf2_iterations, 100_000);
+    }
+
+    #[test]
+    fn test_memory_config_db_path_from_default_toml() {
+        let toml_str = include_str!("../../../config/default.toml");
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.memory.db_path.as_ref().map(|p| p.to_str().unwrap()),
+            Some("~/.freebird/freebird.db")
+        );
+    }
+
+    #[test]
+    fn test_knowledge_config_from_default_toml() {
+        let toml_str = include_str!("../../../config/default.toml");
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.knowledge.auto_retrieve);
+        assert_eq!(config.knowledge.max_context_entries, 5);
+        assert_eq!(config.knowledge.max_context_tokens, 2000);
     }
 }

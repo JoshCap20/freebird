@@ -118,7 +118,6 @@ sandbox_root = "/tmp"
 default_timeout_secs = 10
 
 [memory]
-kind = "file"
 
 [security]
 max_tool_calls_per_turn = 10

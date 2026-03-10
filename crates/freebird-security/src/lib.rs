@@ -9,6 +9,7 @@ pub mod audit;
 pub mod auth;
 pub mod capability;
 pub mod consent;
+pub mod db_key;
 pub mod egress;
 pub mod error;
 pub mod injection;

@@ -89,6 +89,20 @@ pub enum SecurityError {
 
     #[error("invalid session credential: {reason}")]
     InvalidCredential { reason: String },
+
+    // ── Database encryption ──────────────────────────────────────
+    #[error("no database encryption key found: {message}")]
+    NoEncryptionKey { message: String },
+
+    #[error("insecure keyfile permissions on `{}`: mode {actual_mode:o}, required {required_mode:o}", path.display())]
+    InsecureKeyfile {
+        path: PathBuf,
+        actual_mode: u32,
+        required_mode: u32,
+    },
+
+    #[error("keyfile error: {0}")]
+    KeyfileError(String),
 }
 
 #[cfg(test)]

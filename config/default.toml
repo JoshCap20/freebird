@@ -27,8 +27,15 @@ allowed_shell_commands = ["ls", "cat", "grep", "head", "tail", "wc"]
 max_shell_output_bytes = 1048576
 
 [memory]
-kind = "file"
-base_dir = "~/.freebird/conversations"
+db_path = "~/.freebird/freebird.db"
+# keyfile_path = "~/.freebird/db.key"
+# pbkdf2_iterations = 100000
+
+[knowledge]
+auto_retrieve = true
+max_context_entries = 5
+relevance_threshold = -0.5
+max_context_tokens = 2000
 
 [security]
 max_tool_calls_per_turn = 25

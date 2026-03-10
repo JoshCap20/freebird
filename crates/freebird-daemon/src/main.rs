@@ -263,14 +263,18 @@ fn validate_config(config: &AppConfig) -> Result<()> {
 }
 
 /// Initialize the file-based memory backend from config.
+///
+/// TODO(#68): Replace with `SQLite` backend in knowledge store implementation.
 async fn init_memory(config: &AppConfig) -> Result<FileMemory> {
-    let memory_dir = expand_tilde(
-        &config
-            .memory
-            .base_dir
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("~/.freebird/conversations")),
-    )?;
+    // Temporary: derive conversations dir from db_path parent or default.
+    // Will be replaced when SqliteMemory is implemented.
+    let base = config
+        .memory
+        .db_path
+        .as_ref()
+        .and_then(|p| p.parent().map(|parent| parent.join("conversations")))
+        .unwrap_or_else(|| PathBuf::from("~/.freebird/conversations"));
+    let memory_dir = expand_tilde(&base)?;
     tokio::task::spawn_blocking(move || FileMemory::new(memory_dir))
         .await
         .context("file memory init task panicked")?
@@ -385,7 +389,6 @@ sandbox_root = "/tmp"
 default_timeout_secs = 10
 
 [memory]
-kind = "file"
 
 [security]
 max_tool_calls_per_turn = 10

@@ -38,8 +38,7 @@ sandbox_root = "/tmp/sandbox"
 default_timeout_secs = 30
 
 [memory]
-kind = "file"
-base_dir = "/tmp/conversations"
+db_path = "/tmp/freebird.db"
 
 [security]
 max_tool_calls_per_turn = 25
@@ -142,7 +141,6 @@ sandbox_root = "/tmp"
 default_timeout_secs = 30
 
 [memory]
-kind = "file"
 
 [security]
 max_tool_calls_per_turn = 25
@@ -187,7 +185,6 @@ sandbox_root = "/tmp"
 default_timeout_secs = 10
 
 [memory]
-kind = "file"
 
 [security]
 max_tool_calls_per_turn = 10
@@ -205,7 +202,7 @@ format = "pretty"
 
     assert!(config.runtime.system_prompt.is_none());
     assert!(config.runtime.temperature.is_none());
-    assert!(config.memory.base_dir.is_none());
+    assert!(config.memory.db_path.is_none());
     assert!(config.channels[0].prompt.is_none());
 }
 
