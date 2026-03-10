@@ -314,7 +314,7 @@ impl InputEditor {
     #[must_use]
     #[allow(dead_code)]
     pub fn height(&self) -> u16 {
-        u16::try_from(self.lines.len()).unwrap_or(1)
+        u16::try_from(self.lines.len()).unwrap_or(u16::MAX)
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────

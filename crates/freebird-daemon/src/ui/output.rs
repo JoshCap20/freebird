@@ -105,8 +105,11 @@ impl OutputRenderer {
     /// Prepare for output by clearing the input area line.
     ///
     /// Call this before writing any output to ensure the input prompt
-    /// doesn't get mixed with response text.
-    #[allow(clippy::unused_self)] // Method for API consistency within OutputRenderer
+    /// doesn't get mixed with response text. Takes `&self` (rather than
+    /// being a free function) so future enhancements can inspect renderer
+    /// state (e.g. multi-line input height) to clear the correct number
+    /// of lines.
+    #[allow(clippy::unused_self)] // Kept as method for future state-aware clearing
     pub fn clear_input_line<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
         queue!(w, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
 
