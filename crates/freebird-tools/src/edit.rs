@@ -432,26 +432,26 @@ fn format_diff_preview(
     // Context lines before the change
     for line_num in ctx_start..start_line {
         if let Some(text) = file_lines.get(line_num - 1) {
-            let _ = writeln!(out, "{line_num:>width$}│ {text}");
+            let _ = writeln!(out, "  {line_num:>width$}│ {text}");
         }
     }
 
     // Removed lines
     for (i, line) in old_lines.iter().enumerate() {
         let line_num = start_line + i;
-        let _ = writeln!(out, "{line_num:>width$}│-{line}");
+        let _ = writeln!(out, "- {line_num:>width$}│ {line}");
     }
 
     // Added lines
     for (i, line) in new_lines.iter().enumerate() {
         let line_num = start_line + i;
-        let _ = writeln!(out, "{line_num:>width$}│+{line}");
+        let _ = writeln!(out, "+ {line_num:>width$}│ {line}");
     }
 
     // Context lines after the change
     for line_num in (change_end + 1)..=ctx_end {
         if let Some(text) = file_lines.get(line_num - 1) {
-            let _ = writeln!(out, "{line_num:>width$}│ {text}");
+            let _ = writeln!(out, "  {line_num:>width$}│ {text}");
         }
     }
 
@@ -1547,8 +1547,16 @@ mod tests {
             .unwrap();
 
         // Output must contain removed and added lines
-        assert!(output.content.contains("│-ddd"), "missing removed line");
-        assert!(output.content.contains("│+DDD"), "missing added line");
+        assert!(output.content.contains("- "), "missing removed line marker");
+        assert!(output.content.contains("+ "), "missing added line marker");
+        assert!(
+            output.content.contains("│ ddd"),
+            "missing removed line content"
+        );
+        assert!(
+            output.content.contains("│ DDD"),
+            "missing added line content"
+        );
     }
 
     #[tokio::test]
@@ -1616,12 +1624,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(output.content.contains("│-ccc"), "missing -ccc");
-        assert!(output.content.contains("│-ddd"), "missing -ddd");
-        assert!(output.content.contains("│-eee"), "missing -eee");
-        assert!(output.content.contains("│+CCC"), "missing +CCC");
-        assert!(output.content.contains("│+DDD"), "missing +DDD");
-        assert!(output.content.contains("│+EEE"), "missing +EEE");
+        assert!(output.content.contains("│ ccc"), "missing -ccc");
+        assert!(output.content.contains("│ ddd"), "missing -ddd");
+        assert!(output.content.contains("│ eee"), "missing -eee");
+        assert!(output.content.contains("│ CCC"), "missing +CCC");
+        assert!(output.content.contains("│ DDD"), "missing +DDD");
+        assert!(output.content.contains("│ EEE"), "missing +EEE");
     }
 
     #[tokio::test]
@@ -1644,8 +1652,8 @@ mod tests {
 
         // Single-line change: exactly 1 removed, 1 added
         let lines: Vec<&str> = output.content.lines().collect();
-        let minus_count = lines.iter().filter(|l| l.contains("│-")).count();
-        let plus_count = lines.iter().filter(|l| l.contains("│+")).count();
+        let minus_count = lines.iter().filter(|l| l.contains("- ")).count();
+        let plus_count = lines.iter().filter(|l| l.contains("+ ")).count();
         assert_eq!(minus_count, 1, "single line edit should have 1 minus line");
         assert_eq!(plus_count, 1, "single line edit should have 1 plus line");
     }
@@ -1669,8 +1677,8 @@ mod tests {
             .unwrap();
 
         let lines: Vec<&str> = output.content.lines().collect();
-        let minus_count = lines.iter().filter(|l| l.contains("│-")).count();
-        let plus_count = lines.iter().filter(|l| l.contains("│+")).count();
+        let minus_count = lines.iter().filter(|l| l.contains("- ")).count();
+        let plus_count = lines.iter().filter(|l| l.contains("+ ")).count();
         assert_eq!(minus_count, 2, "deletion should show 2 minus lines");
         assert_eq!(plus_count, 0, "deletion should show no plus lines");
     }
@@ -1695,8 +1703,8 @@ mod tests {
 
         // old "bbb" is replaced by "bbb\nnew1\nnew2", so 1 minus and 3 plus
         let lines: Vec<&str> = output.content.lines().collect();
-        let minus_count = lines.iter().filter(|l| l.contains("│-")).count();
-        let plus_count = lines.iter().filter(|l| l.contains("│+")).count();
+        let minus_count = lines.iter().filter(|l| l.contains("- ")).count();
+        let plus_count = lines.iter().filter(|l| l.contains("+ ")).count();
         assert_eq!(
             minus_count, 1,
             "insertion should show 1 minus line (old bbb)"
@@ -1728,11 +1736,11 @@ mod tests {
 
         // The diff should show the removed line at line 3
         assert!(
-            output.content.contains("3│-line3"),
+            output.content.contains("- 3│ line3"),
             "line number 3 should prefix removed line"
         );
         assert!(
-            output.content.contains("3│+LINE3"),
+            output.content.contains("+ 3│ LINE3"),
             "line number 3 should prefix added line"
         );
     }
@@ -1760,11 +1768,11 @@ mod tests {
 
         // Should just have the summary line, no diff markers
         assert!(
-            !output.content.contains("│-"),
+            !output.content.contains("- "),
             "disabled should have no diff markers"
         );
         assert!(
-            !output.content.contains("│+"),
+            !output.content.contains("+ "),
             "disabled should have no diff markers"
         );
         assert!(
