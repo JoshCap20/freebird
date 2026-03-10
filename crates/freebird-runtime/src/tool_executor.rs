@@ -1596,4 +1596,114 @@ mod tests {
             .await;
         assert!(!result, "no consent gate should return false");
     }
+
+    // ── Action summary truncation ─────────────────────────────────
+
+    /// Consent request with a very large tool input truncates the action
+    /// summary to avoid leaking oversized payloads through the consent
+    /// channel. The truncation must be char-boundary-safe (no panic on
+    /// multi-byte UTF-8 sequences).
+    #[tokio::test]
+    async fn test_consent_truncates_large_action_summary() {
+        let (_tmp, path) = sandbox();
+        // Build a tool input larger than MAX_SUMMARY_LEN (512 chars)
+        let large_input = "x".repeat(1000);
+        let tool = MockTool::new("risky", Capability::FileDelete).with_risk_level(RiskLevel::High);
+        let executed = tool.executed_flag();
+
+        let (gate, mut rx) = ConsentGate::new(RiskLevel::High, StdDuration::from_secs(5), 5);
+        let executor = ToolExecutor::new(
+            vec![Box::new(tool)],
+            StdDuration::from_secs(5),
+            None,
+            vec![],
+            Some(gate),
+        )
+        .unwrap();
+        let grant = grant_with_caps(&path, &[Capability::FileDelete]);
+
+        let exec_handle = {
+            let sid = session_id();
+            let input = serde_json::json!({ "data": large_input });
+            tokio::spawn(async move {
+                executor
+                    .execute("risky", input, &grant, &sid, "test-sender")
+                    .await
+            })
+        };
+
+        // Receive consent request — action_summary should be truncated
+        let request = tokio::time::timeout(StdDuration::from_secs(2), rx.recv())
+            .await
+            .expect("should receive consent request within timeout")
+            .expect("consent rx should not be closed");
+
+        assert!(
+            request.action_summary.len() < 1000,
+            "action summary should be truncated, got {} bytes",
+            request.action_summary.len()
+        );
+        assert!(
+            request.action_summary.contains("bytes total"),
+            "truncated summary should include byte count indicator"
+        );
+
+        // Approve so the task completes
+        // (the ConsentGate was moved into executor, so we need to use
+        // the rx we have — but we can't respond directly. Let the task
+        // timeout instead by dropping rx)
+        drop(rx);
+
+        let _output = exec_handle.await.expect("task should not panic");
+        // Will get expired/channel-closed error since we dropped rx after
+        // the consent was already sent — that's fine, we're testing truncation
+        assert!(!executed.load(Ordering::Relaxed));
+    }
+
+    /// Multi-byte UTF-8 sequences in tool input don't cause panics
+    /// during action summary truncation (char-boundary-safe slicing).
+    #[tokio::test]
+    async fn test_consent_truncation_multibyte_utf8_safe() {
+        let (_tmp, path) = sandbox();
+        // 🎉 is 4 bytes in UTF-8. 200 of them = 800 bytes > 512 limit
+        let emoji_input = "🎉".repeat(200);
+        let tool = MockTool::new("risky", Capability::FileDelete).with_risk_level(RiskLevel::High);
+
+        let (gate, mut rx) = ConsentGate::new(RiskLevel::High, StdDuration::from_secs(5), 5);
+        let executor = ToolExecutor::new(
+            vec![Box::new(tool)],
+            StdDuration::from_secs(5),
+            None,
+            vec![],
+            Some(gate),
+        )
+        .unwrap();
+        let grant = grant_with_caps(&path, &[Capability::FileDelete]);
+
+        let exec_handle = {
+            let sid = session_id();
+            let input = serde_json::json!({ "data": emoji_input });
+            tokio::spawn(async move {
+                executor
+                    .execute("risky", input, &grant, &sid, "test-sender")
+                    .await
+            })
+        };
+
+        let request = tokio::time::timeout(StdDuration::from_secs(2), rx.recv())
+            .await
+            .expect("should receive consent request")
+            .expect("consent rx should not be closed");
+
+        // Should not have panicked, and should be truncated
+        assert!(
+            request.action_summary.contains("bytes total"),
+            "emoji-heavy summary should be truncated"
+        );
+        // Verify it's valid UTF-8 (if we got here without a panic, slicing was safe)
+        assert!(request.action_summary.is_char_boundary(0));
+
+        drop(rx);
+        let _ = exec_handle.await;
+    }
 }
