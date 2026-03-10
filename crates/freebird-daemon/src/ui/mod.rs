@@ -360,9 +360,10 @@ impl TtyChat {
         self.writer.flush()
     }
 
-    /// Save the input area (clear the current prompt line) before writing output.
+    /// Clear the full input area (including wrapped/multi-line rows) before
+    /// writing output so that stale content doesn't remain on screen.
     fn save_input_area(&mut self) -> std::io::Result<()> {
-        self.output.clear_input_line(&mut self.writer)
+        self.input.clear_visual_area(&mut self.writer)
     }
 }
 

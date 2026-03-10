@@ -47,6 +47,10 @@ pub struct InputEditor {
     completer: CommandCompleter,
     /// Whether the previous key was Ctrl+C (for double-Ctrl+C quit).
     last_was_ctrl_c: bool,
+    /// The cursor's visual row from the top of the input area after the
+    /// last `render()` call. Used to navigate back to the top on re-render
+    /// or clear.
+    last_cursor_visual_row: u16,
 }
 
 impl InputEditor {
@@ -63,6 +67,7 @@ impl InputEditor {
             term_width,
             completer: CommandCompleter::new(),
             last_was_ctrl_c: false,
+            last_cursor_visual_row: 0,
         }
     }
 
@@ -231,29 +236,35 @@ impl InputEditor {
 
     /// Render the input area to the writer.
     ///
-    /// This clears and redraws the input area in place. The cursor is left
-    /// at the correct position within the editor.
-    pub fn render<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
+    /// Clears the entire previous input area (including wrapped rows and
+    /// multi-line content), redraws prompt + text, and positions the cursor.
+    pub fn render<W: Write>(&mut self, w: &mut W) -> std::io::Result<()> {
         use crossterm::queue;
-        // Move to beginning of input area and clear
-        queue!(w, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
 
-        // Draw the prompt
+        let prompt_width = 3u16; // "> " = 3 chars
+
+        // Move from the cursor's last visual position to the top of the
+        // input area, then clear everything from there to the bottom of
+        // the screen. This erases all stale wrapped/multi-line rows.
+        if self.last_cursor_visual_row > 0 {
+            queue!(w, MoveUp(self.last_cursor_visual_row))?;
+        }
+        queue!(w, MoveToColumn(0), Clear(ClearType::FromCursorDown))?;
+
+        // Draw the prompt.
         theme::write_prompt_styled(w)?;
 
-        // Draw the input text
-        let prompt_width = 3u16; // "> " = 3 chars
+        // Draw the input text.
         for (i, line) in self.lines.iter().enumerate() {
             if i > 0 {
                 writeln!(w)?;
-                queue!(w, Clear(ClearType::CurrentLine))?;
-                // Indent continuation lines to align with prompt
+                // Indent continuation lines to align with prompt.
                 write!(w, "   ")?;
             }
             write!(w, "{line}")?;
         }
 
-        // Draw completion hint (dim text after cursor)
+        // Draw completion hint (dim text after cursor).
         if self.lines.len() == 1 {
             let input = self.content();
             if let Some(hint) = self.completer.hint(&input) {
@@ -267,34 +278,40 @@ impl InputEditor {
             }
         }
 
-        // Position cursor correctly, accounting for visual line wrapping.
+        // ── Cursor positioning ──────────────────────────────────────────
+        // Compute the cursor's visual row from the top of the input area.
         let cursor_indent = if self.cursor_row == 0 {
             prompt_width
         } else {
             3u16
         };
-
-        // Compute visual rows below cursor (wrapped lines count as multiple rows).
-        let mut visual_below: u16 = 0;
-        // Rows from the cursor line itself that are below the cursor position.
         let cursor_col_u16 = u16::try_from(self.cursor_col).unwrap_or(u16::MAX);
-        let full_line_chars = u16::try_from(self.current_line_len()).unwrap_or(u16::MAX);
-        let cursor_line_rows = visual_rows(cursor_indent, full_line_chars, self.term_width);
-        let cursor_visual_row = if self.term_width > 0 {
-            cursor_indent.saturating_add(cursor_col_u16) / self.term_width
-        } else {
-            0
-        };
-        visual_below =
-            visual_below.saturating_add(cursor_line_rows.saturating_sub(cursor_visual_row + 1));
 
-        // Rows from lines below the cursor row.
-        for i in (self.cursor_row + 1)..self.lines.len() {
+        let mut cursor_visual_row: u16 = 0;
+        // Add visual rows from lines above the cursor row.
+        for i in 0..self.cursor_row {
+            let indent = if i == 0 { prompt_width } else { 3u16 };
             let chars = u16::try_from(self.lines.get(i).map_or(0, |l| l.chars().count()))
                 .unwrap_or(u16::MAX);
-            visual_below = visual_below.saturating_add(visual_rows(3, chars, self.term_width));
+            cursor_visual_row =
+                cursor_visual_row.saturating_add(visual_rows(indent, chars, self.term_width));
+        }
+        // Add wrapped rows within the cursor's own line.
+        if self.term_width > 0 {
+            cursor_visual_row += cursor_indent.saturating_add(cursor_col_u16) / self.term_width;
         }
 
+        // Compute total visual rows for all content.
+        let mut total_visual_rows: u16 = 0;
+        for (i, line) in self.lines.iter().enumerate() {
+            let indent = if i == 0 { prompt_width } else { 3u16 };
+            let chars = u16::try_from(line.chars().count()).unwrap_or(u16::MAX);
+            total_visual_rows =
+                total_visual_rows.saturating_add(visual_rows(indent, chars, self.term_width));
+        }
+
+        // Move up from the bottom of the rendered content to the cursor row.
+        let visual_below = total_visual_rows.saturating_sub(cursor_visual_row + 1);
         if visual_below > 0 {
             queue!(w, MoveUp(visual_below))?;
         }
@@ -307,6 +324,23 @@ impl InputEditor {
         };
         queue!(w, MoveToColumn(col_offset))?;
 
+        // Remember cursor position for the next render/clear.
+        self.last_cursor_visual_row = cursor_visual_row;
+
+        w.flush()
+    }
+
+    /// Clear the entire visual area occupied by the input and reset tracking.
+    ///
+    /// Call this before writing output above the input area (e.g. server
+    /// responses) so that stale wrapped/multi-line rows are erased.
+    pub fn clear_visual_area<W: Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        use crossterm::queue;
+        if self.last_cursor_visual_row > 0 {
+            queue!(w, MoveUp(self.last_cursor_visual_row))?;
+        }
+        queue!(w, MoveToColumn(0), Clear(ClearType::FromCursorDown))?;
+        self.last_cursor_visual_row = 0;
         w.flush()
     }
 

@@ -5,10 +5,6 @@
 
 use std::io::Write;
 
-use crossterm::cursor::MoveToColumn;
-use crossterm::queue;
-use crossterm::terminal::{Clear, ClearType};
-
 use super::theme;
 
 /// Tracks state for rendering server output.
@@ -100,20 +96,6 @@ impl OutputRenderer {
     pub const fn turn_complete(&mut self) {
         self.in_stream = false;
         self.prefix_printed = false;
-    }
-
-    /// Prepare for output by clearing the input area line.
-    ///
-    /// Call this before writing any output to ensure the input prompt
-    /// doesn't get mixed with response text. Takes `&self` (rather than
-    /// being a free function) so future enhancements can inspect renderer
-    /// state (e.g. multi-line input height) to clear the correct number
-    /// of lines.
-    #[allow(clippy::unused_self)] // Kept as method for future state-aware clearing
-    pub fn clear_input_line<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
-        queue!(w, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
-
-        w.flush()
     }
 }
 
