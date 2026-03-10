@@ -67,3 +67,7 @@ define_id!(
     /// Identifies a specific model offered by a provider.
     ModelId
 );
+define_id!(
+    /// Identifies a knowledge entry in the knowledge store.
+    KnowledgeId
+);

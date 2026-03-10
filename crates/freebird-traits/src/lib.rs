@@ -11,6 +11,7 @@
 
 pub mod channel;
 pub mod id;
+pub mod knowledge;
 pub mod memory;
 pub mod provider;
 pub mod tool;
