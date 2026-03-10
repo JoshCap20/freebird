@@ -214,6 +214,10 @@ pub struct SecurityConfig {
     /// Network egress policy. Controls which hosts the agent can contact.
     #[serde(default)]
     pub egress: EgressConfig,
+    /// Secret guard policy. Controls detection and action for tool
+    /// invocations that may access or expose secrets.
+    #[serde(default)]
+    pub secret_guard: SecretGuardConfig,
 }
 
 /// Network egress allowlist configuration (CLAUDE.md §12 — ASI01).
@@ -260,6 +264,66 @@ const fn default_egress_max_response_bytes() -> usize {
 
 const fn default_egress_request_timeout_secs() -> u64 {
     30
+}
+
+/// What action the secret guard takes when a sensitive input is detected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretGuardAction {
+    /// Escalate to consent gate with `RiskLevel::Critical` — the user must
+    /// explicitly approve the access.
+    Consent,
+    /// Deny outright without prompting. Use in headless/automated deployments.
+    Block,
+}
+
+/// Secret guard configuration — detects and gates tool invocations that
+/// access sensitive files, run secret-revealing commands, or produce output
+/// containing credentials.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretGuardConfig {
+    /// Whether the secret guard is active. Default: `true`.
+    #[serde(default = "default_secret_guard_enabled")]
+    pub enabled: bool,
+    /// Action on detection. Default: `consent`.
+    #[serde(default = "default_secret_guard_action")]
+    pub action: SecretGuardAction,
+    /// Whether to redact detected secrets in tool output before returning
+    /// to the LLM context. Default: `true`.
+    #[serde(default = "default_secret_guard_redact_output")]
+    pub redact_output: bool,
+    /// Additional file patterns to treat as sensitive (glob syntax).
+    /// Merged with built-in patterns.
+    #[serde(default)]
+    pub extra_sensitive_file_patterns: Vec<String>,
+    /// Additional shell command patterns to treat as sensitive (regex syntax).
+    /// Merged with built-in patterns.
+    #[serde(default)]
+    pub extra_sensitive_command_patterns: Vec<String>,
+}
+
+impl Default for SecretGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_secret_guard_enabled(),
+            action: default_secret_guard_action(),
+            redact_output: default_secret_guard_redact_output(),
+            extra_sensitive_file_patterns: Vec::new(),
+            extra_sensitive_command_patterns: Vec::new(),
+        }
+    }
+}
+
+const fn default_secret_guard_enabled() -> bool {
+    true
+}
+
+const fn default_secret_guard_action() -> SecretGuardAction {
+    SecretGuardAction::Consent
+}
+
+const fn default_secret_guard_redact_output() -> bool {
+    true
 }
 
 const fn default_consent_timeout_secs() -> u64 {
@@ -797,5 +861,97 @@ drain_timeout_secs = 1"#,
         assert!(config.knowledge.auto_retrieve);
         assert_eq!(config.knowledge.max_context_entries, 5);
         assert_eq!(config.knowledge.max_context_tokens, 2000);
+    }
+
+    // ── Secret guard config tests ─────────────────────────────────
+
+    #[test]
+    fn test_secret_guard_defaults_when_absent() {
+        let toml_str = config_toml(&[]);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert!(config.security.secret_guard.enabled);
+        assert_eq!(
+            config.security.secret_guard.action,
+            SecretGuardAction::Consent
+        );
+        assert!(config.security.secret_guard.redact_output);
+        assert!(
+            config
+                .security
+                .secret_guard
+                .extra_sensitive_file_patterns
+                .is_empty()
+        );
+        assert!(
+            config
+                .security
+                .secret_guard
+                .extra_sensitive_command_patterns
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_secret_guard_explicit_values() {
+        let toml_str = config_toml(&[(
+            "security",
+            "max_tool_calls_per_turn = 25\nrequire_consent_above = \"high\"\n\n[security.secret_guard]\nenabled = false\naction = \"block\"\nredact_output = false\nextra_sensitive_file_patterns = [\"*.secret\"]\nextra_sensitive_command_patterns = [\"^myutil\"]",
+        )]);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert!(!config.security.secret_guard.enabled);
+        assert_eq!(
+            config.security.secret_guard.action,
+            SecretGuardAction::Block
+        );
+        assert!(!config.security.secret_guard.redact_output);
+        assert_eq!(
+            config.security.secret_guard.extra_sensitive_file_patterns,
+            vec!["*.secret"]
+        );
+        assert_eq!(
+            config
+                .security
+                .secret_guard
+                .extra_sensitive_command_patterns,
+            vec!["^myutil"]
+        );
+    }
+
+    #[test]
+    fn test_secret_guard_from_default_toml() {
+        let toml_str = include_str!("../../../config/default.toml");
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.security.secret_guard.enabled);
+        assert_eq!(
+            config.security.secret_guard.action,
+            SecretGuardAction::Consent
+        );
+        assert!(config.security.secret_guard.redact_output);
+    }
+
+    #[test]
+    fn test_secret_guard_action_serde_roundtrip() {
+        for (action, expected_json) in [
+            (SecretGuardAction::Consent, "\"consent\""),
+            (SecretGuardAction::Block, "\"block\""),
+        ] {
+            let json = serde_json::to_string(&action).unwrap();
+            assert_eq!(json, expected_json);
+            let back: SecretGuardAction = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, action);
+        }
+    }
+
+    #[test]
+    fn test_secret_guard_invalid_action_errors() {
+        let toml_str = config_toml(&[(
+            "security",
+            "max_tool_calls_per_turn = 25\nrequire_consent_above = \"high\"\n\n[security.secret_guard]\naction = \"ignore\"",
+        )]);
+        let result = toml::from_str::<AppConfig>(&toml_str);
+        assert!(
+            result.is_err(),
+            "invalid secret guard action should fail deserialization"
+        );
     }
 }
