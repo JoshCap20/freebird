@@ -239,6 +239,7 @@ impl ToolExecutor {
             sandbox_root: grant.sandbox_root(),
             granted_capabilities: &caps_vec,
             allowed_directories: &self.allowed_directories,
+            knowledge_store: None,
         };
 
         let output =

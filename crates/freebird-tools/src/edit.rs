@@ -601,6 +601,7 @@ mod tests {
                 sandbox_root: &self.sandbox,
                 granted_capabilities: &self.capabilities,
                 allowed_directories: &self.allowed_directories,
+                knowledge_store: None,
             }
         }
     }

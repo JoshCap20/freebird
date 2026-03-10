@@ -93,7 +93,6 @@ pub struct ToolInfo {
 /// The runtime verifies capability grants and logs audit events before
 /// calling `Tool::execute`. This context provides sandbox boundaries and
 /// the granted capabilities for tools that need sub-capability checks.
-#[derive(Debug)]
 pub struct ToolContext<'a> {
     pub session_id: &'a SessionId,
     pub sandbox_root: &'a Path,
@@ -101,6 +100,20 @@ pub struct ToolContext<'a> {
     /// Additional directories beyond `sandbox_root` that tools may access.
     /// Absolute paths provided by the user via `--allow-dir`.
     pub allowed_directories: &'a [PathBuf],
+    /// Knowledge store for knowledge tools. `None` if not configured.
+    pub knowledge_store: Option<&'a dyn crate::knowledge::KnowledgeStore>,
+}
+
+impl std::fmt::Debug for ToolContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolContext")
+            .field("session_id", &self.session_id)
+            .field("sandbox_root", &self.sandbox_root)
+            .field("granted_capabilities", &self.granted_capabilities)
+            .field("allowed_directories", &self.allowed_directories)
+            .field("knowledge_store", &self.knowledge_store.is_some())
+            .finish()
+    }
 }
 
 /// The result of a tool execution.

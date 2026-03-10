@@ -313,6 +313,7 @@ mod tests {
                 sandbox_root: &self.sandbox,
                 granted_capabilities: &self.capabilities,
                 allowed_directories: &[],
+                knowledge_store: None,
             }
         }
     }
@@ -815,12 +816,14 @@ mod tests {
             sandbox_root: tmp1.path(),
             granted_capabilities: &caps,
             allowed_directories: &[],
+            knowledge_store: None,
         };
         let ctx2 = ToolContext {
             session_id: &sid,
             sandbox_root: tmp2.path(),
             granted_capabilities: &caps,
             allowed_directories: &[],
+            knowledge_store: None,
         };
 
         let (out1, out2) = tokio::join!(

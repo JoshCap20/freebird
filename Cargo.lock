@@ -525,6 +525,7 @@ name = "freebird-tools"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "freebird-security",
  "freebird-traits",
  "freebird-types",
@@ -536,6 +537,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uuid",
  "wiremock",
 ]
 
