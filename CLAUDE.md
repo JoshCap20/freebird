@@ -92,6 +92,7 @@ freebird-daemon          (depends on: ALL — composition root)
 | Logging | `tracing`, `tracing-subscriber` | Structured, async-aware |
 | HTTP client | `reqwest` + `rustls-tls` | **NEVER openssl** |
 | Crypto | `ring` | Hashing, HMAC, random |
+| Database | `rusqlite` (`bundled-sqlcipher`) | SQLCipher AES-256 + FTS5, no system OpenSSL |
 | Secrets | `secrecy` | Zeroize + redact in Debug |
 | Config | `figment` (toml, env) | Layered config sources |
 | Time | `chrono` | Timestamps |
@@ -267,13 +268,14 @@ See `crates/freebird-runtime/src/agent.rs` for the full implementation.
 2. **Taint** raw input: `Tainted::new(&raw_text)`
 3. **Sanitize** via `SafeMessage::from_tainted()` — rejects injection patterns, enforces length
 4. **Load or create** conversation from memory backend
-5. **Build** `CompletionRequest` with conversation history + tool definitions
-6. **Agentic loop** (up to `max_tool_rounds`):
+5. **Retrieve** relevant knowledge via FTS5 search (if `knowledge.auto_retrieve` enabled)
+6. **Build** `CompletionRequest` with conversation history + knowledge context + tool definitions
+7. **Agentic loop** (up to `max_tool_rounds`):
    - Call provider (`complete_with_failover`)
    - If `StopReason::ToolUse` → execute tools via `ToolExecutor`, wrap output in `ScannedToolOutput::from_raw()`, append results, continue loop
    - If `StopReason::EndTurn` → wrap response in `ScannedModelResponse::from_raw()`, deliver to channel, break
    - If `StopReason::MaxTokens` → deliver truncated response, break
-7. **Persist** conversation to memory
+8. **Persist** conversation to memory
 
 ### Key Invariants
 
@@ -322,6 +324,15 @@ Each safe type is constructed from `Tainted` via a factory that validates + sani
 | `ScannedModelResponse` | Blocks injection before model output reaches user | `OutboundEvent::Error` sent; response NOT saved to memory |
 
 Both are constructed via `::from_raw(content)` which calls `injection::scan_output()`. Enforcement happens in `freebird-runtime` (the agentic loop), not at the trait level.
+
+### Database Key Derivation
+
+See `crates/freebird-security/src/db_key.rs`.
+
+- `resolve_passphrase(keyfile, allow_prompt)` — resolves encryption key: `FREEBIRD_DB_KEY` env var → keyfile contents → interactive prompt
+- `derive_key(passphrase, salt, iterations)` — PBKDF2-HMAC-SHA256 with configurable iterations (default 100k)
+- `load_or_create_salt(path)` — persistent per-database random salt (32 bytes from `SystemRandom`)
+- Key wrapped in `SecretString` — zeroized on drop, never logged, never in error messages
 
 ---
 
@@ -518,6 +529,17 @@ On budget exhaustion, returns a descriptive `SecurityError::BudgetExceeded` — 
 - Signature verified on every load — tampered files quarantined (moved to `quarantine/` directory), not loaded
 - HMAC key derived from server-side secret, never stored alongside conversation files
 
+### Encrypted Storage
+
+All persistent data lives in a single SQLCipher-encrypted SQLite database:
+
+- **AES-256-CBC** page-level encryption — every page is encrypted, including the FTS5 index
+- **PBKDF2-HMAC-SHA256** key derivation with configurable iterations (default 100k)
+- **WAL mode** for crash resilience and concurrent read performance
+- Key verification on every open — wrong key returns `MemoryError::IntegrityViolation`
+- Schema migrations tracked in `schema_version` table with idempotent application
+- See `crates/freebird-memory/src/sqlite.rs` for `SqliteDb`, `crates/freebird-memory/src/sqlite_memory.rs` for `SqliteMemory`, `crates/freebird-memory/src/sqlite_knowledge.rs` for `SqliteKnowledgeStore`
+
 ### Context Injection Defense
 
 Before appending loaded conversation history to a provider request, `scan_context()` checks for content resembling system prompts or instruction overrides (e.g., "you are now", "new system prompt", ChatML markers `<|system|>`, `[INST]`, `<<SYS>>`).
@@ -597,6 +619,27 @@ See `crates/freebird-daemon/src/main.rs` and `crates/freebird-runtime/src/shutdo
 - **NEVER** hardcode secrets. **NEVER** log secrets. **NEVER** include secrets in error messages.
 
 See `config/default.toml` and `crates/freebird-types/src/config.rs` for typed config structs.
+
+### Memory Configuration
+
+```toml
+[memory]
+db_path = "~/.freebird/freebird.db"    # SQLCipher database path (~ expanded)
+keyfile_path = "~/.freebird/db.key"    # Encryption keyfile (optional)
+# pbkdf2_iterations = 100000           # Key derivation iterations (default: 100k)
+```
+
+Key resolution order: `FREEBIRD_DB_KEY` env var → keyfile at `keyfile_path` → interactive prompt. A random salt is stored alongside the database (`*.salt` file).
+
+### Knowledge Configuration
+
+```toml
+[knowledge]
+auto_retrieve = true          # Auto-inject relevant knowledge on every message
+max_context_entries = 5       # Max entries injected per turn
+relevance_threshold = -0.5    # BM25 rank cutoff (lower = more permissive)
+max_context_tokens = 2000     # Token budget for injected context
+```
 
 ---
 
@@ -761,6 +804,24 @@ Run `cargo fmt` on save. Treat clippy warnings as errors.
 - [ ] No `std::sync::Mutex` in async code
 - [ ] No locks held across `.await`
 - [ ] Graceful shutdown with drain timeout
+
+### Database Security
+
+- [ ] Database encrypted with SQLCipher AES-256-CBC
+- [ ] Key derived via PBKDF2-HMAC-SHA256 (>=100k iterations)
+- [ ] Key wrapped in `SecretString` — zeroized on drop
+- [ ] Key never logged, never in error messages
+- [ ] Key verification on every database open
+- [ ] Salt persisted per-database, not derived from passphrase alone
+- [ ] WAL mode enabled for crash resilience
+- [ ] FTS5 index encrypted alongside content (same DB file)
+
+### Knowledge Store Security
+
+- [ ] Sensitive content filter blocks credential/secret storage
+- [ ] Knowledge entries pass through taint boundary before storage
+- [ ] Auto-retrieval respects token budget limits
+- [ ] Knowledge tools require `KnowledgeStore` in `ToolContext`
 
 ### Dependencies
 

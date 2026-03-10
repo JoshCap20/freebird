@@ -29,6 +29,7 @@ use freebird_runtime::shutdown::ShutdownCoordinator;
 use freebird_types::config::AppConfig;
 
 mod chat;
+mod migrate;
 mod providers;
 mod tools;
 mod ui;
@@ -72,6 +73,7 @@ async fn main() -> Result<()> {
 }
 
 /// `freebird serve` — start daemon with TCP channel.
+#[allow(clippy::too_many_lines)] // composition root — naturally long
 async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
     // 1. LOGGING — before anything else, so config errors are visible.
     // Intentional silent fallback: if RUST_LOG is absent or unparseable, default
@@ -99,7 +101,30 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
     ));
 
     // 6. MEMORY — SQLite with SQLCipher encryption
-    let (memory, knowledge_store) = init_sqlite(&config)?;
+    let (memory, knowledge_store, db) = init_sqlite(&config)?;
+
+    // 6b. MIGRATION — one-time FileMemory → SQLite migration
+    if let Some(legacy_dir) = home::home_dir().map(|h| h.join(".freebird/conversations")) {
+        if legacy_dir.is_dir() {
+            let report = migrate::migrate_file_conversations(&db, &legacy_dir)
+                .await
+                .context("FileMemory migration failed")?;
+            if report.migrated > 0 {
+                tracing::info!(
+                    migrated = report.migrated,
+                    skipped = report.skipped,
+                    "FileMemory → SQLite migration complete"
+                );
+            }
+            if !report.failed.is_empty() {
+                tracing::warn!(
+                    failed_count = report.failed.len(),
+                    failed_files = ?report.failed,
+                    "FileMemory migration had failures; originals remain in legacy directory"
+                );
+            }
+        }
+    }
 
     // 7. TOOLS — build registry before moving config.tools
     let tool_registry =
@@ -265,17 +290,19 @@ fn validate_config(config: &AppConfig) -> Result<()> {
     Ok(())
 }
 
+/// Result of [`init_sqlite`]: memory backend, optional knowledge store, and raw DB handle.
+type SqliteComponents = (
+    SqliteMemory,
+    Option<std::sync::Arc<dyn freebird_traits::knowledge::KnowledgeStore>>,
+    std::sync::Arc<freebird_memory::sqlite::SqliteDb>,
+);
+
 /// Initialize the `SQLite`-backed memory and knowledge store.
 ///
 /// Opens (or creates) an encrypted `SQLCipher` database, derives the key via
 /// PBKDF2-HMAC-SHA256, and returns both `SqliteMemory` and an `Arc`-wrapped
 /// `SqliteKnowledgeStore` for injection into the `ToolExecutor`.
-fn init_sqlite(
-    config: &AppConfig,
-) -> Result<(
-    SqliteMemory,
-    Option<std::sync::Arc<dyn freebird_traits::knowledge::KnowledgeStore>>,
-)> {
+fn init_sqlite(config: &AppConfig) -> Result<SqliteComponents> {
     use std::sync::Arc;
 
     let db_path = config
@@ -311,9 +338,9 @@ fn init_sqlite(
 
     let memory = SqliteMemory::new(Arc::clone(&db));
     let knowledge: Arc<dyn freebird_traits::knowledge::KnowledgeStore> =
-        Arc::new(SqliteKnowledgeStore::new(db));
+        Arc::new(SqliteKnowledgeStore::new(Arc::clone(&db)));
 
-    Ok((memory, Some(knowledge)))
+    Ok((memory, Some(knowledge), db))
 }
 
 /// Merge CLI `--allow-dir` flags into the tools configuration.

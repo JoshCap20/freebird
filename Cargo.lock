@@ -429,6 +429,7 @@ dependencies = [
  "futures",
  "home",
  "reqwest",
+ "rusqlite",
  "secrecy",
  "serde_json",
  "tempfile",

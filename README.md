@@ -44,6 +44,29 @@ Every action — user messages, tool invocations, approval decisions, pairing ev
 
 Persisted conversations are HMAC-signed. On every load, the signature is verified. Tampered conversation files are quarantined automatically — they never reach the LLM context. This defends against the memory poisoning attacks described in OWASP ASI-06.
 
+### Encrypted Database Storage
+
+All persistent data — conversations, knowledge entries, and full-text search indexes — is stored in a single SQLCipher-encrypted SQLite database. Encryption is AES-256-CBC at the page level, transparent to application code.
+
+| Property | Detail |
+|----------|--------|
+| Cipher | AES-256-CBC (SQLCipher) |
+| Key derivation | PBKDF2-HMAC-SHA256, 100k iterations (configurable) |
+| Key sources | `FREEBIRD_DB_KEY` env var → keyfile → interactive prompt |
+| Key handling | `secrecy::SecretString` — zeroized on drop, redacted in Debug |
+| Journal mode | WAL (crash-resilient, concurrent reads) |
+
+The encryption key is never logged, never included in error messages, and never stored alongside the database.
+
+### Knowledge Store
+
+Freebird maintains a long-term knowledge store that persists facts, preferences, and learnings across sessions. Knowledge is stored in the encrypted database with FTS5 full-text search (BM25-ranked, porter stemmer tokenizer).
+
+- **6 knowledge kinds**: `fact`, `preference`, `learned_pattern`, `correction`, `context`, `reference` — each classified as agent-owned or protected
+- **Sensitive content filter**: Blocks storage of API keys, passwords, PEM blocks, and other credential material
+- **Auto-retrieval**: Relevant knowledge is injected into every conversation turn (configurable threshold and token budget)
+- **4 tools**: `store_knowledge`, `search_knowledge`, `update_knowledge`, `delete_knowledge`
+
 ### Token Budget Enforcement
 
 Per-session, per-request, and per-turn token limits prevent runaway cost and resource exhaustion (OWASP ASI-08). Budgets are enforced with atomic counters — no race conditions, no silent overruns.
@@ -51,6 +74,18 @@ Per-session, per-request, and per-turn token limits prevent runaway cost and res
 ### Network Egress Control
 
 Outbound HTTP is deny-by-default. Only explicitly allowlisted hosts are reachable. Responses are size-capped, and resolved IPs are checked against private ranges to prevent DNS rebinding attacks.
+
+### Threat Model Summary
+
+| Trust Boundary | Trust Level | Key Mitigations |
+|----------------|-------------|-----------------|
+| User input | Untrusted | `Tainted` → `SafeMessage`, injection scanning |
+| LLM provider | Semi-trusted | Output scanning via `ScannedModelResponse`, capability system |
+| Tool output | Untrusted | `ScannedToolOutput`, injection scanning, sandbox |
+| Filesystem | Trusted-but-sandboxed | `SafeFilePath`, directory boundary enforcement |
+| Network | Hostile | Egress allowlist, DNS rebinding prevention, HTTPS only |
+| Stored data | Integrity-critical | SQLCipher encryption, HMAC signing |
+| Channel peers | Untrusted until paired | Cryptographic pairing, constant-time verification |
 
 ## Architecture
 
@@ -64,7 +99,7 @@ freebird-runtime     Agent loop, routing, token budgets
 freebird-providers   LLM integrations (Anthropic first)
 freebird-channels    Transport integrations (CLI first, Signal planned)
 freebird-tools       Built-in tool implementations
-freebird-memory      Conversation persistence with HMAC signing
+freebird-memory      SQLCipher-encrypted conversation + knowledge persistence with FTS5
 freebird-daemon      Binary entry point, config, lifecycle
 ```
 
