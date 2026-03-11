@@ -217,6 +217,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         config.knowledge,
         config.runtime,
         tools_config,
+        config.security.budgets,
         None, // audit logger — wired in a later issue
     );
 

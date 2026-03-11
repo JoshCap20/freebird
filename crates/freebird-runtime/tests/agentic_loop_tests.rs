@@ -40,7 +40,9 @@ use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
     ToolOutput,
 };
-use freebird_types::config::{EditConfig, KnowledgeConfig, RuntimeConfig, ToolsConfig};
+use freebird_types::config::{
+    BudgetConfig, EditConfig, KnowledgeConfig, RuntimeConfig, ToolsConfig,
+};
 
 use helpers::{
     MockChannel, QueuedProvider, ResponseFactory, default_config, default_tools_config, error_text,
@@ -376,6 +378,7 @@ fn make_test_runtime(
         KnowledgeConfig::default(),
         default_config(),
         default_tools_config(),
+        BudgetConfig::default(),
         None,
     )
 }
@@ -689,6 +692,7 @@ async fn test_tool_use_timeout() {
         KnowledgeConfig::default(),
         default_config(),
         tools_config,
+        BudgetConfig::default(),
         None,
     );
 
@@ -734,6 +738,11 @@ async fn test_tool_use_max_rounds_exceeded() {
         ..default_config()
     };
 
+    let budget_config = BudgetConfig {
+        max_tool_rounds_per_turn: 2,
+        ..BudgetConfig::default()
+    };
+
     let runtime = AgentRuntime::new(
         make_registry(provider.clone()),
         Box::new(channel),
@@ -744,6 +753,7 @@ async fn test_tool_use_max_rounds_exceeded() {
         KnowledgeConfig::default(),
         config,
         default_tools_config(),
+        budget_config,
         None,
     );
 
@@ -752,12 +762,12 @@ async fn test_tool_use_max_rounds_exceeded() {
     );
 
     assert_eq!(provider.call_count(), 2);
-    // Should get an error about max rounds
+    // Should get an error about max rounds or budget exceeded
     let err = events.first().expect("should have error event");
     let text = error_text(err).expect("should be Error variant");
     assert!(
-        text.contains("Maximum tool rounds exceeded"),
-        "expected max rounds error, got: {text}"
+        text.contains("Maximum tool rounds exceeded") || text.contains("Budget exceeded"),
+        "expected max rounds or budget exceeded error, got: {text}"
     );
 }
 
@@ -825,6 +835,7 @@ async fn test_conversation_saved_after_turn() {
         KnowledgeConfig::default(),
         default_config(),
         default_tools_config(),
+        BudgetConfig::default(),
         None,
     );
 
@@ -864,6 +875,7 @@ async fn test_tool_invocations_recorded_in_turn() {
         KnowledgeConfig::default(),
         default_config(),
         default_tools_config(),
+        BudgetConfig::default(),
         None,
     );
 
@@ -1003,6 +1015,7 @@ async fn test_tool_output_injection_replaced_with_error() {
         KnowledgeConfig::default(),
         default_config(),
         default_tools_config(),
+        BudgetConfig::default(),
         None,
     );
 
@@ -1053,6 +1066,7 @@ async fn test_model_output_injection_blocks_delivery() {
         KnowledgeConfig::default(),
         default_config(),
         default_tools_config(),
+        BudgetConfig::default(),
         None,
     );
 
@@ -1099,6 +1113,7 @@ async fn test_truncated_response_injection_blocks_delivery() {
         KnowledgeConfig::default(),
         default_config(),
         default_tools_config(),
+        BudgetConfig::default(),
         None,
     );
 
@@ -1170,6 +1185,7 @@ async fn test_memory_load_error_sends_error_event() {
         KnowledgeConfig::default(),
         default_config(),
         default_tools_config(),
+        BudgetConfig::default(),
         None,
     );
 
@@ -1206,6 +1222,7 @@ async fn test_memory_save_error_does_not_crash() {
         KnowledgeConfig::default(),
         default_config(),
         default_tools_config(),
+        BudgetConfig::default(),
         None,
     );
 
@@ -1302,6 +1319,7 @@ async fn test_continuing_session_includes_history_in_request() {
         KnowledgeConfig::default(),
         default_config(),
         default_tools_config(),
+        BudgetConfig::default(),
         None,
     );
 
@@ -1381,6 +1399,7 @@ async fn test_new_conversation_uses_config_values() {
         KnowledgeConfig::default(),
         config,
         default_tools_config(),
+        BudgetConfig::default(),
         None,
     );
 

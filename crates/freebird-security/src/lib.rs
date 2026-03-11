@@ -7,6 +7,7 @@
 
 pub mod audit;
 pub mod auth;
+pub mod budget;
 pub mod capability;
 pub mod consent;
 pub mod db_key;

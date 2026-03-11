@@ -44,7 +44,7 @@ use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
     ToolOutput,
 };
-use freebird_types::config::{KnowledgeConfig, RuntimeConfig};
+use freebird_types::config::{BudgetConfig, KnowledgeConfig, RuntimeConfig};
 
 use helpers::{default_tools_config, error_text, make_tool_executor, message_text};
 
@@ -510,6 +510,7 @@ fn make_stream_runtime(
         KnowledgeConfig::default(),
         default_config(),
         default_tools_config(),
+        BudgetConfig::default(),
         None,
     )
 }
@@ -685,6 +686,7 @@ async fn test_streaming_fallback_on_stream_setup_failure() {
             ..default_config()
         },
         default_tools_config(),
+        BudgetConfig::default(),
         None,
     );
 
@@ -720,6 +722,7 @@ async fn test_non_streaming_channel_uses_non_streaming_path() {
             ..default_config()
         },
         default_tools_config(),
+        BudgetConfig::default(),
         None,
     );
 
@@ -807,6 +810,7 @@ async fn test_streaming_conversation_persisted() {
         KnowledgeConfig::default(),
         default_config(),
         default_tools_config(),
+        BudgetConfig::default(),
         None,
     );
 
@@ -965,17 +969,20 @@ async fn test_streaming_max_tool_rounds_exceeded() {
             ..default_config()
         },
         default_tools_config(),
+        BudgetConfig {
+            max_tool_rounds_per_turn: 1,
+            ..BudgetConfig::default()
+        },
         None,
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Loop forever").await;
 
-    // Should get: StreamChunk + StreamEnd (tool round) + Error (max rounds)
-    assert!(
-        events
-            .iter()
-            .any(|e| { error_text(e).is_some_and(|t| t.contains("Maximum tool rounds")) })
-    );
+    // Should get: StreamChunk + StreamEnd (tool round) + Error (max rounds or budget exceeded)
+    assert!(events.iter().any(|e| {
+        error_text(e)
+            .is_some_and(|t| t.contains("Maximum tool rounds") || t.contains("Budget exceeded"))
+    }));
 }
 
 #[tokio::test]
@@ -1009,6 +1016,7 @@ async fn test_streaming_stop_sequence() {
         KnowledgeConfig::default(),
         default_config(),
         default_tools_config(),
+        BudgetConfig::default(),
         None,
     );
 
@@ -1100,6 +1108,7 @@ async fn test_non_streaming_provider_uses_complete_path() {
             ..default_config()
         },
         default_tools_config(),
+        BudgetConfig::default(),
         None,
     );
 
@@ -1142,6 +1151,7 @@ async fn test_streaming_empty_done() {
         KnowledgeConfig::default(),
         default_config(),
         default_tools_config(),
+        BudgetConfig::default(),
         None,
     );
 

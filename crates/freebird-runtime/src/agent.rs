@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use freebird_security::audit::{AuditEventType, AuditLogger, InjectionSource};
+use freebird_security::budget::TokenBudget;
 use freebird_security::capability::CapabilityGrant;
 use freebird_security::consent::ConsentRequest;
 use freebird_security::error::Severity;
@@ -27,7 +28,7 @@ use freebird_traits::provider::{
     StreamEvent, TokenUsage, ToolDefinition,
 };
 use freebird_traits::tool::{Capability, ToolOutcome};
-use freebird_types::config::{KnowledgeConfig, RuntimeConfig, ToolsConfig};
+use freebird_types::config::{BudgetConfig, KnowledgeConfig, RuntimeConfig, ToolsConfig};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -81,6 +82,9 @@ pub struct AgentRuntime {
     knowledge_config: KnowledgeConfig,
     config: RuntimeConfig,
     tools_config: ToolsConfig,
+    /// Token and tool-round budget limits (ASI08). Used to create a
+    /// per-session `TokenBudget` when a new session starts.
+    budget_config: BudgetConfig,
     audit: Option<AuditLogger>,
     sessions: SessionManager,
 }
@@ -102,6 +106,7 @@ impl AgentRuntime {
         knowledge_config: KnowledgeConfig,
         config: RuntimeConfig,
         tools_config: ToolsConfig,
+        budget_config: BudgetConfig,
         audit: Option<AuditLogger>,
     ) -> Self {
         Self {
@@ -114,6 +119,7 @@ impl AgentRuntime {
             knowledge_config,
             config,
             tools_config,
+            budget_config,
             audit,
             sessions: SessionManager::new(),
         }
@@ -322,6 +328,14 @@ impl AgentRuntime {
                     .sessions
                     .resolve(self.channel.info().id.as_str(), &sender_id)
                     .await;
+
+                // Ensure a per-session TokenBudget exists (idempotent).
+                if self.sessions.get_budget(&session_id).await.is_none() {
+                    self.sessions
+                        .set_budget(&session_id, TokenBudget::new(&self.budget_config))
+                        .await;
+                }
+
                 tracing::info!(%session_id, %sender_id, "handling message");
                 self.handle_message(raw_text, sender_id, session_id, outbound)
                     .await;
@@ -396,6 +410,10 @@ impl AgentRuntime {
                 let session_id = self
                     .sessions
                     .new_session(self.channel.info().id.as_str(), sender_id)
+                    .await;
+                // Create a fresh budget for the new session.
+                self.sessions
+                    .set_budget(&session_id, TokenBudget::new(&self.budget_config))
                     .await;
                 let _ = outbound
                     .send(OutboundEvent::Message {
@@ -770,6 +788,45 @@ impl AgentRuntime {
         .await;
     }
 
+    /// Handle a budget exceeded error: audit-log, notify user, mark turn complete.
+    async fn handle_budget_exceeded(
+        &self,
+        session_id: &SessionId,
+        error: &freebird_security::error::SecurityError,
+        current_turn: &mut Turn,
+        sender_id: &str,
+        outbound: &mpsc::Sender<OutboundEvent>,
+    ) {
+        tracing::warn!(%session_id, %error, "token budget exceeded");
+
+        if let freebird_security::error::SecurityError::BudgetExceeded {
+            resource,
+            used,
+            limit,
+        } = error
+        {
+            self.audit(
+                session_id,
+                AuditEventType::BudgetExceeded {
+                    resource: resource.to_string(),
+                    used: *used,
+                    limit: *limit,
+                },
+            )
+            .await;
+        }
+
+        current_turn.completed_at = Some(Utc::now());
+        send_outbound(
+            outbound,
+            OutboundEvent::Error {
+                text: format!("Budget exceeded: {error}"),
+                recipient_id: sender_id.into(),
+            },
+        )
+        .await;
+    }
+
     /// Run the agentic loop: call provider, handle tool use, deliver response.
     ///
     /// When `initial_request` is `Some`, the first loop iteration uses it directly
@@ -789,7 +846,34 @@ impl AgentRuntime {
 
         let mut pending_request = initial_request;
 
-        for _round in 0..self.config.max_tool_rounds {
+        // Retrieve the per-session budget (if set).
+        let budget = self.sessions.get_budget(session_id).await;
+
+        // Use budget's max_tool_rounds if available, otherwise fall back to config.
+        // max_tool_rounds() returns u32; usize is at least 32 bits on all
+        // supported targets, so this cast never truncates.
+        #[allow(clippy::cast_possible_truncation)]
+        let max_rounds = budget.as_ref().map_or(self.config.max_tool_rounds, |b| {
+            b.max_tool_rounds() as usize
+        });
+
+        for round in 0..max_rounds {
+            // Check tool-round budget before each iteration.
+            if let Some(ref b) = budget {
+                let round_u32 = u32::try_from(round).unwrap_or(u32::MAX);
+                if let Err(e) = b.check_tool_rounds(round_u32) {
+                    self.handle_budget_exceeded(
+                        session_id,
+                        &e,
+                        &mut current_turn,
+                        sender_id,
+                        outbound,
+                    )
+                    .await;
+                    return current_turn;
+                }
+            }
+
             let request = pending_request.take().unwrap_or_else(|| {
                 self.build_completion_request(conversation, &messages, &tool_definitions)
             });
@@ -808,6 +892,21 @@ impl AgentRuntime {
                         return current_turn;
                     }
                 };
+
+            // Record token usage and check per-request/per-session limits.
+            if let Some(ref b) = budget {
+                if let Err(e) = b.record_usage(&response.usage) {
+                    self.handle_budget_exceeded(
+                        session_id,
+                        &e,
+                        &mut current_turn,
+                        sender_id,
+                        outbound,
+                    )
+                    .await;
+                    return current_turn;
+                }
+            }
 
             match response.stop_reason {
                 StopReason::ToolUse => {
@@ -1199,6 +1298,7 @@ impl AgentRuntime {
     ///
     /// Injection scan on accumulated text is audit-only — the text has already
     /// been delivered to the user via `StreamChunk` events.
+    #[allow(clippy::too_many_lines)] // budget enforcement adds necessary branches
     async fn run_agentic_loop_streaming(
         &self,
         safe_message: &SafeMessage,
@@ -1210,7 +1310,34 @@ impl AgentRuntime {
         let (mut messages, mut current_turn, tool_definitions) =
             self.prepare_agentic_loop(safe_message, conversation).await;
 
-        for _round in 0..self.config.max_tool_rounds {
+        // Retrieve the per-session budget (if set).
+        let budget = self.sessions.get_budget(session_id).await;
+
+        // Use budget's max_tool_rounds if available, otherwise fall back to config.
+        // max_tool_rounds() returns u32; usize is at least 32 bits on all
+        // supported targets, so this cast never truncates.
+        #[allow(clippy::cast_possible_truncation)]
+        let max_rounds = budget.as_ref().map_or(self.config.max_tool_rounds, |b| {
+            b.max_tool_rounds() as usize
+        });
+
+        for round in 0..max_rounds {
+            // Check tool-round budget before each iteration.
+            if let Some(ref b) = budget {
+                let round_u32 = u32::try_from(round).unwrap_or(u32::MAX);
+                if let Err(e) = b.check_tool_rounds(round_u32) {
+                    self.handle_budget_exceeded(
+                        session_id,
+                        &e,
+                        &mut current_turn,
+                        sender_id,
+                        outbound,
+                    )
+                    .await;
+                    return current_turn;
+                }
+            }
+
             let request = self.build_completion_request(conversation, &messages, &tool_definitions);
 
             let event_stream = match self
@@ -1234,8 +1361,7 @@ impl AgentRuntime {
                 }
             };
 
-            // TODO(#31): wire `usage` to TokenBudget for per-request enforcement
-            let Some((accumulator, stop_reason, _usage)) = Self::consume_stream(
+            let Some((accumulator, stop_reason, usage)) = Self::consume_stream(
                 event_stream,
                 sender_id,
                 session_id,
@@ -1246,6 +1372,21 @@ impl AgentRuntime {
             else {
                 return current_turn;
             };
+
+            // Record token usage and check per-request/per-session limits.
+            if let Some(ref b) = budget {
+                if let Err(e) = b.record_usage(&usage) {
+                    self.handle_budget_exceeded(
+                        session_id,
+                        &e,
+                        &mut current_turn,
+                        sender_id,
+                        outbound,
+                    )
+                    .await;
+                    return current_turn;
+                }
+            }
 
             // Always send StreamEnd after a complete stream round
             send_outbound(
@@ -1593,6 +1734,7 @@ mod tests {
                 max_shell_output_bytes: 1_048_576,
                 edit: EditConfig::default(),
             },
+            BudgetConfig::default(),
             None,
         )
     }

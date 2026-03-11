@@ -6,12 +6,15 @@
 //! conversation context.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use freebird_security::budget::TokenBudget;
 use freebird_traits::id::SessionId;
 use freebird_types::id::new_session_id;
 use tokio::sync::RwLock;
 
-/// Maps `(channel_id, sender_id)` pairs to [`SessionId`] values.
+/// Maps `(channel_id, sender_id)` pairs to [`SessionId`] values and
+/// tracks per-session [`TokenBudget`]s.
 ///
 /// Thread-safe via internal [`RwLock`]. All methods take `&self`, so the
 /// manager can be stored as a direct field on the agent runtime without
@@ -19,6 +22,10 @@ use tokio::sync::RwLock;
 /// to concurrent event handling.
 pub struct SessionManager {
     sessions: RwLock<HashMap<(String, String), SessionId>>,
+    /// Per-session token budgets. Wrapped in `Arc` because `TokenBudget`
+    /// uses `AtomicU64` internally (interior mutability), and we need to
+    /// return owned handles through the `RwLock`.
+    budgets: RwLock<HashMap<SessionId, Arc<TokenBudget>>>,
 }
 
 impl SessionManager {
@@ -27,6 +34,7 @@ impl SessionManager {
     pub fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            budgets: RwLock::new(HashMap::new()),
         }
     }
 
@@ -77,6 +85,23 @@ impl SessionManager {
         let key = (channel_id.to_owned(), sender_id.to_owned());
         let mut sessions = self.sessions.write().await;
         sessions.remove(&key)
+    }
+
+    /// Associate a [`TokenBudget`] with a session.
+    ///
+    /// Replaces any existing budget for the given session.
+    pub async fn set_budget(&self, session_id: &SessionId, budget: TokenBudget) {
+        let mut budgets = self.budgets.write().await;
+        budgets.insert(session_id.clone(), Arc::new(budget));
+    }
+
+    /// Returns the [`TokenBudget`] for a session, if one has been set.
+    ///
+    /// The returned `Arc` allows callers to record usage without holding
+    /// the `RwLock` — `TokenBudget` uses `AtomicU64` for interior mutability.
+    pub async fn get_budget(&self, session_id: &SessionId) -> Option<Arc<TokenBudget>> {
+        let budgets = self.budgets.read().await;
+        budgets.get(session_id).cloned()
     }
 
     /// Returns the number of active session mappings.

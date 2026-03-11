@@ -15,7 +15,9 @@ use freebird_runtime::registry::ProviderRegistry;
 use freebird_traits::channel::InboundEvent;
 use freebird_traits::id::{ModelId, ProviderId, SessionId};
 use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary};
-use freebird_types::config::{EditConfig, KnowledgeConfig, RuntimeConfig, ToolsConfig};
+use freebird_types::config::{
+    BudgetConfig, EditConfig, KnowledgeConfig, RuntimeConfig, ToolsConfig,
+};
 use tokio_util::sync::CancellationToken;
 
 use helpers::{MockChannel, error_text, make_tool_executor, message_text};
@@ -74,6 +76,7 @@ fn make_runtime(channel: MockChannel) -> AgentRuntime {
             max_shell_output_bytes: 1_048_576,
             edit: EditConfig::default(),
         },
+        BudgetConfig::default(),
         None,
     )
 }

@@ -227,6 +227,27 @@ const fn default_max_context_tokens() -> usize {
     2000
 }
 
+/// Token and tool-round budget limits (CLAUDE.md §13 — ASI08).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BudgetConfig {
+    /// Maximum total tokens (input + output) per session.
+    pub max_tokens_per_session: u64,
+    /// Maximum tokens (input + output) per single provider request.
+    pub max_tokens_per_request: u64,
+    /// Maximum tool rounds in a single agentic turn.
+    pub max_tool_rounds_per_turn: u32,
+}
+
+impl Default for BudgetConfig {
+    fn default() -> Self {
+        Self {
+            max_tokens_per_session: 500_000,
+            max_tokens_per_request: 32_768,
+            max_tool_rounds_per_turn: 10,
+        }
+    }
+}
+
 /// Security policy configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityConfig {
@@ -249,6 +270,9 @@ pub struct SecurityConfig {
     /// invocations that may access or expose secrets.
     #[serde(default)]
     pub secret_guard: SecretGuardConfig,
+    /// Token and tool-round budget limits.
+    #[serde(default)]
+    pub budgets: BudgetConfig,
 }
 
 /// Network egress allowlist configuration (CLAUDE.md §12 — ASI01).

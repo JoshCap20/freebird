@@ -6,6 +6,8 @@ use chrono::{DateTime, Utc};
 use freebird_traits::tool::Capability;
 use serde::{Deserialize, Serialize};
 
+use crate::budget::BudgetResource;
+
 /// Severity classification for security events.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -110,6 +112,14 @@ pub enum SecurityError {
 
     #[error("secret access blocked: {reason}")]
     SecretAccessBlocked { reason: String },
+
+    // ── Budget enforcement (ASI08) ───────────────────────────────
+    #[error("budget exceeded for `{resource}`: used {used}, limit {limit}")]
+    BudgetExceeded {
+        resource: BudgetResource,
+        used: u64,
+        limit: u64,
+    },
 }
 
 #[cfg(test)]
