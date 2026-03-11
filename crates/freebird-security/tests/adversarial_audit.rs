@@ -146,8 +146,12 @@ async fn truncated_last_entry_handled() {
     let truncated = &content[..content.len().saturating_sub(10)];
     std::fs::write(&log_path, truncated).unwrap();
 
-    // Should either recover or report error — not panic
-    let _ = AuditLogger::verify_chain(&log_path, &test_signing_key());
+    // Truncated entry should fail verification (malformed JSON or broken hash chain)
+    let result = AuditLogger::verify_chain(&log_path, &test_signing_key());
+    assert!(
+        result.is_err(),
+        "truncated entry should fail verification, not silently pass"
+    );
 }
 
 #[tokio::test]

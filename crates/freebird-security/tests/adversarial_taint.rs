@@ -190,10 +190,12 @@ fn tainted_tool_input_u64_optional_absent_vs_null() {
     assert!(absent_result.is_ok());
     assert_eq!(absent_result.unwrap(), None);
 
-    // Null value: implementation-dependent, but should not panic
+    // Null value: key exists but as_u64() returns None → Err
     let null_result = null_val.extract_u64_optional("key");
-    // Either Ok(None) or Err is acceptable, but no panic
-    let _ = null_result;
+    assert!(
+        null_result.is_err(),
+        "null is not a valid u64, should return Err"
+    );
 }
 
 // ---------------------------------------------------------------------------

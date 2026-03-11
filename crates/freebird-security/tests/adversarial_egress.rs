@@ -44,27 +44,27 @@ fn subdomain_of_allowed_host_blocked() {
 }
 
 #[test]
-fn userinfo_in_url() {
+fn userinfo_in_url_passes_when_host_matches() {
     let policy = test_egress_policy();
-    // URL with credentials in userinfo section
+    // url::Url separates userinfo from host — host still matches allowlist
     let t = Tainted::new("https://admin:password@api.anthropic.com/v1/messages");
-    // Host should still match — userinfo is separate from host
     let result = SafeUrl::from_tainted(&t, &policy);
-    // Whether this passes or fails depends on implementation,
-    // but it must not panic
-    let _ = result;
+    assert!(
+        result.is_ok(),
+        "userinfo is separate from host; host matches allowlist"
+    );
 }
 
 #[test]
-fn percent_encoded_hostname() {
+fn percent_encoded_hostname_decoded_to_match() {
     let policy = test_egress_policy();
-    // url::Url normalizes percent encoding, so this should either
-    // match or not, but must not panic
+    // url::Url decodes %2E to '.' during parsing, so host = "api.anthropic.com"
     let t = Tainted::new("https://api%2Eanthropic%2Ecom/v1/messages");
     let result = SafeUrl::from_tainted(&t, &policy);
-    // Most URL parsers treat %2E as literal dots, so host = "api.anthropic.com"
-    // Whether it passes depends on the parser — document behavior
-    let _ = result;
+    assert!(
+        result.is_ok(),
+        "percent-encoded dots decoded by url crate; host matches allowlist"
+    );
 }
 
 #[test]

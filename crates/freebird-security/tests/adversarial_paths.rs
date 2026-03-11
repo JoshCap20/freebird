@@ -232,10 +232,13 @@ fn double_slash_path() {
     let result = SafeFilePath::from_tainted(&t, dir.path());
     assert!(result.is_ok(), "simple path should work");
 
-    // Double slash should not enable traversal
+    // Double slash canonicalizes normally — should still resolve within sandbox
     let t2 = Tainted::new(".//file.txt");
-    let _ = SafeFilePath::from_tainted(&t2, dir.path());
-    // Whether this passes depends on canonicalization — no panic is the requirement
+    let result2 = SafeFilePath::from_tainted(&t2, dir.path());
+    assert!(
+        result2.is_ok(),
+        "double-slash path should canonicalize to same file"
+    );
 }
 
 #[test]
@@ -246,12 +249,21 @@ fn dot_only_filenames() {
     let dotdot = Tainted::new("..");
     let dotdotdot = Tainted::new("...");
 
-    // "." and ".." should be rejected (traversal/not-a-file)
-    // "..." is unusual but depends on implementation
-    assert!(SafeFilePath::from_tainted(&dotdot, dir.path()).is_err());
-    // "." resolves to sandbox root itself — may or may not be an error
-    let _ = SafeFilePath::from_tainted(&dot, dir.path());
-    let _ = SafeFilePath::from_tainted(&dotdotdot, dir.path());
+    // ".." must be rejected (traversal)
+    assert!(
+        SafeFilePath::from_tainted(&dotdot, dir.path()).is_err(),
+        "'..' must be rejected as traversal"
+    );
+    // "." resolves to sandbox root — passes containment check
+    assert!(
+        SafeFilePath::from_tainted(&dot, dir.path()).is_ok(),
+        "'.' resolves to sandbox root, which is within sandbox"
+    );
+    // "..." does not exist on the filesystem — canonicalize fails
+    assert!(
+        SafeFilePath::from_tainted(&dotdotdot, dir.path()).is_err(),
+        "'...' does not exist, canonicalize fails"
+    );
 }
 
 #[test]
