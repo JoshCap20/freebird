@@ -510,6 +510,7 @@ dependencies = [
  "freebird-types",
  "hex",
  "proptest",
+ "regex",
  "ring",
  "secrecy",
  "serde",

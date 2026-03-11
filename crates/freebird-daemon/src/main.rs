@@ -26,6 +26,7 @@ use freebird_memory::sqlite_knowledge::SqliteKnowledgeStore;
 use freebird_memory::sqlite_memory::SqliteMemory;
 use freebird_runtime::agent::AgentRuntime;
 use freebird_runtime::shutdown::ShutdownCoordinator;
+use freebird_security::secret_guard::SecretGuard;
 use freebird_types::config::AppConfig;
 
 mod chat;
@@ -182,7 +183,11 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
     // Clone knowledge store for the runtime (ToolExecutor also needs its own Arc).
     let ks_for_runtime = knowledge_store.clone();
 
-    // 10. TOOL EXECUTOR — consumes the registry, adds security pipeline
+    // 10. SECRET GUARD — intercepts tool inputs and redacts secrets from outputs
+    let secret_guard = SecretGuard::from_config(&config.security.secret_guard)
+        .context("failed to construct SecretGuard from config")?;
+
+    // 11. TOOL EXECUTOR — consumes the registry, adds security pipeline (incl. secret guard)
     let tool_executor = freebird_runtime::tool_executor::ToolExecutor::new(
         tool_registry.into_tools(),
         std::time::Duration::from_secs(tools_config.default_timeout_secs),
@@ -190,10 +195,11 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         tools_config.allowed_directories.clone(),
         Some(consent_gate),
         knowledge_store,
+        Some(secret_guard),
     )
     .context("failed to construct ToolExecutor (duplicate tool names?)")?;
 
-    // 11. AGENT RUNTIME
+    // 12. AGENT RUNTIME
     let mut runtime = AgentRuntime::new(
         registry,
         channel,
@@ -207,7 +213,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         None, // audit logger — wired in a later issue
     );
 
-    // 12. RUN
+    // 13. RUN
     let run_result = runtime.run(token).await;
     match &run_result {
         Ok(()) => tracing::info!("runtime exited cleanly"),
