@@ -183,6 +183,7 @@ async fn test_consent_request_forwarded_to_channel() {
         vec![],
         Some(gate),
         None,
+        None,
     )
     .expect("executor construction should succeed");
 
@@ -306,6 +307,7 @@ async fn test_consent_approved_executes_tool() {
         None,
         vec![],
         Some(gate),
+        None,
         None,
     )
     .expect("executor construction should succeed");
@@ -433,6 +435,7 @@ async fn test_consent_denied_returns_error_to_provider() {
         vec![],
         Some(gate),
         None,
+        None,
     )
     .expect("executor construction should succeed");
 
@@ -558,6 +561,7 @@ async fn test_consent_low_risk_no_prompt() {
         vec![],
         Some(gate),
         None,
+        None,
     )
     .expect("executor construction should succeed");
 
@@ -654,6 +658,7 @@ async fn test_consent_no_gate_executes_freely() {
         vec![],
         None,
         None,
+        None,
     )
     .expect("executor construction should succeed");
 
@@ -733,6 +738,7 @@ async fn test_consent_response_unknown_id_logged() {
         None,
         vec![],
         Some(gate),
+        None,
         None,
     )
     .expect("executor construction should succeed");

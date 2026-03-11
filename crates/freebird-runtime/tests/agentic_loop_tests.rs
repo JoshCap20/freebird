@@ -675,6 +675,7 @@ async fn test_tool_use_timeout() {
         vec![],
         None,
         None,
+        None,
     )
     .unwrap();
 

@@ -1,11 +1,18 @@
-//! Sensitive content detection for knowledge store writes.
+//! Sensitive content detection and redaction.
 //!
 //! Scans text for patterns that resemble API keys, passwords, private keys,
-//! and other credentials. Used to prevent the agent from accidentally storing
-//! secrets in the knowledge store.
+//! and other credentials. Two entry points:
+//!
+//! - [`contains_sensitive_content`] — detection only (used by knowledge store writes)
+//! - [`redact_sensitive_content`] — replaces detected secrets with `[REDACTED]`
+//!   (used by the secret guard's output pipeline)
 //!
 //! Runs on ALL knowledge writes, regardless of kind or consent status,
 //! BEFORE the consent gate — sensitive content is never even presented for approval.
+
+use std::sync::LazyLock;
+
+use regex::Regex;
 
 /// Check if content contains patterns that resemble sensitive credentials.
 ///
@@ -184,6 +191,87 @@ fn is_high_entropy_base64(s: &str) -> bool {
     has_upper && has_lower && has_digit
 }
 
+// ── Compiled redaction regexes ───────────────────────────────────────
+
+/// API key prefixes followed by token-like characters.
+static RE_API_KEY: LazyLock<Regex> = LazyLock::new(|| {
+    // nb: `unwrap` safety — the pattern is a compile-time constant.
+    #[allow(clippy::unwrap_used)]
+    Regex::new(
+        r"(?:sk-|ghp_|gho_|ghs_|ghr_|xoxb-|xoxp-|xoxs-|sk_live_|pk_live_|rk_live_)[A-Za-z0-9_\-]{4,}",
+    )
+    .unwrap()
+});
+
+/// AWS access key IDs (AKIA + 16 alphanumeric).
+static RE_AWS_KEY: LazyLock<Regex> = LazyLock::new(|| {
+    #[allow(clippy::unwrap_used)]
+    Regex::new(r"AKIA[A-Za-z0-9]{16}").unwrap()
+});
+
+/// AWS secret / session token assignments.
+static RE_AWS_SECRET: LazyLock<Regex> = LazyLock::new(|| {
+    #[allow(clippy::unwrap_used)]
+    Regex::new(r"(?i)(aws_secret_access_key|aws_session_token)\s*[=:]\s*\S+").unwrap()
+});
+
+/// PEM private key blocks.
+static RE_PEM: LazyLock<Regex> = LazyLock::new(|| {
+    #[allow(clippy::unwrap_used)]
+    Regex::new(r"-----BEGIN[A-Z \r\n]*PRIVATE KEY-----[\s\S]*?-----END[A-Z \r\n]*PRIVATE KEY-----")
+        .unwrap()
+});
+
+/// Password / secret assignment with a value.
+static RE_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
+    #[allow(clippy::unwrap_used)]
+    Regex::new(
+        r"(?i)(password|passwd|secret_key|private_key|api_key|apikey|access_token)\s*[=:]\s*(\S+)",
+    )
+    .unwrap()
+});
+
+/// Bearer tokens with sufficient length (≥20 token chars).
+static RE_BEARER: LazyLock<Regex> = LazyLock::new(|| {
+    #[allow(clippy::unwrap_used)]
+    Regex::new(r"Bearer [A-Za-z0-9_\-\.]{20,}").unwrap()
+});
+
+/// Redact sensitive content in text, replacing detected secrets with `[REDACTED]`.
+///
+/// Returns `(redacted_text, was_redacted)`. When `was_redacted` is `false` the
+/// returned string is identical to the input (no allocation).
+#[must_use]
+pub fn redact_sensitive_content(content: &str) -> (String, bool) {
+    use std::borrow::Cow;
+
+    let mut result: Cow<'_, str> = Cow::Borrowed(content);
+
+    // Order matters: PEM first (multi-line), then more specific patterns,
+    // then generic password assignments last.
+    for (re, replacement) in [
+        (&*RE_PEM, "[REDACTED PEM KEY]"),
+        (&*RE_API_KEY, "[REDACTED]"),
+        (&*RE_AWS_KEY, "[REDACTED]"),
+        (&*RE_AWS_SECRET, "$1=[REDACTED]"),
+        (&*RE_BEARER, "Bearer [REDACTED]"),
+    ] {
+        let replaced = re.replace_all(&result, replacement);
+        if let Cow::Owned(new) = replaced {
+            result = Cow::Owned(new);
+        }
+    }
+
+    // Password assignments: keep the key name, redact the value.
+    let replaced = RE_PASSWORD.replace_all(&result, "$1=[REDACTED]");
+    if let Cow::Owned(new) = replaced {
+        result = Cow::Owned(new);
+    }
+
+    let redacted = matches!(result, Cow::Owned(_));
+    (result.into_owned(), redacted)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -320,5 +408,105 @@ mod tests {
     #[test]
     fn test_allows_json_with_password_field_placeholder() {
         assert!(contains_sensitive_content("password={env.DB_PASSWORD}").is_none());
+    }
+
+    // ── Redaction tests ──
+
+    #[test]
+    fn test_redact_api_key_openai() {
+        let (result, redacted) = redact_sensitive_content("My key is sk-ant-abc123def456");
+        assert!(redacted);
+        assert_eq!(result, "My key is [REDACTED]");
+    }
+
+    #[test]
+    fn test_redact_github_pat() {
+        let (result, redacted) =
+            redact_sensitive_content("token: ghp_ABCDEFghijklmnopqrstuvwxyz1234");
+        assert!(redacted);
+        assert_eq!(result, "token: [REDACTED]");
+    }
+
+    #[test]
+    fn test_redact_bearer_token() {
+        let (result, redacted) =
+            redact_sensitive_content("Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9");
+        assert!(redacted);
+        assert_eq!(result, "Authorization: Bearer [REDACTED]");
+    }
+
+    #[test]
+    fn test_redact_pem_key() {
+        let pem = "before\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAK...\n-----END RSA PRIVATE KEY-----\nafter";
+        let (result, redacted) = redact_sensitive_content(pem);
+        assert!(redacted);
+        assert!(result.contains("[REDACTED PEM KEY]"));
+        assert!(result.contains("before"));
+        assert!(result.contains("after"));
+        assert!(!result.contains("MIIEpAIBAAK"));
+    }
+
+    #[test]
+    fn test_redact_password_assignment() {
+        let (result, redacted) = redact_sensitive_content("password=hunter2");
+        assert!(redacted);
+        assert_eq!(result, "password=[REDACTED]");
+    }
+
+    #[test]
+    fn test_redact_api_key_assignment() {
+        let (result, redacted) = redact_sensitive_content("API_KEY=secret123abc");
+        assert!(redacted);
+        assert_eq!(result, "API_KEY=[REDACTED]");
+    }
+
+    #[test]
+    fn test_redact_aws_key() {
+        let (result, redacted) = redact_sensitive_content("key: AKIAIOSFODNN7EXAMPLE");
+        assert!(redacted);
+        assert_eq!(result, "key: [REDACTED]");
+    }
+
+    #[test]
+    fn test_redact_aws_secret() {
+        let (result, redacted) =
+            redact_sensitive_content("aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCY");
+        assert!(redacted);
+        assert!(result.contains("[REDACTED]"));
+        assert!(!result.contains("wJalrXUtnFEMI"));
+    }
+
+    #[test]
+    fn test_no_redaction_normal_output() {
+        let (result, redacted) =
+            redact_sensitive_content("cargo test passed: 42 tests, 0 failures");
+        assert!(!redacted);
+        assert_eq!(result, "cargo test passed: 42 tests, 0 failures");
+    }
+
+    #[test]
+    fn test_redaction_preserves_surrounding_text() {
+        let input = "Start\npassword=hunter2\nEnd";
+        let (result, redacted) = redact_sensitive_content(input);
+        assert!(redacted);
+        assert!(result.contains("Start"));
+        assert!(result.contains("End"));
+        assert!(!result.contains("hunter2"));
+    }
+
+    #[test]
+    fn test_redact_multiple_secrets() {
+        let input = "key1=sk-abcdef1234 and key2=ghp_ABCDEFghijklmnopqrstuvwxyz1234";
+        let (result, redacted) = redact_sensitive_content(input);
+        assert!(redacted);
+        assert!(!result.contains("sk-abcdef1234"));
+        assert!(!result.contains("ghp_ABCDEF"));
+    }
+
+    #[test]
+    fn test_redact_stripe_live_key() {
+        let (result, redacted) = redact_sensitive_content("key: sk_live_4eC39HqLyjWDarjtT1zdp7dc");
+        assert!(redacted);
+        assert_eq!(result, "key: [REDACTED]");
     }
 }

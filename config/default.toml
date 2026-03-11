@@ -76,6 +76,13 @@ allowed_ports = [443]
 max_response_bytes = 1048576
 request_timeout_secs = 30
 
+[security.secret_guard]
+enabled = true
+action = "consent"
+redact_output = true
+# extra_sensitive_file_patterns = []
+# extra_sensitive_command_patterns = []
+
 [daemon]
 host = "127.0.0.1"
 port = 7531
