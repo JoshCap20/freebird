@@ -77,14 +77,17 @@ pub enum AuditEventType {
         category: String,
     },
     ApprovalGranted {
-        request_id: String,
+        /// Descriptive context, e.g. tool name or security warning category.
+        context: String,
     },
     ApprovalDenied {
-        request_id: String,
+        /// Descriptive context, e.g. tool name or security warning category.
+        context: String,
         reason: Option<String>,
     },
     ApprovalExpired {
-        request_id: String,
+        /// Descriptive context, e.g. tool name or security warning category.
+        context: String,
     },
     EgressBlocked {
         host: String,
@@ -676,7 +679,7 @@ mod tests {
             .record(
                 "s1",
                 AuditEventType::ApprovalGranted {
-                    request_id: "req-1".into(),
+                    context: "req-1".into(),
                 },
             )
             .await
@@ -867,18 +870,18 @@ mod tests {
                 category: "consent".into(),
             },
             AuditEventType::ApprovalGranted {
-                request_id: "req-1".into(),
+                context: "req-1".into(),
             },
             AuditEventType::ApprovalDenied {
-                request_id: "req-2".into(),
+                context: "req-2".into(),
                 reason: Some("too risky".into()),
             },
             AuditEventType::ApprovalDenied {
-                request_id: "req-3".into(),
+                context: "req-3".into(),
                 reason: None,
             },
             AuditEventType::ApprovalExpired {
-                request_id: "req-4".into(),
+                context: "req-4".into(),
             },
             AuditEventType::EgressBlocked {
                 host: "evil.com".into(),

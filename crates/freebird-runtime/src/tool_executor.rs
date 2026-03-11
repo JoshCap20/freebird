@@ -496,13 +496,13 @@ impl ToolExecutor {
         }
     }
 
-    async fn audit_approval_granted(&self, session_id: &SessionId, request_id: &str) {
+    async fn audit_approval_granted(&self, session_id: &SessionId, context: &str) {
         if let Some(audit) = &self.audit {
             if let Err(e) = audit
                 .record(
                     session_id.as_str(),
                     AuditEventType::ApprovalGranted {
-                        request_id: request_id.into(),
+                        context: context.into(),
                     },
                 )
                 .await
@@ -515,7 +515,7 @@ impl ToolExecutor {
     async fn audit_approval_denied(
         &self,
         session_id: &SessionId,
-        request_id: &str,
+        context: &str,
         reason: Option<&str>,
     ) {
         if let Some(audit) = &self.audit {
@@ -523,7 +523,7 @@ impl ToolExecutor {
                 .record(
                     session_id.as_str(),
                     AuditEventType::ApprovalDenied {
-                        request_id: request_id.into(),
+                        context: context.into(),
                         reason: reason.map(Into::into),
                     },
                 )
@@ -534,13 +534,13 @@ impl ToolExecutor {
         }
     }
 
-    async fn audit_approval_expired(&self, session_id: &SessionId, request_id: &str) {
+    async fn audit_approval_expired(&self, session_id: &SessionId, context: &str) {
         if let Some(audit) = &self.audit {
             if let Err(e) = audit
                 .record(
                     session_id.as_str(),
                     AuditEventType::ApprovalExpired {
-                        request_id: request_id.into(),
+                        context: context.into(),
                     },
                 )
                 .await
@@ -1868,7 +1868,7 @@ mod tests {
         // Flow: ApprovalGranted (step 3), then ToolInvocation(Granted) (step 4)
         assert!(events.iter().any(|e| matches!(
             e,
-            AuditEventType::ApprovalGranted { request_id } if !request_id.is_empty()
+            AuditEventType::ApprovalGranted { context } if !context.is_empty()
         )));
     }
 
@@ -1914,8 +1914,8 @@ mod tests {
         let events = read_audit_events(&log_path);
         assert!(events.iter().any(|e| matches!(
             e,
-            AuditEventType::ApprovalDenied { request_id, reason }
-                if !request_id.is_empty() && reason.as_deref() == Some("nope")
+            AuditEventType::ApprovalDenied { context, reason }
+                if !context.is_empty() && reason.as_deref() == Some("nope")
         )));
     }
 
