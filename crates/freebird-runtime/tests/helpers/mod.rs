@@ -27,7 +27,7 @@ use freebird_traits::provider::{
     StreamEvent,
 };
 use freebird_traits::tool::Tool;
-use freebird_types::config::{RuntimeConfig, ToolsConfig};
+use freebird_types::config::{EditConfig, RuntimeConfig, ToolsConfig};
 
 // ---------------------------------------------------------------------------
 // MockChannel
@@ -219,6 +219,7 @@ pub fn default_tools_config() -> ToolsConfig {
         allowed_directories: vec![],
         allowed_shell_commands: vec![],
         max_shell_output_bytes: 1_048_576,
+        edit: EditConfig::default(),
     }
 }
 

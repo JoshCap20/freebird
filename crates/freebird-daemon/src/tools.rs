@@ -33,7 +33,7 @@ pub fn build_tool_registry(config: &AppConfig) -> Result<ToolRegistry> {
     registry.register_all(freebird_tools::filesystem::filesystem_tools());
 
     // Edit tool — search/replace for surgical code modifications.
-    registry.register_all(freebird_tools::edit::edit_tools());
+    registry.register_all(freebird_tools::edit::edit_tools(&config.tools.edit));
 
     // Grep search tool — regex-based code search with context lines.
     registry.register_all(freebird_tools::grep::grep_tools());
