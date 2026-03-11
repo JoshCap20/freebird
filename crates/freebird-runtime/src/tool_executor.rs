@@ -1969,4 +1969,241 @@ mod tests {
         drop(rx);
         let _ = exec_handle.await;
     }
+
+    // ── Secret guard integration tests ───────────────────────────────
+
+    fn make_secret_guard() -> SecretGuard {
+        use freebird_types::config::SecretGuardConfig;
+        SecretGuard::from_config(&SecretGuardConfig::default()).unwrap()
+    }
+
+    fn make_block_secret_guard() -> SecretGuard {
+        use freebird_types::config::{SecretGuardAction, SecretGuardConfig};
+        SecretGuard::from_config(&SecretGuardConfig {
+            enabled: true,
+            action: SecretGuardAction::Block,
+            redact_output: true,
+            extra_sensitive_file_patterns: vec![],
+            extra_sensitive_command_patterns: vec![],
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_secret_guard_blocks_env_file_in_block_mode() {
+        let (_tmp, path) = sandbox();
+        let tool = MockTool::new("read_file", Capability::FileRead);
+        let executed = tool.executed_flag();
+        let executor = ToolExecutor::new(
+            vec![Box::new(tool)],
+            StdDuration::from_secs(5),
+            None,
+            vec![],
+            None,
+            None,
+            Some(make_block_secret_guard()),
+        )
+        .unwrap();
+        let grant = grant_with_caps(&path, &[Capability::FileRead]);
+
+        let output = executor
+            .execute(
+                "read_file",
+                serde_json::json!({"path": ".env"}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
+            .await;
+
+        assert_eq!(output.outcome, ToolOutcome::Error);
+        assert!(
+            output.content.contains("Secret access blocked"),
+            "expected blocked message, got: {}",
+            output.content
+        );
+        assert!(
+            !executed.load(Ordering::Relaxed),
+            "tool should NOT have been executed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_secret_guard_escalates_env_file_to_consent() {
+        let (_tmp, path) = sandbox();
+        let tool = MockTool::new("read_file", Capability::FileRead);
+        let (consent_gate, mut rx) =
+            ConsentGate::new(RiskLevel::High, StdDuration::from_secs(5), 10);
+
+        let executor = Arc::new(
+            ToolExecutor::new(
+                vec![Box::new(tool)],
+                StdDuration::from_secs(5),
+                None,
+                vec![],
+                Some(consent_gate),
+                None,
+                Some(make_secret_guard()),
+            )
+            .unwrap(),
+        );
+        let grant = grant_with_caps(&path, &[Capability::FileRead]);
+
+        let exec_executor = Arc::clone(&executor);
+        let exec_grant = grant.clone();
+        let exec_handle = tokio::spawn(async move {
+            exec_executor
+                .execute(
+                    "read_file",
+                    serde_json::json!({"path": ".env"}),
+                    &exec_grant,
+                    &session_id(),
+                    "test-sender",
+                )
+                .await
+        });
+
+        // The consent request should arrive with Critical risk level
+        let request = tokio::time::timeout(StdDuration::from_secs(2), rx.recv())
+            .await
+            .expect("should receive consent request within timeout")
+            .expect("consent channel should not be closed");
+
+        assert_eq!(request.risk_level, RiskLevel::Critical);
+        assert!(
+            request.description.contains("SECRET GUARD"),
+            "description should mention SECRET GUARD, got: {}",
+            request.description
+        );
+
+        // Deny the consent to let the task complete
+        executor
+            .consent_respond(&request.id, ConsentResponse::Denied { reason: None })
+            .await;
+
+        drop(rx);
+        let output = exec_handle.await.unwrap();
+        assert_eq!(output.outcome, ToolOutcome::Error);
+        assert!(output.content.contains("denied"));
+    }
+
+    #[tokio::test]
+    async fn test_secret_guard_allows_normal_file() {
+        let (_tmp, path) = sandbox();
+        let tool = MockTool::new("read_file", Capability::FileRead);
+        let executed = tool.executed_flag();
+        let executor = ToolExecutor::new(
+            vec![Box::new(tool)],
+            StdDuration::from_secs(5),
+            None,
+            vec![],
+            None,
+            None,
+            Some(make_secret_guard()),
+        )
+        .unwrap();
+        let grant = grant_with_caps(&path, &[Capability::FileRead]);
+
+        let output = executor
+            .execute(
+                "read_file",
+                serde_json::json!({"path": "src/main.rs"}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
+            .await;
+
+        assert_eq!(output.outcome, ToolOutcome::Success);
+        assert!(
+            executed.load(Ordering::Relaxed),
+            "tool should have been executed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_secret_guard_redacts_api_key_in_output() {
+        let (_tmp, path) = sandbox();
+        let tool = MockTool::new("read_file", Capability::FileRead).with_output(
+            "API_KEY=sk-ant-api03-abc123def456ghi789",
+            ToolOutcome::Success,
+        );
+        let executor = ToolExecutor::new(
+            vec![Box::new(tool)],
+            StdDuration::from_secs(5),
+            None,
+            vec![],
+            None,
+            None,
+            Some(make_secret_guard()),
+        )
+        .unwrap();
+        let grant = grant_with_caps(&path, &[Capability::FileRead]);
+
+        let output = executor
+            .execute(
+                "read_file",
+                serde_json::json!({"path": "src/main.rs"}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
+            .await;
+
+        assert_eq!(output.outcome, ToolOutcome::Success);
+        assert!(
+            !output.content.contains("sk-ant-api03"),
+            "secret should be redacted, got: {}",
+            output.content
+        );
+        assert!(
+            output.content.contains("[REDACTED]"),
+            "expected [REDACTED] marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_secret_guard_audit_logged_on_block() {
+        let tmp = TempDir::new().unwrap();
+        let (_sandbox_tmp, sandbox_path) = sandbox();
+        let (audit, audit_path) = make_audit_logger(&tmp);
+        let tool = MockTool::new("read_file", Capability::FileRead);
+
+        let executor = ToolExecutor::new(
+            vec![Box::new(tool)],
+            StdDuration::from_secs(5),
+            Some(audit),
+            vec![],
+            None,
+            None,
+            Some(make_block_secret_guard()),
+        )
+        .unwrap();
+        let grant = grant_with_caps(&sandbox_path, &[Capability::FileRead]);
+
+        executor
+            .execute(
+                "read_file",
+                serde_json::json!({"path": ".env"}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
+            .await;
+
+        let events = read_audit_events(&audit_path);
+        let has_secret_blocked = events.iter().any(|e| {
+            matches!(
+                e,
+                AuditEventType::SecretAccessBlocked {
+                    tool_name,
+                    ..
+                } if tool_name == "read_file"
+            )
+        });
+        assert!(
+            has_secret_blocked,
+            "audit log should contain SecretAccessBlocked event, events: {events:?}"
+        );
+    }
 }
