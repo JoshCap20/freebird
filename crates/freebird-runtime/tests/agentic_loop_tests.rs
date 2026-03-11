@@ -762,12 +762,12 @@ async fn test_tool_use_max_rounds_exceeded() {
     );
 
     assert_eq!(provider.call_count(), 2);
-    // Should get an error about max rounds or budget exceeded
+    // Budget check fires at round 2 (0-indexed) with max_tool_rounds_per_turn=2.
     let err = events.first().expect("should have error event");
     let text = error_text(err).expect("should be Error variant");
     assert!(
-        text.contains("Maximum tool rounds exceeded") || text.contains("Budget exceeded"),
-        "expected max rounds or budget exceeded error, got: {text}"
+        text.contains("Budget exceeded"),
+        "expected budget exceeded error, got: {text}"
     );
 }
 

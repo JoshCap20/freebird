@@ -978,11 +978,12 @@ async fn test_streaming_max_tool_rounds_exceeded() {
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Loop forever").await;
 
-    // Should get: StreamChunk + StreamEnd (tool round) + Error (max rounds or budget exceeded)
-    assert!(events.iter().any(|e| {
-        error_text(e)
-            .is_some_and(|t| t.contains("Maximum tool rounds") || t.contains("Budget exceeded"))
-    }));
+    // Budget check fires at round 1 (0-indexed) with max_tool_rounds_per_turn=1.
+    assert!(
+        events
+            .iter()
+            .any(|e| { error_text(e).is_some_and(|t| t.contains("Budget exceeded")) })
+    );
 }
 
 #[tokio::test]

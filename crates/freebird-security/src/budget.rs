@@ -103,12 +103,15 @@ impl TokenBudget {
 
     /// Check whether the current tool round is within budget.
     ///
+    /// `current_round` is zero-indexed: round 0 is the first iteration.
+    /// A limit of 3 allows rounds 0, 1, 2 and rejects round 3+.
+    ///
     /// # Errors
     ///
-    /// Returns `SecurityError::BudgetExceeded` if `current_round` exceeds
-    /// the configured maximum.
+    /// Returns `SecurityError::BudgetExceeded` if `current_round` is at or
+    /// beyond the configured maximum.
     pub fn check_tool_rounds(&self, current_round: u32) -> Result<(), SecurityError> {
-        if current_round > self.max_tool_rounds_per_turn {
+        if current_round >= self.max_tool_rounds_per_turn {
             return Err(SecurityError::BudgetExceeded {
                 resource: BudgetResource::ToolRoundsPerTurn,
                 used: u64::from(current_round),
@@ -316,16 +319,18 @@ mod tests {
 
     #[test]
     fn check_tool_rounds_within_limit() {
+        // max_tool_rounds_per_turn = 3 means rounds 0, 1, 2 are valid.
         let budget = TokenBudget::new(&small_config());
+        assert!(budget.check_tool_rounds(0).is_ok());
         assert!(budget.check_tool_rounds(1).is_ok());
         assert!(budget.check_tool_rounds(2).is_ok());
-        assert!(budget.check_tool_rounds(3).is_ok());
     }
 
     #[test]
-    fn check_tool_rounds_at_limit() {
+    fn check_tool_rounds_at_limit_boundary() {
+        // Round 3 (0-indexed) is the 4th attempt — exceeds a limit of 3.
         let budget = TokenBudget::new(&small_config());
-        assert!(budget.check_tool_rounds(3).is_ok());
+        assert!(budget.check_tool_rounds(3).is_err());
     }
 
     #[test]
@@ -351,6 +356,17 @@ mod tests {
     fn check_tool_rounds_zero_is_valid() {
         let budget = TokenBudget::new(&small_config());
         assert!(budget.check_tool_rounds(0).is_ok());
+    }
+
+    #[test]
+    fn check_tool_rounds_zero_budget_rejects_all() {
+        let config = BudgetConfig {
+            max_tool_rounds_per_turn: 0,
+            ..small_config()
+        };
+        let budget = TokenBudget::new(&config);
+        // A limit of 0 means no rounds are allowed.
+        assert!(budget.check_tool_rounds(0).is_err());
     }
 
     // ── Query methods ────────────────────────────────────────────

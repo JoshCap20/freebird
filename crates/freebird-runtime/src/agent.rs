@@ -929,15 +929,11 @@ impl AgentRuntime {
         // Retrieve the per-session budget (if set).
         let budget = self.sessions.get_budget(session_id).await;
 
-        // Use budget's max_tool_rounds if available, otherwise fall back to config.
-        // max_tool_rounds() returns u32; usize is at least 32 bits on all
-        // supported targets, so this cast never truncates.
-        #[allow(clippy::cast_possible_truncation)]
-        let max_rounds = budget.as_ref().map_or(self.config.max_tool_rounds, |b| {
-            b.max_tool_rounds() as usize
-        });
+        // The budget check is the sole enforcer of tool-round limits.
+        // When no budget exists, fall back to config.max_tool_rounds.
+        let max_rounds = self.config.max_tool_rounds;
 
-        for round in 0..max_rounds {
+        for round in 0.. {
             // Check tool-round budget before each iteration.
             if let Some(ref b) = budget {
                 let round_u32 = u32::try_from(round).unwrap_or(u32::MAX);
@@ -952,6 +948,9 @@ impl AgentRuntime {
                     .await;
                     return current_turn;
                 }
+            } else if round >= max_rounds {
+                // No budget configured — fall back to config limit.
+                break;
             }
 
             let request = pending_request.take().unwrap_or_else(|| {
@@ -1383,15 +1382,11 @@ impl AgentRuntime {
         // Retrieve the per-session budget (if set).
         let budget = self.sessions.get_budget(session_id).await;
 
-        // Use budget's max_tool_rounds if available, otherwise fall back to config.
-        // max_tool_rounds() returns u32; usize is at least 32 bits on all
-        // supported targets, so this cast never truncates.
-        #[allow(clippy::cast_possible_truncation)]
-        let max_rounds = budget.as_ref().map_or(self.config.max_tool_rounds, |b| {
-            b.max_tool_rounds() as usize
-        });
+        // The budget check is the sole enforcer of tool-round limits.
+        // When no budget exists, fall back to config.max_tool_rounds.
+        let max_rounds = self.config.max_tool_rounds;
 
-        for round in 0..max_rounds {
+        for round in 0.. {
             // Check tool-round budget before each iteration.
             if let Some(ref b) = budget {
                 let round_u32 = u32::try_from(round).unwrap_or(u32::MAX);
@@ -1406,6 +1401,9 @@ impl AgentRuntime {
                     .await;
                     return current_turn;
                 }
+            } else if round >= max_rounds {
+                // No budget configured — fall back to config limit.
+                break;
             }
 
             let request = self.build_completion_request(conversation, &messages, &tool_definitions);
