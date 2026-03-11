@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 
 use crate::egress::EgressPolicy;
 use crate::error::SecurityError;
-use crate::safe_types::{SafeFileContent, SafeFilePath, SafeShellArg, SafeUrl};
+use crate::safe_types::{SafeBashCommand, SafeFileContent, SafeFilePath, SafeShellArg, SafeUrl};
 
 /// Opaque wrapper for unvalidated external string input.
 ///
@@ -178,6 +178,22 @@ impl TaintedToolInput {
     pub fn extract_shell_arg(&self, key: &str) -> Result<SafeShellArg, SecurityError> {
         let tainted = self.extract_string(key)?;
         SafeShellArg::from_tainted(&tainted)
+    }
+
+    /// Extract a string field and validate it as a bash command.
+    ///
+    /// Unlike [`extract_shell_arg`](Self::extract_shell_arg), this allows
+    /// shell metacharacters (pipes, redirects, compound operators) because
+    /// the command is intended for `bash -c` execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SecurityError::MissingField` if the key doesn't exist or
+    /// isn't a string. Returns `ForbiddenCharacter` or `InputTooLong` if
+    /// validation fails.
+    pub fn extract_bash_command(&self, key: &str) -> Result<SafeBashCommand, SecurityError> {
+        let tainted = self.extract_string(key)?;
+        SafeBashCommand::from_tainted(&tainted)
     }
 
     /// Extract a string field as file content for writing.
