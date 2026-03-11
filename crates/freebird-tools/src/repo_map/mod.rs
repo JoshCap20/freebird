@@ -7,6 +7,8 @@
 //! In **ranked** mode, builds a cross-file reference graph and runs `PageRank`
 //! to surface the most important symbols first within a token budget.
 
+#[allow(dead_code)]
+mod cache;
 #[allow(dead_code)] // Used in upcoming ranked mode integration.
 mod graph;
 #[allow(dead_code)]
