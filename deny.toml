@@ -1,10 +1,7 @@
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
-yanked = "warn"
+ignore = []
 
 [licenses]
-unlicensed = "deny"
 allow = [
     "MIT",
     "Apache-2.0",
@@ -14,12 +11,25 @@ allow = [
     "Unicode-3.0",
     "Unicode-DFS-2016",
     "OpenSSL",
+    "CDLA-Permissive-2.0",
 ]
+
+[licenses.private]
+ignore = true
 
 [bans]
 multiple-versions = "warn"
-wildcards = "deny"
+wildcards = "allow"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow-workspace = true
 deny = [
-    { name = "openssl", wrappers = [] },
-    { name = "openssl-sys", wrappers = [] },
+    { crate = "openssl" },
+    { crate = "openssl-sys" },
 ]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -1,5 +1,7 @@
 # Freebird - Work in Progress
 
+[![CI](https://github.com/JoshCap20/freebird/actions/workflows/ci.yml/badge.svg)](https://github.com/JoshCap20/freebird/actions/workflows/ci.yml)
+
 A security-first AI agent runtime written in Rust.
 
 Freebird is a Rust reimplementation of [OpenClaw](https://github.com/openclaw) — an always-on AI agent you communicate with through pluggable channels (CLI, Signal, and more). I rebuilt it from scratch because **agentic AI demands a fundamentally different security posture** than OpenClaw provides today. Additionally, I really wanted to name a project `freebird`.
