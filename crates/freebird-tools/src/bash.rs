@@ -23,11 +23,7 @@ use freebird_traits::tool::{
     ToolOutput,
 };
 
-/// Minimal PATH for sandboxed command execution.
-///
-/// Same as `ShellTool` — only standard system directories to prevent
-/// PATH hijacking.
-const SANDBOXED_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+use crate::common::SANDBOXED_PATH;
 
 /// Default timeout for bash commands (30 seconds).
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -167,6 +163,7 @@ async fn run_bash(
 /// and compiler diagnostics are typically at the bottom.
 ///
 /// Returns `(output, truncated, lines_shown, total_lines)`.
+#[must_use]
 fn truncate_output(raw: &str, max_lines: usize) -> (String, bool, usize, usize) {
     let lines: Vec<&str> = raw.lines().collect();
     let total = lines.len();
@@ -204,8 +201,12 @@ impl Tool for BashExecTool {
                     reason: e.to_string(),
                 })?;
 
-        // 2. Extract optional working directory (validated against sandbox)
-        let working_dir = match tainted.extract_path("working_directory", ctx.sandbox_root) {
+        // 2. Extract optional working directory (validated against sandbox + allowed dirs)
+        let working_dir = match tainted.extract_path_multi_root(
+            "working_directory",
+            ctx.sandbox_root,
+            ctx.allowed_directories,
+        ) {
             Ok(safe_path) => safe_path.as_path().to_path_buf(),
             Err(freebird_security::error::SecurityError::MissingField { .. }) => {
                 ctx.sandbox_root.to_path_buf()
