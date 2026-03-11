@@ -48,6 +48,12 @@ pub(super) fn pagerank_with_params(
         return Vec::new();
     }
 
+    debug_assert!(
+        adjacency.len() == num_nodes,
+        "adjacency list length ({}) must equal num_nodes ({num_nodes})",
+        adjacency.len(),
+    );
+
     #[allow(clippy::cast_precision_loss)] // Graph sizes are well within f64 mantissa range.
     let n = num_nodes as f64;
     let initial = 1.0 / n;
