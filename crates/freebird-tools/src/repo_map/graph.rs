@@ -275,13 +275,10 @@ fn collect_reference_tags(
                 }
             }
         }
-        "type_identifier" => {
-            // Skip definition name nodes to avoid double-counting.
-            if !is_definition_name_node(node) {
-                let name = slice_source(source, node.start_byte(), node.end_byte());
-                if !name.is_empty() {
-                    push_reference(name.to_owned(), node, file, tags);
-                }
+        "type_identifier" if !is_definition_name_node(node) => {
+            let name = slice_source(source, node.start_byte(), node.end_byte());
+            if !name.is_empty() {
+                push_reference(name.to_owned(), node, file, tags);
             }
         }
         "macro_invocation" => {
