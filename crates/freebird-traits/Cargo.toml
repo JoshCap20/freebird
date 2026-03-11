@@ -3,6 +3,7 @@ name = "freebird-traits"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+publish = false
 license.workspace = true
 description = "Core trait definitions and associated types for Freebird"
 

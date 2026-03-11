@@ -3,6 +3,7 @@ name = "freebird-runtime"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+publish = false
 license.workspace = true
 description = "Agent runtime loop, session management, and orchestration for Freebird"
 
