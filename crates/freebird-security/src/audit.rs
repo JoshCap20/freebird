@@ -412,13 +412,15 @@ impl AuditLogger {
         signing_key: &hmac::Key,
     ) -> Result<(), SecurityError> {
         let path = path.as_ref();
-        if !path.exists() {
-            return Ok(());
-        }
-
-        let file = std::fs::File::open(path).map_err(|e| SecurityError::AuditWriteFailed {
-            reason: format!("failed to open audit log for verification: {e}"),
-        })?;
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(SecurityError::AuditWriteFailed {
+                    reason: format!("failed to open audit log for verification: {e}"),
+                });
+            }
+        };
         let reader = std::io::BufReader::new(file);
         let mut expected_prev_hash = String::new();
 
