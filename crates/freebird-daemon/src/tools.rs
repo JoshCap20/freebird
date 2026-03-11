@@ -25,6 +25,7 @@ use freebird_types::config::AppConfig;
 /// - Network tool (`http_request`) — gated by [`EgressPolicy`] built from
 ///   `config.security.egress`
 /// - Repo map tool (`repo_map`) — AST-based codebase overview
+/// - Cargo verify tool (`cargo_verify`) — Rust build/test/lint/fmt pipeline
 pub fn build_tool_registry(config: &AppConfig) -> Result<ToolRegistry> {
     let mut registry = ToolRegistry::new();
 
@@ -67,6 +68,9 @@ pub fn build_tool_registry(config: &AppConfig) -> Result<ToolRegistry> {
 
     // Repo map tool — AST-based codebase overview.
     registry.register_all(freebird_tools::repo_map::repo_map_tools());
+
+    // Cargo verify tool — Rust build/test/lint/fmt verification pipeline.
+    registry.register_all(freebird_tools::cargo_verify::cargo_verify_tools());
 
     tracing::info!(
         tool_count = registry.tool_count(),
@@ -190,8 +194,12 @@ format = "pretty"
         );
         assert!(registry.get("repo_map").is_some(), "missing repo_map");
         assert!(
-            registry.tool_count() >= 14,
-            "expected at least 14 tools, got {}",
+            registry.get("cargo_verify").is_some(),
+            "missing cargo_verify"
+        );
+        assert!(
+            registry.tool_count() >= 15,
+            "expected at least 15 tools, got {}",
             registry.tool_count()
         );
     }
