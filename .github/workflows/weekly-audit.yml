@@ -5,6 +5,10 @@ on:
     - cron: '0 9 * * 1' # Monday 9am UTC
   workflow_dispatch: # Allow manual trigger
 
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   audit:
     name: Security Audit
@@ -19,10 +23,8 @@ jobs:
         run: cargo audit --deny-warnings
         continue-on-error: true
       - name: Install cargo-deny
-        if: steps.audit.outcome == 'success'
         run: cargo install cargo-deny --locked
       - name: Run cargo deny advisories
-        if: steps.audit.outcome == 'success'
         id: deny
         run: cargo deny check advisories
         continue-on-error: true

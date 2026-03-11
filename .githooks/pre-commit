@@ -18,6 +18,10 @@ info()  { echo -e "       $1"; }
 
 echo -e "${BOLD}pre-commit${NC}"
 
+# Temp file for check output — cleaned up on exit (including interrupts).
+HITS_FILE=$(mktemp /tmp/pre-commit-hits.XXXXXX)
+trap 'rm -f "$HITS_FILE"' EXIT
+
 # Collect staged .rs files once — reused by all source-scanning checks.
 staged_rs=$(git diff --cached --name-only --diff-filter=ACM -- '*.rs' || true)
 
@@ -92,7 +96,7 @@ scan_non_test_code() {
             /^[[:space:]]*#\[cfg\(test\)\]/ { in_test_attr = 1; next }
             in_test_attr && /\{/ {
                 in_test = 1
-                test_depth = 0
+                test_depth = 1
                 in_test_attr = 0
             }
             in_test_attr && !/^[[:space:]]*$/ && !/^[[:space:]]*\/\// {
@@ -132,7 +136,7 @@ scan_all_code() {
     while IFS= read -r file; do
         [ -z "$file" ] && continue
         local hits
-        hits=$(git show ":$file" 2>/dev/null | grep -n "$pattern" | grep -v '^\s*//' | while IFS= read -r line; do
+        hits=$(git show ":$file" 2>/dev/null | grep -n "$pattern" | grep -v '^[[:space:]]*//' | while IFS= read -r line; do
             echo "    $file:$line"
         done) || true
         if [ -n "$hits" ]; then
@@ -144,70 +148,70 @@ scan_all_code() {
 }
 
 # ── 5. println!/eprintln! in non-test code (§23: use tracing) ────
-if scan_non_test_code 'println!\|eprintln!' > /tmp/pre-commit-hits 2>&1; then
+if scan_non_test_code 'println!\|eprintln!' > $HITS_FILE 2>&1; then
     pass "no println!/eprintln!"
 else
     echo -e "  ${RED}FAIL${NC} println!/eprintln! found — use tracing::{info,warn,error,debug}! instead"
-    cat /tmp/pre-commit-hits
-    rm -f /tmp/pre-commit-hits
+    cat $HITS_FILE
+    rm -f $HITS_FILE
     exit 1
 fi
-rm -f /tmp/pre-commit-hits
+rm -f $HITS_FILE
 
 # ── 6. dbg! macro left in code ────────────────────────────────────
-if scan_all_code 'dbg!' > /tmp/pre-commit-hits 2>&1; then
+if scan_all_code 'dbg!' > $HITS_FILE 2>&1; then
     pass "no dbg!()"
 else
     echo -e "  ${RED}FAIL${NC} dbg!() found — remove before committing"
-    cat /tmp/pre-commit-hits
-    rm -f /tmp/pre-commit-hits
+    cat $HITS_FILE
+    rm -f $HITS_FILE
     exit 1
 fi
-rm -f /tmp/pre-commit-hits
+rm -f $HITS_FILE
 
 # ── 7. todo!/unimplemented! markers ──────────────────────────────
-if scan_all_code 'todo!\|unimplemented!' > /tmp/pre-commit-hits 2>&1; then
+if scan_all_code 'todo!\|unimplemented!' > $HITS_FILE 2>&1; then
     pass "no todo!/unimplemented!"
 else
     echo -e "  ${RED}FAIL${NC} todo!/unimplemented! found — implement or remove before committing"
-    cat /tmp/pre-commit-hits
-    rm -f /tmp/pre-commit-hits
+    cat $HITS_FILE
+    rm -f $HITS_FILE
     exit 1
 fi
-rm -f /tmp/pre-commit-hits
+rm -f $HITS_FILE
 
 # ── 8. .unwrap() / .expect() in non-test code (§17, §22) ─────────
-if scan_non_test_code '\.unwrap()\|\.expect(' > /tmp/pre-commit-hits 2>&1; then
+if scan_non_test_code '\.unwrap()\|\.expect(' > $HITS_FILE 2>&1; then
     pass "no .unwrap()/.expect() outside tests"
 else
     echo -e "  ${RED}FAIL${NC} .unwrap()/.expect() in non-test code — use ? with .context()"
-    cat /tmp/pre-commit-hits
-    rm -f /tmp/pre-commit-hits
+    cat $HITS_FILE
+    rm -f $HITS_FILE
     exit 1
 fi
-rm -f /tmp/pre-commit-hits
+rm -f $HITS_FILE
 
 # ── 9. std::sync::Mutex in async code (§20, §23) ─────────────────
-if scan_non_test_code 'std::sync::Mutex' > /tmp/pre-commit-hits 2>&1; then
+if scan_non_test_code 'std::sync::Mutex' > $HITS_FILE 2>&1; then
     pass "no std::sync::Mutex"
 else
     echo -e "  ${RED}FAIL${NC} std::sync::Mutex found — use tokio::sync::Mutex in async code"
-    cat /tmp/pre-commit-hits
-    rm -f /tmp/pre-commit-hits
+    cat $HITS_FILE
+    rm -f $HITS_FILE
     exit 1
 fi
-rm -f /tmp/pre-commit-hits
+rm -f $HITS_FILE
 
 # ── 10. openssl imports (§1: banned dependency) ───────────────────
-if scan_all_code 'use openssl' > /tmp/pre-commit-hits 2>&1; then
+if scan_all_code 'use openssl' > $HITS_FILE 2>&1; then
     pass "no openssl imports"
 else
     echo -e "  ${RED}FAIL${NC} openssl import found — use ring or rustls instead"
-    cat /tmp/pre-commit-hits
-    rm -f /tmp/pre-commit-hits
+    cat $HITS_FILE
+    rm -f $HITS_FILE
     exit 1
 fi
-rm -f /tmp/pre-commit-hits
+rm -f $HITS_FILE
 
 # ── 11. Box<dyn Error> in library crates (§17, §23) ──────────────
 boxdyn_issues=0
