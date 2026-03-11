@@ -1439,3 +1439,265 @@ async fn test_new_conversation_uses_config_values() {
     assert_eq!(conv.provider_id.as_str(), "test-provider");
     assert_eq!(conv.system_prompt.as_deref(), Some("You are a custom bot."));
 }
+
+// ===========================================================================
+// Tests — Multi-turn within a single session (#105)
+// ===========================================================================
+
+#[tokio::test]
+async fn test_multi_turn_within_same_session() {
+    let (channel, inbound_tx, outbound_rx, _) = MockChannel::new();
+
+    let provider = Arc::new(RequestCapturingProvider::new(vec![
+        text_response("Answer to first"),
+        text_response("Answer to second"),
+    ]));
+
+    let runtime = AgentRuntime::new(
+        make_capturing_registry(provider.clone()),
+        Box::new(channel),
+        make_tool_executor(vec![]),
+        None,
+        Box::new(InMemoryMemory::new()),
+        None,
+        KnowledgeConfig::default(),
+        default_config(),
+        default_tools_config(),
+        BudgetConfig::default(),
+        None,
+    );
+
+    // Send two messages then quit — runtime processes them sequentially
+    inbound_tx
+        .send(InboundEvent::Message {
+            raw_text: "First question".into(),
+            sender_id: "alice".into(),
+            attachments: vec![],
+        })
+        .await
+        .unwrap();
+    inbound_tx
+        .send(InboundEvent::Message {
+            raw_text: "Second question".into(),
+            sender_id: "alice".into(),
+            attachments: vec![],
+        })
+        .await
+        .unwrap();
+    inbound_tx
+        .send(InboundEvent::Command {
+            name: "quit".into(),
+            args: vec![],
+            sender_id: "alice".into(),
+        })
+        .await
+        .unwrap();
+
+    let cancel = CancellationToken::new();
+    let mut runtime = runtime;
+    tokio::time::timeout(Duration::from_secs(5), runtime.run(cancel))
+        .await
+        .expect("runtime should exit within timeout")
+        .unwrap();
+
+    let mut events = Vec::new();
+    let mut outbound_rx = outbound_rx;
+    while let Ok(event) = outbound_rx.try_recv() {
+        events.push(event);
+    }
+    let events = without_status_events(events);
+
+    // Should have responses for both turns
+    let messages: Vec<_> = events.iter().filter_map(|e| message_text(e)).collect();
+    assert!(
+        messages.contains(&"Answer to first"),
+        "should contain first response, got: {messages:?}"
+    );
+    assert!(
+        messages.contains(&"Answer to second"),
+        "should contain second response, got: {messages:?}"
+    );
+
+    // Verify the second request includes history from the first turn
+    let requests = provider.captured_requests().await;
+    assert_eq!(requests.len(), 2, "should have two provider calls");
+
+    // First request: just the user message
+    let first_req_msgs = &requests[0].messages;
+    assert_eq!(
+        first_req_msgs.len(),
+        1,
+        "first request should have 1 message"
+    );
+    assert_eq!(first_req_msgs[0].role, Role::User);
+
+    // Second request: should include history (first user + first assistant + second user)
+    let second_req_msgs = &requests[1].messages;
+    assert!(
+        second_req_msgs.len() >= 3,
+        "second request should have >= 3 messages (history + new), got {}",
+        second_req_msgs.len()
+    );
+    assert_eq!(second_req_msgs[0].role, Role::User);
+    assert_eq!(second_req_msgs[1].role, Role::Assistant);
+    let last = second_req_msgs.last().unwrap();
+    assert_eq!(last.role, Role::User);
+}
+
+// ===========================================================================
+// Tests — Token budget enforcement (#105)
+// ===========================================================================
+
+fn text_response_with_usage(text: &str, input_tokens: u32, output_tokens: u32) -> ResponseFactory {
+    let text = text.to_owned();
+    Box::new(move || {
+        Ok(CompletionResponse {
+            message: Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text { text: text.clone() }],
+                timestamp: Utc::now(),
+            },
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+            },
+            model: ModelId::from("test-model"),
+        })
+    })
+}
+
+#[tokio::test]
+async fn test_token_budget_per_request_exceeded() {
+    let (channel, inbound_tx, outbound_rx, _) = MockChannel::new();
+
+    // Provider returns a response with usage that exceeds per-request limit
+    let provider = Arc::new(QueuedProvider::new(vec![text_response_with_usage(
+        "Big response",
+        20_000,
+        20_000,
+    )]));
+
+    let budget = BudgetConfig {
+        max_tokens_per_request: 30_000, // 40k total > 30k limit
+        ..BudgetConfig::default()
+    };
+
+    let runtime = AgentRuntime::new(
+        make_registry(provider.clone()),
+        Box::new(channel),
+        make_tool_executor(vec![]),
+        None,
+        Box::new(InMemoryMemory::new()),
+        None,
+        KnowledgeConfig::default(),
+        default_config(),
+        default_tools_config(),
+        budget,
+        None,
+    );
+
+    let events = without_status_events(
+        send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await,
+    );
+
+    // Should get a budget exceeded error
+    let has_budget_error = events
+        .iter()
+        .any(|e| error_text(e).is_some_and(|t| t.contains("Budget exceeded")));
+    assert!(
+        has_budget_error,
+        "should have budget exceeded error, got: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_token_budget_per_session_exceeded() {
+    let (channel, inbound_tx, outbound_rx, _) = MockChannel::new();
+
+    // Two responses, each using 300 tokens. Session limit is 500.
+    let provider = Arc::new(QueuedProvider::new(vec![
+        text_response_with_usage("First", 150, 150),
+        text_response_with_usage("Second", 150, 150),
+    ]));
+
+    let budget = BudgetConfig {
+        max_tokens_per_session: 500,
+        max_tokens_per_request: 1000, // per-request is fine
+        ..BudgetConfig::default()
+    };
+
+    let runtime = AgentRuntime::new(
+        make_registry(provider.clone()),
+        Box::new(channel),
+        make_tool_executor(vec![]),
+        None,
+        Box::new(InMemoryMemory::new()),
+        None,
+        KnowledgeConfig::default(),
+        default_config(),
+        default_tools_config(),
+        budget,
+        None,
+    );
+
+    // Send two messages — first should succeed (300 tokens), second should fail (600 > 500)
+    inbound_tx
+        .send(InboundEvent::Message {
+            raw_text: "First message".into(),
+            sender_id: "alice".into(),
+            attachments: vec![],
+        })
+        .await
+        .unwrap();
+    inbound_tx
+        .send(InboundEvent::Message {
+            raw_text: "Second message".into(),
+            sender_id: "alice".into(),
+            attachments: vec![],
+        })
+        .await
+        .unwrap();
+    inbound_tx
+        .send(InboundEvent::Command {
+            name: "quit".into(),
+            args: vec![],
+            sender_id: "alice".into(),
+        })
+        .await
+        .unwrap();
+
+    let cancel = CancellationToken::new();
+    let mut runtime = runtime;
+    tokio::time::timeout(Duration::from_secs(5), runtime.run(cancel))
+        .await
+        .expect("runtime should exit within timeout")
+        .unwrap();
+
+    let mut events = Vec::new();
+    let mut outbound_rx = outbound_rx;
+    while let Ok(event) = outbound_rx.try_recv() {
+        events.push(event);
+    }
+    let events = without_status_events(events);
+
+    // First message should succeed
+    let has_first_response = events
+        .iter()
+        .any(|e| message_text(e).is_some_and(|t| t == "First"));
+    assert!(
+        has_first_response,
+        "first message should get a response, got: {events:?}"
+    );
+
+    // Second message should trigger budget exceeded
+    let has_budget_error = events
+        .iter()
+        .any(|e| error_text(e).is_some_and(|t| t.contains("Budget exceeded")));
+    assert!(
+        has_budget_error,
+        "second message should trigger budget exceeded, got: {events:?}"
+    );
+}
