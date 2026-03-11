@@ -198,6 +198,70 @@ fn validate_keyfile_permissions(_path: &Path) -> Result<(), SecurityError> {
     Ok(())
 }
 
+/// Read a line from stdin with terminal echo disabled (Unix).
+///
+/// Uses a drop guard to ensure echo is always restored, even on error or panic.
+#[cfg(unix)]
+fn read_password_from_stdin() -> std::io::Result<String> {
+    use std::os::unix::io::AsRawFd;
+
+    // Drop guard that restores echo even if read_line panics or errors.
+    // Defined before statements to satisfy clippy::items_after_statements.
+    struct RestoreEcho {
+        fd: libc::c_int,
+        original: libc::termios,
+    }
+    impl Drop for RestoreEcho {
+        fn drop(&mut self) {
+            // SAFETY: restoring previously-saved terminal state on a valid fd
+            let rc = unsafe { libc::tcsetattr(self.fd, libc::TCSANOW, &raw const self.original) };
+            if rc != 0 {
+                tracing::warn!("failed to restore terminal echo after password input");
+            }
+        }
+    }
+
+    let stdin_fd = std::io::stdin().as_raw_fd();
+
+    let mut termios = std::mem::MaybeUninit::uninit();
+    // SAFETY: tcgetattr is a standard POSIX API operating on a valid fd.
+    if unsafe { libc::tcgetattr(stdin_fd, termios.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: tcgetattr succeeded, so termios is fully initialized.
+    let original = unsafe { termios.assume_init() };
+
+    let _guard = RestoreEcho {
+        fd: stdin_fd,
+        original,
+    };
+
+    let mut noecho = original;
+    noecho.c_lflag &= !libc::ECHO;
+    // SAFETY: disabling ECHO flag via tcsetattr on a valid fd with valid termios.
+    if unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &raw const noecho) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    // _guard dropped here → echo restored
+
+    // Print newline since echo was disabled (user's Enter didn't show)
+    eprintln!();
+
+    Ok(input)
+}
+
+/// Fallback for non-Unix: reads with echo (warns user).
+#[cfg(not(unix))]
+fn read_password_from_stdin() -> std::io::Result<String> {
+    tracing::warn!("password echo suppression is not supported on this platform");
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    Ok(input)
+}
+
 /// Prompt the user for a passphrase via stdin.
 fn prompt_passphrase() -> Result<SecretString, SecurityError> {
     use std::io::Write;
@@ -206,9 +270,7 @@ fn prompt_passphrase() -> Result<SecretString, SecurityError> {
         .flush()
         .map_err(|e| SecurityError::KeyfileError(format!("failed to flush stderr: {e}")))?;
 
-    let mut input = String::new();
-    std::io::stdin()
-        .read_line(&mut input)
+    let mut input = read_password_from_stdin()
         .map_err(|e| SecurityError::KeyfileError(format!("failed to read passphrase: {e}")))?;
 
     let trimmed = input.trim();

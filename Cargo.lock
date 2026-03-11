@@ -509,6 +509,7 @@ dependencies = [
  "freebird-traits",
  "freebird-types",
  "hex",
+ "libc",
  "proptest",
  "regex",
  "ring",
