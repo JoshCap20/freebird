@@ -3,8 +3,15 @@
 //! Generates a structural overview of Rust codebases — function signatures,
 //! struct/enum definitions, trait implementations, and module structure —
 //! giving the agent an architectural map without reading every file.
+//!
+//! In **ranked** mode, builds a cross-file reference graph and runs `PageRank`
+//! to surface the most important symbols first within a token budget.
 
-use std::collections::VecDeque;
+mod cache;
+mod graph;
+mod pagerank;
+
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -59,6 +66,38 @@ fn parse_depth(s: &str) -> Result<Depth, String> {
             "invalid depth '{other}': expected 'outline', 'signatures', or 'full'"
         )),
     }
+}
+
+// ── Mode ─────────────────────────────────────────────────────────
+
+/// Output mode for the repo map tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// File-by-file alphabetical symbol listing (default, backward compatible).
+    Structure,
+    /// Symbols ranked by cross-file reference importance via `PageRank`.
+    Ranked,
+}
+
+fn parse_mode(s: &str) -> Result<Mode, String> {
+    match s {
+        "structure" => Ok(Mode::Structure),
+        "ranked" => Ok(Mode::Ranked),
+        other => Err(format!(
+            "invalid mode '{other}': expected 'structure' or 'ranked'"
+        )),
+    }
+}
+
+/// Default token budget for ranked output (~32k tokens at ~4 chars/token).
+const DEFAULT_TOKEN_BUDGET_CHARS: usize = 128 * 1024;
+
+/// Validated input parameters extracted before taint wrapping.
+struct ParsedParams {
+    depth: Depth,
+    mode: Mode,
+    max_files: usize,
+    token_budget_chars: usize,
 }
 
 // ── Symbol types ──────────────────────────────────────────────────
@@ -569,7 +608,8 @@ impl RepoMapTool {
                 name: Self::NAME.into(),
                 description: "Generate a structural overview of the codebase using AST parsing. \
                     Shows function signatures, struct/enum definitions, trait implementations, \
-                    and module structure without reading file contents."
+                    and module structure. In 'ranked' mode, uses PageRank over cross-file \
+                    references to surface the most important symbols first."
                     .into(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -590,6 +630,15 @@ impl RepoMapTool {
                         "max_files": {
                             "type": "integer",
                             "description": "Maximum number of files to process. Default: 100. Max: 500."
+                        },
+                        "mode": {
+                            "type": "string",
+                            "description": "Output mode. 'structure' (default) lists symbols by file. 'ranked' orders files by cross-file reference importance (PageRank).",
+                            "enum": ["structure", "ranked"]
+                        },
+                        "token_budget": {
+                            "type": "integer",
+                            "description": "Approximate character budget for ranked output (default: 131072 ~= 32k tokens). Only used in ranked mode."
                         }
                     },
                     "required": []
@@ -638,6 +687,132 @@ impl RepoMapTool {
         }
     }
 
+    /// Parse and validate tool input parameters before taint wrapping.
+    fn parse_input_params(input: &serde_json::Value) -> Result<ParsedParams, ToolError> {
+        let depth = match input.get("depth").and_then(serde_json::Value::as_str) {
+            Some(s) => parse_depth(s).map_err(|reason| ToolError::InvalidInput {
+                tool: Self::NAME.into(),
+                reason,
+            })?,
+            None => Depth::Signatures,
+        };
+
+        let mode = match input.get("mode").and_then(serde_json::Value::as_str) {
+            Some(s) => parse_mode(s).map_err(|reason| ToolError::InvalidInput {
+                tool: Self::NAME.into(),
+                reason,
+            })?,
+            None => Mode::Structure,
+        };
+
+        let token_budget_chars = input
+            .get("token_budget")
+            .and_then(serde_json::Value::as_u64)
+            .map_or(DEFAULT_TOKEN_BUDGET_CHARS, |v| {
+                usize::try_from(v).unwrap_or(DEFAULT_TOKEN_BUDGET_CHARS)
+            });
+
+        if let Some(lang) = input.get("language").and_then(serde_json::Value::as_str) {
+            if lang != "rust" {
+                return Err(ToolError::InvalidInput {
+                    tool: Self::NAME.into(),
+                    reason: format!(
+                        "unsupported language '{lang}': only 'rust' is supported in v1"
+                    ),
+                });
+            }
+        }
+
+        let max_files = Self::parse_max_files(input);
+
+        Ok(ParsedParams {
+            depth,
+            mode,
+            max_files,
+            token_budget_chars,
+        })
+    }
+
+    /// Discover files, parse them, and produce the map output string.
+    async fn generate_map(
+        scan_root: &Path,
+        context: &ToolContext<'_>,
+        params: &ParsedParams,
+    ) -> Result<String, ToolError> {
+        let mapper = RustMapper;
+        let ext = mapper.file_extension().to_owned();
+        let root_for_discovery = scan_root.to_path_buf();
+        let max_files = params.max_files;
+
+        let files = tokio::task::spawn_blocking(move || {
+            discover_files(&root_for_discovery, &ext, max_files)
+        })
+        .await
+        .map_err(|e| ToolError::ExecutionFailed {
+            tool: Self::NAME.into(),
+            reason: format!("file discovery task failed: {e}"),
+        })?;
+
+        if files.is_empty() {
+            return Ok(format!(
+                "No .{} files found in '{}'",
+                mapper.file_extension(),
+                scan_root
+                    .strip_prefix(context.sandbox_root)
+                    .unwrap_or(scan_root)
+                    .display()
+            ));
+        }
+
+        let sandbox_root = context.sandbox_root.to_path_buf();
+        let scan_root_owned = scan_root.to_path_buf();
+        let depth = params.depth;
+        let token_budget_chars = params.token_budget_chars;
+
+        match params.mode {
+            Mode::Structure => {
+                let language = mapper.language();
+                let file_symbols = tokio::task::spawn_blocking(move || {
+                    Self::parse_files(&files, &language, &mapper, depth)
+                })
+                .await
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: Self::NAME.into(),
+                    reason: format!("parsing task failed: {e}"),
+                })?
+                .map_err(|reason| ToolError::ExecutionFailed {
+                    tool: Self::NAME.into(),
+                    reason,
+                })?;
+
+                Ok(format_repo_map(&file_symbols, &scan_root_owned))
+            }
+            Mode::Ranked => {
+                let language = mapper.language();
+                tokio::task::spawn_blocking(move || {
+                    Self::execute_ranked(
+                        &files,
+                        &language,
+                        &mapper,
+                        depth,
+                        &scan_root_owned,
+                        &sandbox_root,
+                        token_budget_chars,
+                    )
+                })
+                .await
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: Self::NAME.into(),
+                    reason: format!("ranked analysis task failed: {e}"),
+                })?
+                .map_err(|reason| ToolError::ExecutionFailed {
+                    tool: Self::NAME.into(),
+                    reason,
+                })
+            }
+        }
+    }
+
     /// Parse files and extract symbols from each.
     fn parse_files(
         files: &[PathBuf],
@@ -672,6 +847,200 @@ impl RepoMapTool {
         }
         Ok(results)
     }
+
+    /// Execute the ranked mode: extract tags, build reference graph, run
+    /// `PageRank`, then format output with files ordered by importance.
+    #[allow(clippy::too_many_arguments)]
+    fn execute_ranked(
+        files: &[PathBuf],
+        language: &tree_sitter::Language,
+        mapper: &RustMapper,
+        depth: Depth,
+        scan_root: &Path,
+        sandbox_root: &Path,
+        token_budget_chars: usize,
+    ) -> Result<String, String> {
+        let mut parser = tree_sitter::Parser::new();
+        if parser.set_language(language).is_err() {
+            return Err("failed to set tree-sitter language".to_owned());
+        }
+
+        // Load tag cache.
+        let mut tag_cache = cache::TagCache::load(sandbox_root);
+
+        // Extract tags and symbols for each file.
+        let mut tags_by_file: HashMap<PathBuf, Vec<graph::Tag>> = HashMap::new();
+        let mut symbols_by_file: HashMap<PathBuf, Vec<Symbol>> = HashMap::new();
+
+        for file_path in files {
+            let Ok(metadata) = std::fs::metadata(file_path) else {
+                continue;
+            };
+            if metadata.len() > MAX_PARSE_FILE_BYTES {
+                continue;
+            }
+
+            // Check cache first.
+            if let Some(cached_tags) = tag_cache.get(file_path) {
+                tags_by_file.insert(file_path.clone(), cached_tags);
+                // Still need symbols for output formatting — parse the file.
+                let Ok(source) = std::fs::read(file_path) else {
+                    continue;
+                };
+                let Some(tree) = parser.parse(&source, None) else {
+                    continue;
+                };
+                let symbols = mapper.extract_symbols(&tree, &source, depth);
+                if !symbols.is_empty() {
+                    symbols_by_file.insert(file_path.clone(), symbols);
+                }
+                continue;
+            }
+
+            let Ok(source) = std::fs::read(file_path) else {
+                continue;
+            };
+            let Some(tree) = parser.parse(&source, None) else {
+                continue;
+            };
+
+            let tags = graph::extract_rust_tags(&tree, &source, file_path);
+            let symbols = mapper.extract_symbols(&tree, &source, depth);
+
+            // Update cache.
+            if let Ok(mtime) = metadata.modified() {
+                tag_cache.insert(file_path.clone(), mtime, &tags);
+            }
+
+            if !tags.is_empty() {
+                tags_by_file.insert(file_path.clone(), tags);
+            }
+            if !symbols.is_empty() {
+                symbols_by_file.insert(file_path.clone(), symbols);
+            }
+        }
+
+        // Save cache for next invocation.
+        tag_cache.save(sandbox_root);
+
+        // Build reference graph and compute PageRank.
+        let ref_graph = graph::ReferenceGraph::build(&tags_by_file);
+        let ranks = pagerank::pagerank(ref_graph.adjacency(), ref_graph.num_files());
+
+        Ok(format_ranked_repo_map(
+            &ref_graph,
+            &ranks,
+            &symbols_by_file,
+            scan_root,
+            token_budget_chars,
+        ))
+    }
+}
+
+// ── Output helpers ───────────────────────────────────────────────
+
+/// Truncate output to `MAX_OUTPUT_BYTES` on a clean line boundary.
+fn truncate_output(output: &mut String) {
+    if output.len() <= MAX_OUTPUT_BYTES {
+        return;
+    }
+    let mut trunc_at = MAX_OUTPUT_BYTES;
+    while !output.is_char_boundary(trunc_at) && trunc_at > 0 {
+        trunc_at -= 1;
+    }
+    output.truncate(trunc_at);
+    if let Some(last_nl) = output.rfind('\n') {
+        output.truncate(last_nl + 1);
+    }
+    output.push_str("\n... output truncated (exceeded 512 KiB limit)\n");
+}
+
+// ── Ranked output formatting ─────────────────────────────────────
+
+/// Format a ranked repo map: files sorted by `PageRank` score (descending),
+/// with symbols within each file, truncated to fit the token budget.
+fn format_ranked_repo_map(
+    graph: &graph::ReferenceGraph,
+    ranks: &[f64],
+    symbols_by_file: &HashMap<PathBuf, Vec<Symbol>>,
+    root: &Path,
+    token_budget_chars: usize,
+) -> String {
+    // Pair files with their ranks and sort descending.
+    let index_to_file = graph.index_to_file();
+    let mut file_ranks: Vec<(usize, f64)> = ranks.iter().copied().enumerate().collect();
+    file_ranks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut output = String::new();
+    let mut total_symbols: usize = 0;
+    let mut mapped_files: usize = 0;
+
+    let _ = writeln!(
+        output,
+        "[RANKED REPO MAP — files ordered by cross-file reference importance]\n"
+    );
+
+    for (idx, _rank) in &file_ranks {
+        if output.len() >= token_budget_chars {
+            break;
+        }
+
+        let Some(file_path) = index_to_file.get(*idx) else {
+            continue;
+        };
+        let Some(symbols) = symbols_by_file.get(file_path) else {
+            continue;
+        };
+        if symbols.is_empty() {
+            continue;
+        }
+
+        let relative = file_path
+            .strip_prefix(root)
+            .unwrap_or(file_path)
+            .to_string_lossy();
+        let _ = writeln!(output, "## {relative}");
+        let _ = writeln!(output);
+        mapped_files += 1;
+
+        for (i, sym) in symbols.iter().enumerate() {
+            if output.len() >= token_budget_chars {
+                break;
+            }
+            total_symbols += 1;
+
+            if let Some(ref doc) = sym.doc_comment {
+                for doc_line in doc.lines() {
+                    let _ = writeln!(output, "  {doc_line}");
+                }
+            }
+            let _ = writeln!(output, "  {}", sym.signature);
+
+            for child in &sym.children {
+                total_symbols += 1;
+                if let Some(ref doc) = child.doc_comment {
+                    for doc_line in doc.lines() {
+                        let _ = writeln!(output, "    {doc_line}");
+                    }
+                }
+                let _ = writeln!(output, "    {}", child.signature);
+            }
+
+            if i + 1 < symbols.len() {
+                let _ = writeln!(output);
+            }
+        }
+        let _ = writeln!(output);
+    }
+
+    let _ = write!(
+        output,
+        "Ranked {mapped_files} file{}, {total_symbols} symbol{}",
+        if mapped_files == 1 { "" } else { "s" },
+        if total_symbols == 1 { "" } else { "s" },
+    );
+
+    output
 }
 
 #[async_trait]
@@ -685,31 +1054,7 @@ impl Tool for RepoMapTool {
         input: serde_json::Value,
         context: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError> {
-        // depth, language, and max_files are enum selectors / integers validated
-        // by pattern matching and clamping below. TaintedToolInput has no integer
-        // extractor, so these are read before wrapping. Only `path` requires
-        // taint-boundary validation via SafeFilePath.
-        let depth = match input.get("depth").and_then(serde_json::Value::as_str) {
-            Some(s) => parse_depth(s).map_err(|reason| ToolError::InvalidInput {
-                tool: Self::NAME.into(),
-                reason,
-            })?,
-            None => Depth::Signatures,
-        };
-
-        if let Some(lang) = input.get("language").and_then(serde_json::Value::as_str) {
-            if lang != "rust" {
-                return Err(ToolError::InvalidInput {
-                    tool: Self::NAME.into(),
-                    reason: format!(
-                        "unsupported language '{lang}': only 'rust' is supported in v1"
-                    ),
-                });
-            }
-        }
-
-        let max_files = Self::parse_max_files(&input);
-
+        let params = Self::parse_input_params(&input)?;
         let tainted = TaintedToolInput::new(input);
         let scan_root = Self::resolve_scan_root(&tainted, context)?;
 
@@ -726,63 +1071,8 @@ impl Tool for RepoMapTool {
             });
         }
 
-        let mapper = RustMapper;
-        let ext = mapper.file_extension().to_owned();
-        let root_for_discovery = scan_root.clone();
-
-        let files = tokio::task::spawn_blocking(move || {
-            discover_files(&root_for_discovery, &ext, max_files)
-        })
-        .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            tool: Self::NAME.into(),
-            reason: format!("file discovery task failed: {e}"),
-        })?;
-
-        if files.is_empty() {
-            return Ok(ToolOutput {
-                content: format!(
-                    "No .{} files found in '{}'",
-                    mapper.file_extension(),
-                    scan_root
-                        .strip_prefix(context.sandbox_root)
-                        .unwrap_or(&scan_root)
-                        .display()
-                ),
-                outcome: ToolOutcome::Success,
-                metadata: None,
-            });
-        }
-
-        let language = mapper.language();
-        let file_symbols = tokio::task::spawn_blocking(move || {
-            Self::parse_files(&files, &language, &mapper, depth)
-        })
-        .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            tool: Self::NAME.into(),
-            reason: format!("parsing task failed: {e}"),
-        })?
-        .map_err(|reason| ToolError::ExecutionFailed {
-            tool: Self::NAME.into(),
-            reason,
-        })?;
-
-        let mut output_text = format_repo_map(&file_symbols, &scan_root);
-
-        if output_text.len() > MAX_OUTPUT_BYTES {
-            // Find a char boundary at or before MAX_OUTPUT_BYTES to avoid panicking
-            // on multi-byte UTF-8 characters.
-            let mut trunc_at = MAX_OUTPUT_BYTES;
-            while !output_text.is_char_boundary(trunc_at) && trunc_at > 0 {
-                trunc_at -= 1;
-            }
-            output_text.truncate(trunc_at);
-            if let Some(last_nl) = output_text.rfind('\n') {
-                output_text.truncate(last_nl + 1);
-            }
-            output_text.push_str("\n... output truncated (exceeded 512 KiB limit)\n");
-        }
+        let mut output_text = Self::generate_map(&scan_root, context, &params).await?;
+        truncate_output(&mut output_text);
 
         Ok(ToolOutput {
             content: output_text,
@@ -1646,5 +1936,197 @@ mod tests {
                 }
             }
         }
+    }
+
+    // -- Helper for ranked mode tests --
+
+    fn make_context(root: &Path) -> ToolContext<'_> {
+        // Leak a session ID so the borrow lives long enough.
+        // This is fine in test code.
+        let session_id: &'static SessionId =
+            Box::leak(Box::new(SessionId::from_string("test-session")));
+        let caps: &'static [Capability] = &[Capability::FileRead];
+        let dirs: &'static [PathBuf] = &[];
+        ToolContext {
+            session_id,
+            sandbox_root: root,
+            granted_capabilities: caps,
+            allowed_directories: dirs,
+            knowledge_store: None,
+        }
+    }
+
+    // -- Mode parsing --
+
+    #[test]
+    fn test_parse_mode_structure() {
+        assert_eq!(parse_mode("structure").unwrap(), Mode::Structure);
+    }
+
+    #[test]
+    fn test_parse_mode_ranked() {
+        assert_eq!(parse_mode("ranked").unwrap(), Mode::Ranked);
+    }
+
+    #[test]
+    fn test_parse_mode_invalid() {
+        assert!(parse_mode("invalid").is_err());
+    }
+
+    // -- Ranked mode integration --
+
+    #[tokio::test]
+    async fn test_ranked_mode_produces_ranked_output() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+
+        // Create files where types.rs defines `Config` which is used by both
+        // agent.rs and tools.rs — types.rs should rank highest.
+        let types_dir = root.join("src");
+        std::fs::create_dir_all(&types_dir).unwrap();
+
+        std::fs::write(
+            types_dir.join("types.rs"),
+            "pub struct Config { pub name: String }\npub struct SessionId(String);\n",
+        )
+        .unwrap();
+        std::fs::write(
+            types_dir.join("agent.rs"),
+            "use crate::types::Config;\nfn run(cfg: Config) { }\nfn process(sid: SessionId) { }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            types_dir.join("tools.rs"),
+            "use crate::types::Config;\nfn execute(cfg: Config) -> bool { true }\n",
+        )
+        .unwrap();
+
+        let tool = RepoMapTool::new();
+        let input = serde_json::json!({
+            "path": "src",
+            "mode": "ranked"
+        });
+        let ctx = make_context(root);
+        let result = tool.execute(input, &ctx).await.unwrap();
+
+        assert_eq!(result.outcome, ToolOutcome::Success);
+        assert!(result.content.contains("[RANKED REPO MAP"));
+        assert!(result.content.contains("Ranked"));
+    }
+
+    #[tokio::test]
+    async fn test_structure_mode_backward_compatible() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("lib.rs"), "pub fn hello() { }").unwrap();
+
+        let tool = RepoMapTool::new();
+        let input = serde_json::json!({ "mode": "structure" });
+        let ctx = make_context(root);
+        let result = tool.execute(input, &ctx).await.unwrap();
+
+        assert_eq!(result.outcome, ToolOutcome::Success);
+        // Structure mode should NOT have the ranked header.
+        assert!(!result.content.contains("[RANKED REPO MAP"));
+        assert!(result.content.contains("Mapped"));
+    }
+
+    #[tokio::test]
+    async fn test_default_mode_is_structure() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("lib.rs"), "pub fn hello() { }").unwrap();
+
+        let tool = RepoMapTool::new();
+        let input = serde_json::json!({});
+        let ctx = make_context(root);
+        let result = tool.execute(input, &ctx).await.unwrap();
+
+        // Default should be structure mode.
+        assert!(result.content.contains("Mapped"));
+    }
+
+    #[tokio::test]
+    async fn test_ranked_mode_token_budget_truncates() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+
+        // Create enough files to exceed a tiny budget.
+        for i in 0..10 {
+            std::fs::write(
+                root.join(format!("file{i}.rs")),
+                format!("pub fn func_{i}() {{ }}\npub struct Type{i};\n"),
+            )
+            .unwrap();
+        }
+
+        let tool = RepoMapTool::new();
+        let input = serde_json::json!({
+            "mode": "ranked",
+            "token_budget": 200
+        });
+        let ctx = make_context(root);
+        let result = tool.execute(input, &ctx).await.unwrap();
+
+        assert_eq!(result.outcome, ToolOutcome::Success);
+        // With a 200-char budget, not all 10 files should appear.
+        let file_count: usize = result.content.matches("## file").count();
+        assert!(file_count < 10, "should truncate: found {file_count} files");
+    }
+
+    #[tokio::test]
+    async fn test_ranked_mode_invalid_returns_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("lib.rs"), "fn x() {}").unwrap();
+
+        let tool = RepoMapTool::new();
+        let input = serde_json::json!({ "mode": "invalid_mode" });
+        let ctx = make_context(root);
+        let result = tool.execute(input, &ctx).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_ranked_mode_heavily_referenced_file_first() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+
+        // core.rs defines `CoreType` used by a.rs, b.rs, c.rs.
+        // leaf.rs defines `Leaf` used by nobody.
+        std::fs::write(root.join("core.rs"), "pub struct CoreType;\n").unwrap();
+        std::fs::write(root.join("leaf.rs"), "pub struct Leaf;\n").unwrap();
+        std::fs::write(
+            root.join("a.rs"),
+            "use crate::core::CoreType;\nfn use_core(c: CoreType) {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("b.rs"),
+            "use crate::core::CoreType;\nfn other(c: CoreType) {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("c.rs"),
+            "use crate::core::CoreType;\nfn another(c: CoreType) {}\n",
+        )
+        .unwrap();
+
+        let tool = RepoMapTool::new();
+        let input = serde_json::json!({ "mode": "ranked" });
+        let ctx = make_context(root);
+        let result = tool.execute(input, &ctx).await.unwrap();
+
+        // core.rs should appear before leaf.rs in ranked output.
+        let core_pos = result.content.find("core.rs");
+        let leaf_pos = result.content.find("leaf.rs");
+        assert!(
+            core_pos.is_some() && leaf_pos.is_some(),
+            "both files should appear in output"
+        );
+        assert!(
+            core_pos.unwrap() < leaf_pos.unwrap(),
+            "core.rs should rank before leaf.rs"
+        );
     }
 }
