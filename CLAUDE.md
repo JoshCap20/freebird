@@ -322,7 +322,7 @@ All data from external sources MUST be wrapped in `Tainted`. The security bounda
 
 - `Tainted::new(raw)` — wraps untrusted input. Debug impl shows `[TAINTED len=N]`, never the content.
 - `tainted.inner()` — `pub(crate)` only. Only safe type factories inside `freebird-security` can access raw content.
-- `TaintedToolInput::new(value)` — wraps untrusted `serde_json::Value` from LLM tool calls. Provides `extract_string()`, `extract_path()`, `extract_shell_arg()`, `extract_url()` methods that return safe types.
+- `TaintedToolInput::new(value)` — wraps untrusted `serde_json::Value` from LLM tool calls. Provides `extract_string()`, `extract_path()`, `extract_shell_arg()`, `extract_bash_command()`, `extract_url()` methods that return safe types.
 
 **Rules**: Never implement `Deref`, `Display`, `AsRef<str>`, or `Into<String>` on `Tainted`. Never bypass `pub(crate) inner()`.
 
@@ -338,6 +338,7 @@ Each safe type is constructed from `Tainted` via a factory that validates + sani
 | `SafeFilePath` | `from_tainted(&Tainted, &Path)` | Path traversal, symlink resolution, null bytes, sandbox containment |
 | `SafeFilePath` | `from_tainted_for_creation(...)` | Same + parent dir must exist, no overwriting symlinks |
 | `SafeShellArg` | `from_tainted(&Tainted)` | Rejects `|;&\`'"*?` and other shell metacharacters |
+| `SafeBashCommand` | `from_tainted(&Tainted)` | Length ≤ 32k, no null bytes, strips control chars; allows metacharacters |
 | `SafeUrl` | `from_tainted(&Tainted, &EgressPolicy)` | HTTPS only, host allowlist, DNS rebinding check |
 | `Redacted` | `from_tainted(&Tainted)` | Truncates + strips control chars for safe logging |
 
@@ -502,6 +503,7 @@ Every tool action is classified by `RiskLevel`. The approval gate compares `tool
 | `shell` (read-only: ls, cat) | Medium | No |
 | `shell` (write: rm, mv, cp) | High | **Yes** |
 | `shell` (arbitrary) | Critical | **Always** |
+| `bash_exec` | Critical | **Always** |
 | `network_request` | High | **Yes** |
 | `send_message` (via channel) | High | **Yes** |
 | `modify_config` | Critical | **Always** |
