@@ -3,6 +3,12 @@
 //! Generates a structural overview of Rust codebases — function signatures,
 //! struct/enum definitions, trait implementations, and module structure —
 //! giving the agent an architectural map without reading every file.
+//!
+//! In **ranked** mode, builds a cross-file reference graph and runs `PageRank`
+//! to surface the most important symbols first within a token budget.
+
+#[allow(dead_code)] // Used in upcoming ranked mode integration.
+mod graph;
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
