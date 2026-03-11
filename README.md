@@ -1,4 +1,4 @@
-# Freebird - Work in Progress
+# FreeBird
 
 [![CI](https://github.com/JoshCap20/freebird/actions/workflows/ci.yml/badge.svg)](https://github.com/JoshCap20/freebird/actions/workflows/ci.yml)
 
@@ -24,19 +24,23 @@ OpenClaw's ClawHub is a convenience that doubles as an injection vector. Freebir
 
 ### Compile-Time Taint Tracking
 
-All external input — user messages, tool outputs, API responses — enters the system as `Tainted<Untrusted>`. It cannot be used in tool invocations or passed to the LLM without first passing through an explicit sanitization boundary. This isn't a convention; the Rust compiler enforces it. You cannot accidentally pass unsanitized data to a dangerous operation.
+All external input — user messages, tool outputs, API responses — enters the system wrapped in `Tainted`. It cannot be used in tool invocations or passed to the LLM without first passing through an explicit sanitization boundary. Taint tracking is enforced at compile time — the type system prevents unsanitized data from reaching dangerous operations. Injection *detection* (pattern scanning) is a runtime check, but the guarantee that every external input passes through a sanitization boundary is structural. Injection detection response is configurable per boundary — `block`, `prompt` (escalate to human approval), or `allow` — with model output and context injections always blocked.
 
 ### Explicit Approval for Sensitive Actions
 
-High-risk tool executions (file writes outside the sandbox, shell commands, network requests) require human approval through a consent gate. The agent cannot silently escalate. Every tool is classified by risk level, and `High` and `Critical` operations pause for confirmation before proceeding.
+High-risk tool executions (file writes outside the sandbox, shell commands, network requests) require human approval through an approval gate. The agent cannot silently escalate. Every tool is classified by risk level, and `High` and `Critical` operations pause for confirmation before proceeding. The approval system supports two categories: `Consent` (action-driven, risk-based) and `SecurityWarning` (threat-driven, e.g., injection detection).
+
+### Secret Guard
+
+Tool invocations that access sensitive files (`.env`, private keys, credentials) or run secret-revealing commands (`printenv`, `cat ~/.ssh/*`) are detected by the `SecretGuard`. On detection, the action is escalated to `RiskLevel::Critical` approval or blocked outright, depending on configuration. Tool output is also scanned and detected secrets are redacted before returning to the LLM context.
 
 ### Channel Pairing & Identity Verification
 
-Non-CLI channels (Signal, future integrations) must complete a cryptographic pairing handshake before the agent will process any messages. Unpaired channels are rejected at the router level — no parsing, no processing, no attack surface.
+The security layer includes cryptographic pairing primitives for remote channels — time-limited pairing codes, constant-time verification, and auto-block after failed attempts. The current TCP channel is local-only and pairing-exempt; enforcement will be wired when remote transports (Signal, WebSocket) are added.
 
 ### Sandboxed File Access
 
-All filesystem operations go through `SafePath`, which canonicalizes paths, resolves symlinks, and enforces directory boundaries before any I/O occurs. Path traversal via `..`, symlinks, null bytes, or encoded slashes is caught at construction time, not at use time.
+All filesystem operations go through `SafeFilePath`, which canonicalizes paths, resolves symlinks, and enforces directory boundaries before any I/O occurs. Path traversal via `..`, symlinks, null bytes, or encoded slashes is validated at construction time via `SafeFilePath::from_tainted()`, ensuring invalid paths never reach I/O operations.
 
 ### Tamper-Evident Audit Logging
 
@@ -64,7 +68,7 @@ The encryption key is never logged, never included in error messages, and never 
 
 Freebird maintains a long-term knowledge store that persists facts, preferences, and learnings across sessions. Knowledge is stored in the encrypted database with FTS5 full-text search (BM25-ranked, porter stemmer tokenizer).
 
-- **6 knowledge kinds**: `fact`, `preference`, `learned_pattern`, `correction`, `context`, `reference` — each classified as agent-owned or protected
+- **6 knowledge kinds**: `SystemConfig`, `ToolCapability`, `UserPreference`, `LearnedPattern`, `ErrorResolution`, `SessionInsight` — each classified as agent-owned or protected (protected kinds require human consent to modify)
 - **Sensitive content filter**: Blocks storage of API keys, passwords, PEM blocks, and other credential material
 - **Auto-retrieval**: Relevant knowledge is injected into every conversation turn (configurable threshold and token budget)
 - **4 tools**: `store_knowledge`, `search_knowledge`, `update_knowledge`, `delete_knowledge`
@@ -87,37 +91,53 @@ Outbound HTTP is deny-by-default. Only explicitly allowlisted hosts are reachabl
 | Filesystem | Trusted-but-sandboxed | `SafeFilePath`, directory boundary enforcement |
 | Network | Hostile | Egress allowlist, DNS rebinding prevention, HTTPS only |
 | Stored data | Integrity-critical | SQLCipher encryption, HMAC signing |
-| Channel peers | Untrusted until paired | Cryptographic pairing, constant-time verification |
+| Channel peers | Local-only (TCP); pairing planned for remote channels | Local binding, pairing primitives available |
 
 ## Architecture
 
 Freebird is structured as a Rust workspace with strict crate boundaries:
 
 ```
-freebird-traits      Zero-dependency trait definitions (Provider, Channel, Tool, Memory)
+freebird-traits      Zero-dependency trait definitions (Provider, Channel, Tool, Memory, KnowledgeStore)
 freebird-types       Shared message types and domain objects
-freebird-security    Taint system, SafePath, capabilities, pairing, consent gates
-freebird-runtime     Agent loop, routing, token budgets
-freebird-providers   LLM integrations (Anthropic first)
-freebird-channels    Transport integrations (CLI first, Signal planned)
+freebird-security    Taint, safe types, capabilities, approval gates, secret guard, injection, audit, budgets, egress, auth
+freebird-runtime     Agent loop, session management, tool execution, token budgets
+freebird-providers   LLM integrations (Anthropic with streaming + tool use)
+freebird-channels    Transport integrations (TCP channel with JSON-line protocol)
 freebird-tools       Built-in tool implementations
 freebird-memory      SQLCipher-encrypted conversation + knowledge persistence with FTS5
-freebird-daemon      Binary entry point, config, lifecycle
+freebird-daemon      Binary entry point, config, lifecycle, TUI chat client
 ```
+
+### Built-in Tools
+
+| Tool | Module | Risk Level |
+|------|--------|------------|
+| `read_file`, `list_directory` | filesystem | Low |
+| `write_file` | filesystem | Medium |
+| `search_replace_edit` | edit | Medium |
+| `grep_search` | grep | Low |
+| `glob_find` | glob_find | Low |
+| `file_viewer` | viewer | Low |
+| `shell` | shell | High |
+| `http_request` | network | High |
+| `store_knowledge`, `search_knowledge`, `update_knowledge`, `delete_knowledge` | knowledge | Low |
+| `repo_map` | repo_map | Low |
+| `cargo_verify` | cargo_verify | Medium |
 
 Dependencies flow in one direction. `freebird-traits` and `freebird-types` depend on nothing internal. Security primitives live in `freebird-security` and are used everywhere — they aren't an afterthought bolted onto the runtime.
 
-Will likely eventually move crates to separate repos if project is ever big enough
-
 ## Status
 
-Freebird is in early development. The current focus is on the core agent loop, CLI channel, Anthropic provider, and the security layer described above.
+The core system is functional: daemon with TCP channel, Anthropic provider (streaming + tool use), 15 built-in tools, and all security layers described above are wired and enforced. Persistent storage uses SQLCipher-encrypted SQLite with FTS5 knowledge search.
+
+**Remaining gaps**: Session auth uses a default permissive capability grant (all capabilities scoped to sandbox). Channel pairing primitives exist but aren't enforced on the TCP channel (local-only). Multi-channel routing is stubbed pending additional transports.
 
 ## Getting Started
 
 ### Prerequisites
 
-- Rust toolchain (stable, 1.75+)
+- Rust toolchain (stable, 1.85+)
 - An Anthropic API key
 
 ### Configuration
