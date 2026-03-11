@@ -9,7 +9,9 @@
 #![deny(clippy::indexing_slicing)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod audit;
 pub mod channel;
+pub mod event;
 pub mod id;
 pub mod knowledge;
 pub mod memory;
