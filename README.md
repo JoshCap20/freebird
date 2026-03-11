@@ -120,6 +120,7 @@ freebird-daemon      Binary entry point, config, lifecycle, TUI chat client
 | `glob_find` | glob_find | Low |
 | `file_viewer` | viewer | Low |
 | `shell` | shell | High |
+| `bash_exec` | bash | Critical |
 | `http_request` | network | High |
 | `store_knowledge`, `search_knowledge`, `update_knowledge`, `delete_knowledge` | knowledge | Low |
 | `repo_map` | repo_map | Low |
@@ -129,7 +130,7 @@ Dependencies flow in one direction. `freebird-traits` and `freebird-types` depen
 
 ## Status
 
-The core system is functional: daemon with TCP channel, Anthropic provider (streaming + tool use), 15 built-in tools, and all security layers described above are wired and enforced. Persistent storage uses SQLCipher-encrypted SQLite with FTS5 knowledge search.
+The core system is functional: daemon with TCP channel, Anthropic provider (streaming + tool use), 16 built-in tools, and all security layers described above are wired and enforced. Persistent storage uses SQLCipher-encrypted SQLite with FTS5 knowledge search.
 
 **Remaining gaps**: Session auth uses a default permissive capability grant (all capabilities scoped to sandbox). Channel pairing primitives exist but aren't enforced on the TCP channel (local-only). Multi-channel routing is stubbed pending additional transports.
 

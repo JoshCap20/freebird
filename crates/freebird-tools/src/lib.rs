@@ -5,6 +5,7 @@
 #![deny(clippy::indexing_slicing)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod bash;
 pub mod cargo_verify;
 mod common;
 pub mod edit;

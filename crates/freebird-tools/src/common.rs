@@ -3,6 +3,14 @@
 //! Constants and helpers used across multiple tools (grep, glob, etc.)
 //! to maintain a single source of truth.
 
+/// Minimal PATH for sandboxed command execution.
+///
+/// Only standard system directories. Prevents PATH hijacking where an
+/// attacker places a malicious binary earlier in PATH.
+///
+/// Shared by `shell` and `bash` tools.
+pub const SANDBOXED_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+
 /// Directories to always skip during recursive search and glob results.
 ///
 /// Shared by `grep_search` and `glob_find` to ensure consistent behavior.

@@ -22,6 +22,7 @@ use freebird_types::config::AppConfig;
 /// - Glob find tool (`glob_find`) — file pattern discovery
 /// - Viewer tool (`file_viewer`) — windowed file reading
 /// - Shell tool (`shell`)
+/// - Bash exec tool (`bash_exec`) — raw `bash -c` for agentic coding loops
 /// - Network tool (`http_request`) — gated by [`EgressPolicy`] built from
 ///   `config.security.egress`
 /// - Repo map tool (`repo_map`) — AST-based codebase overview
@@ -49,6 +50,10 @@ pub fn build_tool_registry(config: &AppConfig) -> Result<ToolRegistry> {
         config.tools.allowed_shell_commands.clone(),
         config.tools.max_shell_output_bytes,
     ));
+
+    // Bash exec tool — raw bash command execution for agentic coding workflows.
+    // RiskLevel::Critical → always requires approval gate.
+    registry.register(freebird_tools::bash::bash_exec_tool());
 
     // Network tool — gated by egress policy from SecurityConfig.
     let egress_policy = build_egress_policy(config);
@@ -197,9 +202,10 @@ format = "pretty"
             registry.get("cargo_verify").is_some(),
             "missing cargo_verify"
         );
+        assert!(registry.get("bash_exec").is_some(), "missing bash_exec");
         assert!(
-            registry.tool_count() >= 15,
-            "expected at least 15 tools, got {}",
+            registry.tool_count() >= 16,
+            "expected at least 16 tools, got {}",
             registry.tool_count()
         );
     }
