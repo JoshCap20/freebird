@@ -9,6 +9,8 @@
 
 #[allow(dead_code)] // Used in upcoming ranked mode integration.
 mod graph;
+#[allow(dead_code)]
+mod pagerank;
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
