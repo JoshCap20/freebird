@@ -708,6 +708,7 @@ impl AgentRuntime {
                         Some(message)
                     }
                     Err(freebird_security::approval::ApprovalError::Denied { .. }) => {
+                        tracing::warn!(%session_id, "user denied input injection security warning");
                         let _ = outbound
                             .send(OutboundEvent::Error {
                                 text: format!(
@@ -740,6 +741,7 @@ impl AgentRuntime {
                 }
             }
             ValidationResult::Rejected(e) => {
+                tracing::warn!(%session_id, "input validation rejected message");
                 let _ = outbound
                     .send(OutboundEvent::Error {
                         text: format!("Message rejected: {e}"),

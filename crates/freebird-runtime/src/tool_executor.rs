@@ -267,6 +267,7 @@ impl ToolExecutor {
                 },
             )
             .await;
+            tracing::warn!(tool = %tool_name, %session_id, "tool not found");
             return ToolOutput {
                 content: format!("Unknown tool: {tool_name}"),
                 outcome: ToolOutcome::Error,
@@ -284,6 +285,7 @@ impl ToolExecutor {
                 },
             )
             .await;
+            tracing::warn!(tool = %tool_name, %session_id, "capability check denied");
             return ToolOutput {
                 content: format!("Capability denied for tool `{tool_name}`: {e}"),
                 outcome: ToolOutcome::Error,
@@ -454,6 +456,7 @@ impl ToolExecutor {
         {
             Ok(()) => {
                 self.audit_approval_granted(session_id, tool_name).await;
+                tracing::info!(tool = %tool_name, %session_id, "consent approved by user");
                 None
             }
             Err(ApprovalError::Denied { context, reason }) => {
@@ -495,7 +498,7 @@ impl ToolExecutor {
                 })
             }
             Err(ApprovalError::ChannelClosed) => {
-                tracing::warn!(%session_id, "approval channel closed");
+                tracing::warn!(tool = %tool_name, %session_id, "approval channel closed");
                 self.audit_approval_denied(session_id, tool_name, Some("approval channel closed"))
                     .await;
                 Some(ToolOutput {
@@ -654,10 +657,11 @@ impl ToolExecutor {
                         metadata: output.metadata,
                     }
                 }
-                Err(ApprovalError::Denied { .. }) => {
+                Err(ApprovalError::Denied { reason, .. }) => {
                     tracing::warn!(
                         tool = %tool_name,
-                        session_id = %session_id,
+                        %session_id,
+                        ?reason,
                         "user denied tool output injection warning — returning synthetic error"
                     );
                     ToolOutput {
