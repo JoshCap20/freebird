@@ -18,7 +18,7 @@
 8. [Prompt Injection Defense](#8-prompt-injection-defense)
 9. [Auth & Session Management](#9-auth--session-management)
 10. [Channel Pairing — ASI03](#10-channel-pairing--asi03)
-11. [Consent Gates — ASI09](#11-consent-gates--asi09)
+11. [Approval Gates — ASI09](#11-approval-gates--asi09)
 12. [Network Egress — ASI01](#12-network-egress--asi01)
 13. [Token Budgets — ASI08](#13-token-budgets--asi08)
 14. [Memory Integrity — ASI06](#14-memory-integrity--asi06)
@@ -48,10 +48,10 @@ freebird/
 ├── crates/
 │   ├── freebird-traits/             # ALL public traits — zero freebird-* deps
 │   ├── freebird-types/              # Shared domain types — depends only on freebird-traits
-│   ├── freebird-security/           # Taint, SafePath, capabilities, audit — no I/O
+│   ├── freebird-security/           # Taint, safe types, capabilities, approval, audit, secret guard, budgets, injection, egress, auth — no I/O
 │   ├── freebird-runtime/            # Agent loop, session mgmt, orchestration
 │   ├── freebird-providers/          # Provider implementations (Anthropic, etc.)
-│   ├── freebird-channels/           # Channel implementations (CLI, etc.)
+│   ├── freebird-channels/           # Channel implementations (TCP, etc.)
 │   ├── freebird-tools/              # Built-in tool implementations
 │   ├── freebird-memory/             # Memory backend implementations
 │   └── freebird-daemon/             # Binary — thin composition root
@@ -152,8 +152,8 @@ fn produce() -> Config             // returning owned: caller now owns this
 ```
 ┌──────────┐     ┌───────────┐     ┌───────────┐     ┌──────────┐     ┌──────────┐
 │ Channel   │────▶│ Router    │────▶│ Agent     │────▶│ Provider │────▶│ LLM API  │
-│ (CLI,     │     │ (taint +  │     │ Runtime   │     │ (Anthropic│     │ (Claude, │
-│  Signal)  │     │  auth)    │     │ (loop)    │     │  OpenAI)  │     │  GPT)    │
+│ (TCP)     │     │ (taint +  │     │ Runtime   │     │ (Anthropic│     │ (Claude) │
+│           │     │  auth)    │     │ (loop)    │     │          )│     │          │
 └──────────┘     └───────────┘     └───────────┘     └──────────┘     └──────────┘
      ▲                                   │                                    │
      │                                   ▼                                    │
@@ -256,6 +256,31 @@ pub trait Memory: Send + Sync + 'static {
 }
 ```
 
+### KnowledgeStore — persist agent knowledge
+
+See `crates/freebird-traits/src/knowledge.rs`.
+
+```rust
+#[async_trait]
+pub trait KnowledgeStore: Send + Sync + 'static {
+    async fn store(&self, entry: KnowledgeEntry) -> Result<KnowledgeId, KnowledgeError>;
+    async fn update(&self, entry: &KnowledgeEntry) -> Result<(), KnowledgeError>;
+    async fn get(&self, id: &KnowledgeId) -> Result<Option<KnowledgeEntry>, KnowledgeError>;
+    async fn delete(&self, id: &KnowledgeId) -> Result<(), KnowledgeError>;
+    async fn search(&self, query: &str, limit: usize) -> Result<Vec<KnowledgeMatch>, KnowledgeError>;
+    async fn list_by_kind(&self, kind: &KnowledgeKind, limit: usize) -> Result<Vec<KnowledgeEntry>, KnowledgeError>;
+    async fn list_by_tag(&self, tag: &str, limit: usize) -> Result<Vec<KnowledgeEntry>, KnowledgeError>;
+    async fn replace_kind(&self, kind: &KnowledgeKind, entries: Vec<KnowledgeEntry>) -> Result<(), KnowledgeError>;
+    async fn record_access(&self, ids: &[KnowledgeId]) -> Result<(), KnowledgeError>;
+}
+```
+
+Key design notes:
+- `KnowledgeKind` enum: `SystemConfig`, `ToolCapability`, `UserPreference`, `LearnedPattern`, `ErrorResolution`, `SessionInsight`. **Append new variants at end only** (Ord-derived).
+- Consent rules: `SystemConfig`, `ToolCapability`, `UserPreference` require human consent for writes. `LearnedPattern`, `ErrorResolution`, `SessionInsight` are agent-owned (autonomous writes).
+- `KnowledgeSource` enum: `System`, `User`, `Agent` — tracks provenance.
+- Search uses FTS5 with BM25 ranking. `KnowledgeMatch` wraps entry + rank score.
+
 ---
 
 ## 5. Agent Runtime Loop
@@ -334,6 +359,18 @@ See `crates/freebird-security/src/db_key.rs`.
 - `load_or_create_salt(path)` — persistent per-database random salt (32 bytes from `SystemRandom`)
 - Key wrapped in `SecretString` — zeroized on drop, never logged, never in error messages
 
+### Secret Guard
+
+See `crates/freebird-security/src/secret_guard.rs`.
+
+`SecretGuard` inspects tool inputs for sensitive file/command patterns and optionally redacts secrets in tool output. It sits between the capability check and the approval gate in the `ToolExecutor` pipeline.
+
+- **Input inspection**: Detects access to sensitive files (`.env`, `*.pem`, `~/.ssh/*`, credentials files) and secret-revealing commands (`printenv`, `cat ~/.aws/credentials`). On detection, escalates the tool's effective `RiskLevel` to `Critical` for approval gate evaluation, or blocks outright.
+- **Output redaction**: Scans tool output for patterns matching API keys, passwords, bearer tokens, PEM blocks. Detected secrets are replaced with `[REDACTED]` before the output enters the LLM context.
+- Configured via `SecretGuardConfig`: `enabled` (bool), `action` (`consent` | `block`), `redact_output` (bool), plus extensible `extra_sensitive_file_patterns` and `extra_sensitive_command_patterns`.
+
+See also `crates/freebird-security/src/sensitive.rs` for the pattern matching engine.
+
 ---
 
 ## 7. Agentic Security Model
@@ -349,15 +386,16 @@ See `crates/freebird-security/src/capability.rs`.
 
 ### Tool Execution Invariant
 
-Every tool invocation follows this **mandatory** sequence, enforced by `ToolExecutor`:
+Every tool invocation follows this **mandatory** sequence, enforced by `ToolExecutor` (see `crates/freebird-runtime/src/tool_executor.rs`):
 
-1. Capability check → deny if missing or expired
-2. Input validation → reject if malformed (via `TaintedToolInput`)
-3. Resource boundary check (`SafeFilePath`, allowed hosts) → reject if out of bounds
-4. Audit log the attempt (pass or fail)
-5. Execute with timeout (`tokio::time::timeout`)
-6. Audit log the result
-7. Scan output for injection via `ScannedToolOutput::from_raw()` before returning to LLM
+1. **Tool lookup** → deny if tool not found in registry
+2. **Capability + expiration check** → deny if capability not granted or expired
+3. **Secret guard input check** → flags sensitive file/command access, escalates to `Critical` or blocks
+4. **Approval gate** → for `High`/`Critical` tools (or secret-guard-escalated), sends `ApprovalRequest` to user, waits with timeout
+5. **Audit log** the attempt (pass or fail)
+6. **Execute with timeout** (`tokio::time::timeout`) — tool receives `ToolContext` with sandbox root, capabilities, allowed dirs, knowledge store
+7. **Secret guard output redaction** → replaces detected secrets in output with `[REDACTED]`
+8. **Injection scan** on output via `ScannedToolOutput::from_raw()` before returning to LLM
 
 ---
 
@@ -370,6 +408,7 @@ Every tool invocation follows this **mandatory** sequence, enforced by `ToolExec
 | Input taint + `SafeMessage` | Malformed/malicious user input | Router (before agent) |
 | Input injection scan | Known prompt injection patterns | `SafeMessage::from_tainted()` |
 | Capability system | Unauthorized tool access | ToolExecutor (before tool) |
+| `SecretGuard` | Sensitive file/command access, secret leakage in output | ToolExecutor (before + after tool) |
 | `SafeFilePath` | Path traversal in tool args | Tool implementation |
 | `ScannedToolOutput` | Indirect injection via tool results | Agent loop (after tool, before LLM) |
 | `ScannedModelResponse` | Compromised model responses | Agent loop (before channel) |
@@ -445,15 +484,17 @@ Unknown → PendingApproval { code, issued_at, expires_at, attempts } → Paired
 
 ---
 
-## 11. Consent Gates — ASI09
+## 11. Approval Gates — ASI09
 
 **OWASP ASI09 — Human-Agent Trust Exploitation**: Ensures high-risk operations require explicit human approval before execution.
 
+See `crates/freebird-security/src/approval.rs`.
+
 ### Risk Classification
 
-Every tool action is classified by `RiskLevel`. The consent gate compares `tool_risk >= config.require_consent_above`.
+Every tool action is classified by `RiskLevel`. The approval gate compares `tool_risk >= config.require_consent_above`.
 
-| Tool | Risk Level | Consent Required? |
+| Tool | Risk Level | Approval Required? |
 |---|---|---|
 | `read_file` | Low | No |
 | `list_directory` | Low | No |
@@ -465,13 +506,19 @@ Every tool action is classified by `RiskLevel`. The consent gate compares `tool_
 | `send_message` (via channel) | High | **Yes** |
 | `modify_config` | Critical | **Always** |
 
-### Consent Flow
+### Approval Categories
 
-1. `ConsentGate::check()` evaluates tool's `RiskLevel` against policy threshold
-2. If consent required: send `ConsentRequest` to user via channel (tool name, action summary, affected resources, reversibility)
+`ApprovalGate` handles two categories via `ApprovalCategory`:
+- **`Consent`** — action-driven, risk-based. Triggered by tool `RiskLevel` exceeding the configured threshold.
+- **`SecurityWarning`** — threat-driven, detection-based. Triggered by injection detection or secret guard escalation. These cannot be downgraded by configuration.
+
+### Approval Flow
+
+1. `ApprovalGate::check_consent()` evaluates tool's effective `RiskLevel` against policy threshold
+2. If approval required: send `ApprovalRequest` to user via channel (tool name, action summary, category, risk justification)
 3. Wait for response with timeout (default: 60s)
-4. On approval → execute. On denial/timeout → return `ToolError::ConsentDenied`/`ConsentExpired`
-5. All consent decisions are audit-logged
+4. On approval → execute. On denial/timeout → return denial output
+5. All approval decisions are audit-logged
 
 ---
 
@@ -508,6 +555,8 @@ Validate that resolved IPs are not private/loopback addresses (10.x, 172.16-31.x
 **OWASP ASI08 — Agent Resource & Service Exhaustion**: Prevents unbounded token/compute consumption.
 
 ### Budget System
+
+See `crates/freebird-security/src/budget.rs`.
 
 `TokenBudget` tracks consumption per session using `AtomicU64` counters:
 - **Per-session limit**: max total input + output tokens (default: 500k)
@@ -641,6 +690,27 @@ relevance_threshold = -0.5    # BM25 rank cutoff (lower = more permissive)
 max_context_tokens = 2000     # Token budget for injected context
 ```
 
+### Secret Guard Configuration
+
+```toml
+[security.secret_guard]
+enabled = true                # Whether the secret guard is active
+action = "consent"            # "consent" (escalate to approval gate) | "block" (deny outright)
+redact_output = true          # Redact detected secrets in tool output before LLM context
+# extra_sensitive_file_patterns = ["*.secret"]    # Additional file globs (merged with built-ins)
+# extra_sensitive_command_patterns = ["vault.*"]   # Additional command regexes
+```
+
+### Injection Response Configuration
+
+```toml
+[security.injection]
+input_response = "prompt"           # "block" | "prompt" | "allow"
+tool_output_response = "prompt"     # "block" | "prompt" | "allow"
+prompt_timeout_secs = 60            # Timeout for security approval prompts
+# Note: model output and context injection responses are always "block" (hardcoded)
+```
+
 ---
 
 ## 20. Logging & Concurrency
@@ -745,6 +815,14 @@ Run `cargo fmt` on save. Treat clippy warnings as errors.
 - [ ] Output scanning on model responses via `ScannedModelResponse` — blocks delivery + prevents memory poisoning
 - [ ] Reader agent pattern for untrusted external content (future)
 
+### Secret Guard
+
+- [ ] Sensitive file patterns detected before tool execution
+- [ ] Sensitive command patterns detected before shell execution
+- [ ] Detection escalates to approval gate at `RiskLevel::Critical`
+- [ ] Tool output scanned and secrets redacted before LLM context
+- [ ] Configurable action: `consent` or `block`
+
 ### Auth & Sessions
 
 - [ ] Session keys are cryptographically random (32 bytes from `SystemRandom`)
@@ -761,13 +839,13 @@ Run `cargo fmt` on save. Treat clippy warnings as errors.
 - [ ] Failed pairing attempts capped before auto-block
 - [ ] Router rejects all `InboundEvent`s from unpaired channels
 
-### Consent Gates (ASI09)
+### Approval Gates (ASI09)
 
 - [ ] All tools classified by `RiskLevel`
 - [ ] `High` and `Critical` tools require explicit human approval
-- [ ] Consent requests include tool name, action summary, risk justification
-- [ ] Consent timeouts default to 60s — no indefinite waits
-- [ ] Consent decisions are audit-logged
+- [ ] Approval requests include tool name, action summary, category, risk justification
+- [ ] Approval timeouts default to 60s — no indefinite waits
+- [ ] Approval decisions are audit-logged
 
 ### Network Egress (ASI01)
 
