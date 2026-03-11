@@ -228,6 +228,8 @@ pub struct AnthropicConfig {
     pub base_url: Option<String>,
     /// Model override. `None` = `DEFAULT_MODEL`.
     pub default_model: Option<String>,
+    /// HTTP request timeout override in seconds. `None` = `REQUEST_TIMEOUT_SECS` (300s).
+    pub timeout_secs: Option<u64>,
 }
 
 /// How the provider authenticates with the Anthropic API.
@@ -257,9 +259,10 @@ impl AnthropicProvider {
     /// Returns `ProviderError::Network` if the HTTP client fails to build
     /// (e.g., TLS initialization failure).
     pub fn new(api_key: SecretString, config: AnthropicConfig) -> Result<Self, ProviderError> {
+        let timeout = config.timeout_secs.unwrap_or(REQUEST_TIMEOUT_SECS);
         let client = Client::builder()
             .use_rustls_tls()
-            .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+            .timeout(std::time::Duration::from_secs(timeout))
             .build()
             .map_err(|e| ProviderError::Network {
                 reason: format!("failed to build HTTP client: {e}"),
@@ -1021,6 +1024,7 @@ mod tests {
             AnthropicConfig {
                 base_url: Some(base_url.to_string()),
                 default_model: None,
+                timeout_secs: None,
             },
         )
         .unwrap()
@@ -1097,6 +1101,7 @@ mod tests {
             AnthropicConfig {
                 base_url: Some("http://localhost:1234".to_string()),
                 default_model: None,
+                timeout_secs: None,
             },
         )
         .unwrap();
@@ -1113,6 +1118,7 @@ mod tests {
                 AnthropicConfig {
                     base_url: Some("http://localhost:1234".to_string()),
                     default_model: None,
+                    timeout_secs: None,
                 },
             )
             .unwrap();
@@ -1133,6 +1139,7 @@ mod tests {
                 AnthropicConfig {
                     base_url: Some("http://localhost:1234".to_string()),
                     default_model: None,
+                    timeout_secs: None,
                 },
             )
             .unwrap();
@@ -1196,6 +1203,7 @@ mod tests {
             AnthropicConfig {
                 base_url: Some(server.uri()),
                 default_model: None,
+                timeout_secs: None,
             },
         )
         .unwrap();
@@ -1239,6 +1247,7 @@ mod tests {
             AnthropicConfig {
                 base_url: Some(server.uri()),
                 default_model: None,
+                timeout_secs: None,
             },
         )
         .unwrap();
@@ -2358,6 +2367,7 @@ mod tests {
             AnthropicConfig {
                 base_url: Some(server.uri()),
                 default_model: None,
+                timeout_secs: None,
             },
         )
         .unwrap();

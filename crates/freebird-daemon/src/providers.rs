@@ -96,6 +96,7 @@ async fn build_anthropic_provider(provider_config: &ProviderConfig) -> Result<An
             .default_model
             .as_ref()
             .map(|m| m.as_str().to_owned()),
+        timeout_secs: None,
     };
 
     let provider_id = provider_config.id.clone();
