@@ -84,7 +84,10 @@ const IO_PATTERNS: &[&str] = &[
     "ignore previous instructions",
     "ignore all previous",
     "disregard your instructions",
+    "forget your instructions",
     "you are now",
+    "pretend you are",
+    "act as if you are",
     "new instructions:",
     "system prompt:",
     "admin override",
@@ -93,6 +96,12 @@ const IO_PATTERNS: &[&str] = &[
     "<|im_start|>",
     "<|im_end|>",
     "```system",
+    // Claude-specific turn delimiters — fake conversation turns in tool output
+    "\n\nhuman:",
+    "\n\nassistant:",
+    // XML-tag injection — Claude respects XML-tagged instructions
+    "<instructions>",
+    "<system>",
 ];
 
 /// Additional patterns checked only during context scanning.
