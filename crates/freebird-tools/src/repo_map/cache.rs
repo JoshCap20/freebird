@@ -43,7 +43,7 @@ impl SerializableTag {
             name: tag.name.clone(),
             line: tag.line,
             is_definition: tag.is_definition,
-            kind: format!("{:?}", tag.kind),
+            kind: tag.kind.as_str().to_owned(),
         }
     }
 
@@ -260,5 +260,27 @@ mod tests {
     fn test_load_missing_directory() {
         let cache = TagCache::load(Path::new("/nonexistent/path"));
         assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn test_tag_kind_roundtrip_all_variants() {
+        use super::super::graph::TagKind;
+        let variants = [
+            TagKind::Function,
+            TagKind::Struct,
+            TagKind::Enum,
+            TagKind::Trait,
+            TagKind::TypeAlias,
+            TagKind::Const,
+            TagKind::Static,
+            TagKind::Macro,
+            TagKind::Module,
+            TagKind::Reference,
+        ];
+        for kind in &variants {
+            let serialized = kind.as_str();
+            let deserialized = parse_tag_kind(serialized);
+            assert_eq!(*kind, deserialized, "roundtrip failed for {serialized}");
+        }
     }
 }

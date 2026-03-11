@@ -41,6 +41,26 @@ pub(super) enum TagKind {
     Reference,
 }
 
+impl TagKind {
+    /// Stable string representation for serialization.
+    ///
+    /// Must stay in sync with `cache::parse_tag_kind`.
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Function => "Function",
+            Self::Struct => "Struct",
+            Self::Enum => "Enum",
+            Self::Trait => "Trait",
+            Self::TypeAlias => "TypeAlias",
+            Self::Const => "Const",
+            Self::Static => "Static",
+            Self::Macro => "Macro",
+            Self::Module => "Module",
+            Self::Reference => "Reference",
+        }
+    }
+}
+
 // ── Reference graph ──────────────────────────────────────────────
 
 /// Directed reference graph where nodes are files and edges point from
@@ -102,7 +122,9 @@ impl ReferenceGraph {
                     for &(def_idx, _line) in def_locs {
                         // Skip self-references.
                         if def_idx != ref_idx {
-                            adjacency.get_mut(ref_idx).map(|set| set.insert(def_idx));
+                            if let Some(set) = adjacency.get_mut(ref_idx) {
+                                set.insert(def_idx);
+                            }
                         }
                     }
                 }
