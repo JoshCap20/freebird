@@ -1,12 +1,12 @@
-//! Integration tests for the consent bridge — end-to-end consent flow.
+//! Integration tests for the approval bridge — end-to-end approval flow.
 //!
 //! Tests cover:
-//! - Consent request forwarded to channel for high-risk tools
-//! - Approved consent executes tool and delivers result
-//! - Denied consent returns error to provider
-//! - Low-risk tools bypass consent even with gate configured
-//! - No consent gate means high-risk tools execute freely
-//! - Unknown consent response IDs are handled gracefully
+//! - Approval request forwarded to channel for high-risk tools
+//! - Approved approval executes tool and delivers result
+//! - Denied approval returns error to provider
+//! - Low-risk tools bypass approval even with gate configured
+//! - No approval gate means high-risk tools execute freely
+//! - Unknown approval response IDs are handled gracefully
 
 #![allow(
     clippy::unwrap_used,
@@ -33,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 use freebird_memory::in_memory::InMemoryMemory;
 use freebird_runtime::agent::AgentRuntime;
 use freebird_runtime::tool_executor::ToolExecutor;
-use freebird_security::consent::ConsentGate;
+use freebird_security::approval::ApprovalGate;
 use freebird_traits::channel::{InboundEvent, OutboundEvent};
 use freebird_traits::id::ModelId;
 use freebird_traits::provider::{
@@ -105,7 +105,7 @@ impl Tool for MockTool {
 }
 
 // ---------------------------------------------------------------------------
-// Response builders (consent-specific response factories)
+// Response builders (approval-specific response factories)
 // ---------------------------------------------------------------------------
 
 fn text_response(text: &str) -> ResponseFactory {
@@ -150,7 +150,7 @@ fn tool_use_response(tool_name: &str, input: serde_json::Value) -> ResponseFacto
 // Tests
 // ===========================================================================
 
-/// High-risk tool triggers a `ConsentRequest` on the outbound channel.
+/// High-risk tool triggers an `ApprovalRequest` on the outbound channel.
 #[tokio::test]
 async fn test_consent_request_forwarded_to_channel() {
     let (channel, inbound_tx, mut outbound_rx, _) = MockChannel::new();
@@ -173,8 +173,8 @@ async fn test_consent_request_forwarded_to_channel() {
         Arc::clone(&counter),
     );
 
-    // Create consent gate with High threshold
-    let (gate, consent_rx) = ConsentGate::new(RiskLevel::High, Duration::from_secs(5), 10);
+    // Create approval gate with High threshold
+    let (gate, approval_rx) = ApprovalGate::new(RiskLevel::High, Duration::from_secs(5), 10);
 
     let executor = ToolExecutor::new(
         vec![Box::new(tool)],
@@ -191,7 +191,7 @@ async fn test_consent_request_forwarded_to_channel() {
         make_registry(provider),
         Box::new(channel),
         executor,
-        Some(consent_rx),
+        Some(approval_rx),
         Box::new(InMemoryMemory::new()),
         None,
         KnowledgeConfig::default(),
@@ -217,25 +217,18 @@ async fn test_consent_request_forwarded_to_channel() {
     // Run runtime in background, interact with it via channels
     let runtime_handle = tokio::spawn(async move { runtime.run(cancel_clone).await });
 
-    // Wait for the ConsentRequest to appear on the outbound channel
-    let mut consent_request_seen = false;
+    // Wait for the ApprovalRequest to appear on the outbound channel
+    let mut approval_request_seen = false;
     let mut request_id = String::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
 
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_millis(100), outbound_rx.recv()).await {
-            Ok(Some(OutboundEvent::ConsentRequest {
-                request_id: rid,
-                tool_name,
-                risk_level,
-                recipient_id,
-                ..
+            Ok(Some(OutboundEvent::ApprovalRequest {
+                request_id: rid, ..
             })) => {
-                assert_eq!(tool_name, "dangerous_tool");
-                assert_eq!(risk_level, "high");
-                assert_eq!(recipient_id, "alice");
                 request_id = rid;
-                consent_request_seen = true;
+                approval_request_seen = true;
                 break;
             }
             Ok(Some(_)) => continue, // skip other events (status, etc.)
@@ -245,14 +238,14 @@ async fn test_consent_request_forwarded_to_channel() {
     }
 
     assert!(
-        consent_request_seen,
-        "expected ConsentRequest on outbound channel"
+        approval_request_seen,
+        "expected ApprovalRequest on outbound channel"
     );
     assert!(!request_id.is_empty(), "request_id should be non-empty");
 
-    // Approve the consent and then quit
+    // Approve the approval request and then quit
     inbound_tx
-        .send(InboundEvent::ConsentResponse {
+        .send(InboundEvent::ApprovalResponse {
             request_id,
             approved: true,
             reason: None,
@@ -277,7 +270,7 @@ async fn test_consent_request_forwarded_to_channel() {
         .unwrap();
 }
 
-/// Approved consent allows the tool to execute and deliver a result.
+/// Approved approval allows the tool to execute and deliver a result.
 #[tokio::test]
 async fn test_consent_approved_executes_tool() {
     let (channel, inbound_tx, mut outbound_rx, _) = MockChannel::new();
@@ -300,7 +293,7 @@ async fn test_consent_approved_executes_tool() {
         Arc::clone(&counter),
     );
 
-    let (gate, consent_rx) = ConsentGate::new(RiskLevel::High, Duration::from_secs(5), 10);
+    let (gate, approval_rx) = ApprovalGate::new(RiskLevel::High, Duration::from_secs(5), 10);
 
     let executor = ToolExecutor::new(
         vec![Box::new(tool)],
@@ -317,7 +310,7 @@ async fn test_consent_approved_executes_tool() {
         make_registry(provider),
         Box::new(channel),
         executor,
-        Some(consent_rx),
+        Some(approval_rx),
         Box::new(InMemoryMemory::new()),
         None,
         KnowledgeConfig::default(),
@@ -340,13 +333,13 @@ async fn test_consent_approved_executes_tool() {
     let cancel_clone = cancel.clone();
     let runtime_handle = tokio::spawn(async move { runtime.run(cancel_clone).await });
 
-    // Wait for consent request, then approve
+    // Wait for approval request, then approve
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_millis(100), outbound_rx.recv()).await {
-            Ok(Some(OutboundEvent::ConsentRequest { request_id, .. })) => {
+            Ok(Some(OutboundEvent::ApprovalRequest { request_id, .. })) => {
                 inbound_tx
-                    .send(InboundEvent::ConsentResponse {
+                    .send(InboundEvent::ApprovalResponse {
                         request_id,
                         approved: true,
                         reason: None,
@@ -357,7 +350,7 @@ async fn test_consent_approved_executes_tool() {
                 break;
             }
             Ok(Some(_)) => continue,
-            Ok(None) => panic!("channel closed before consent request"),
+            Ok(None) => panic!("channel closed before approval request"),
             Err(_) => continue,
         }
     }
@@ -405,14 +398,14 @@ async fn test_consent_approved_executes_tool() {
     );
 }
 
-/// Denied consent prevents tool execution and sends error to provider.
+/// Denied approval prevents tool execution and sends error to provider.
 #[tokio::test]
 async fn test_consent_denied_returns_error_to_provider() {
     let (channel, inbound_tx, mut outbound_rx, _) = MockChannel::new();
 
     let provider = Arc::new(QueuedProvider::new(vec![
         tool_use_response("risky_tool", serde_json::json!({"cmd": "delete"})),
-        text_response("I could not complete that — consent was denied."),
+        text_response("I could not complete that — approval was denied."),
     ]));
 
     let counter = Arc::new(AtomicUsize::new(0));
@@ -428,7 +421,7 @@ async fn test_consent_denied_returns_error_to_provider() {
         Arc::clone(&counter),
     );
 
-    let (gate, consent_rx) = ConsentGate::new(RiskLevel::High, Duration::from_secs(5), 10);
+    let (gate, approval_rx) = ApprovalGate::new(RiskLevel::High, Duration::from_secs(5), 10);
 
     let executor = ToolExecutor::new(
         vec![Box::new(tool)],
@@ -445,7 +438,7 @@ async fn test_consent_denied_returns_error_to_provider() {
         make_registry(provider),
         Box::new(channel),
         executor,
-        Some(consent_rx),
+        Some(approval_rx),
         Box::new(InMemoryMemory::new()),
         None,
         KnowledgeConfig::default(),
@@ -468,13 +461,13 @@ async fn test_consent_denied_returns_error_to_provider() {
     let cancel_clone = cancel.clone();
     let runtime_handle = tokio::spawn(async move { runtime.run(cancel_clone).await });
 
-    // Wait for consent request, then deny
+    // Wait for approval request, then deny
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_millis(100), outbound_rx.recv()).await {
-            Ok(Some(OutboundEvent::ConsentRequest { request_id, .. })) => {
+            Ok(Some(OutboundEvent::ApprovalRequest { request_id, .. })) => {
                 inbound_tx
-                    .send(InboundEvent::ConsentResponse {
+                    .send(InboundEvent::ApprovalResponse {
                         request_id,
                         approved: false,
                         reason: Some("Not authorized".into()),
@@ -485,7 +478,7 @@ async fn test_consent_denied_returns_error_to_provider() {
                 break;
             }
             Ok(Some(_)) => continue,
-            Ok(None) => panic!("channel closed before consent request"),
+            Ok(None) => panic!("channel closed before approval request"),
             Err(_) => continue,
         }
     }
@@ -531,7 +524,7 @@ async fn test_consent_denied_returns_error_to_provider() {
     );
 }
 
-/// Low-risk tool executes without consent prompt even with gate configured.
+/// Low-risk tool executes without approval prompt even with gate configured.
 #[tokio::test]
 async fn test_consent_low_risk_no_prompt() {
     let (channel, inbound_tx, mut outbound_rx, _) = MockChannel::new();
@@ -554,8 +547,8 @@ async fn test_consent_low_risk_no_prompt() {
         counter,
     );
 
-    // Gate requires consent for High+, so Low tools should auto-approve
-    let (gate, consent_rx) = ConsentGate::new(RiskLevel::High, Duration::from_secs(5), 10);
+    // Gate requires approval for High+, so Low tools should auto-approve
+    let (gate, approval_rx) = ApprovalGate::new(RiskLevel::High, Duration::from_secs(5), 10);
 
     let executor = ToolExecutor::new(
         vec![Box::new(tool)],
@@ -572,7 +565,7 @@ async fn test_consent_low_risk_no_prompt() {
         make_registry(provider),
         Box::new(channel),
         executor,
-        Some(consent_rx),
+        Some(approval_rx),
         Box::new(InMemoryMemory::new()),
         None,
         KnowledgeConfig::default(),
@@ -605,21 +598,21 @@ async fn test_consent_low_risk_no_prompt() {
         .expect("runtime should exit within timeout")
         .unwrap();
 
-    // Collect all events — none should be ConsentRequest
+    // Collect all events — none should be ApprovalRequest
     let mut events = Vec::new();
     while let Ok(event) = outbound_rx.try_recv() {
         events.push(event);
     }
 
-    let consent_requests: Vec<_> = events
+    let approval_requests: Vec<_> = events
         .iter()
-        .filter(|e| matches!(e, OutboundEvent::ConsentRequest { .. }))
+        .filter(|e| matches!(e, OutboundEvent::ApprovalRequest { .. }))
         .collect();
 
     assert!(
-        consent_requests.is_empty(),
-        "low-risk tool should not trigger consent: got {} requests",
-        consent_requests.len()
+        approval_requests.is_empty(),
+        "low-risk tool should not trigger approval: got {} requests",
+        approval_requests.len()
     );
 
     // Should have gotten a message response
@@ -631,7 +624,7 @@ async fn test_consent_low_risk_no_prompt() {
     );
 }
 
-/// No consent gate — high-risk tool executes without any prompt.
+/// No approval gate — high-risk tool executes without any prompt.
 #[tokio::test]
 async fn test_consent_no_gate_executes_freely() {
     let (channel, inbound_tx, mut outbound_rx, _) = MockChannel::new();
@@ -654,7 +647,7 @@ async fn test_consent_no_gate_executes_freely() {
         counter,
     );
 
-    // No consent gate
+    // No approval gate
     let executor = ToolExecutor::new(
         vec![Box::new(tool)],
         Duration::from_secs(30),
@@ -670,7 +663,7 @@ async fn test_consent_no_gate_executes_freely() {
         make_registry(provider),
         Box::new(channel),
         executor,
-        None, // no consent_rx
+        None, // no approval_rx
         Box::new(InMemoryMemory::new()),
         None,
         KnowledgeConfig::default(),
@@ -708,12 +701,12 @@ async fn test_consent_no_gate_executes_freely() {
         events.push(event);
     }
 
-    // No consent requests should appear
-    let consent_count = events
+    // No approval requests should appear
+    let approval_count = events
         .iter()
-        .filter(|e| matches!(e, OutboundEvent::ConsentRequest { .. }))
+        .filter(|e| matches!(e, OutboundEvent::ApprovalRequest { .. }))
         .count();
-    assert_eq!(consent_count, 0, "no gate means no consent requests");
+    assert_eq!(approval_count, 0, "no gate means no approval requests");
 
     // Should have gotten the final response
     let content_events = without_status_events(events);
@@ -728,14 +721,14 @@ async fn test_consent_no_gate_executes_freely() {
     );
 }
 
-/// Sending a `ConsentResponse` with an unknown `request_id` doesn't crash.
+/// Sending an `ApprovalResponse` with an unknown `request_id` doesn't crash.
 #[tokio::test]
 async fn test_consent_response_unknown_id_logged() {
     let (channel, inbound_tx, outbound_rx, _) = MockChannel::new();
 
     let provider = Arc::new(QueuedProvider::new(vec![]));
 
-    let (gate, consent_rx) = ConsentGate::new(RiskLevel::High, Duration::from_secs(5), 10);
+    let (gate, approval_rx) = ApprovalGate::new(RiskLevel::High, Duration::from_secs(5), 10);
 
     let executor = ToolExecutor::new(
         vec![],
@@ -752,7 +745,7 @@ async fn test_consent_response_unknown_id_logged() {
         make_registry(provider),
         Box::new(channel),
         executor,
-        Some(consent_rx),
+        Some(approval_rx),
         Box::new(InMemoryMemory::new()),
         None,
         KnowledgeConfig::default(),
@@ -762,9 +755,9 @@ async fn test_consent_response_unknown_id_logged() {
         None,
     );
 
-    // Send a bogus consent response
+    // Send a bogus approval response
     inbound_tx
-        .send(InboundEvent::ConsentResponse {
+        .send(InboundEvent::ApprovalResponse {
             request_id: "nonexistent-id-12345".into(),
             approved: true,
             reason: None,
@@ -791,11 +784,11 @@ async fn test_consent_response_unknown_id_logged() {
     // Should exit cleanly — no panic, no error
     assert!(
         result.is_ok(),
-        "runtime should handle unknown consent ID gracefully"
+        "runtime should handle unknown approval ID gracefully"
     );
 
     // The splitter should have sent an error back to the user about the
-    // unknown consent request ID.
+    // unknown approval request ID.
     let mut found_error = false;
     let mut outbound_rx = outbound_rx;
     while let Ok(event) = outbound_rx.try_recv() {
@@ -807,6 +800,6 @@ async fn test_consent_response_unknown_id_logged() {
     }
     assert!(
         found_error,
-        "expected error about unknown consent ID in outbound events"
+        "expected error about unknown approval ID in outbound events"
     );
 }

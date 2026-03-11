@@ -5,11 +5,17 @@
 #![deny(clippy::indexing_slicing)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod approval;
 pub mod audit;
 pub mod auth;
 pub mod budget;
 pub mod capability;
-pub mod consent;
+/// Backward-compatible re-export of [`approval`] types.
+///
+/// New code should use `freebird_security::approval::*` directly.
+pub mod consent {
+    pub use crate::approval::*;
+}
 pub mod db_key;
 pub mod egress;
 pub mod error;

@@ -167,8 +167,8 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         }
     });
 
-    // 9. CONSENT GATE — human-in-the-loop for high-risk tools (ASI09)
-    let (consent_gate, consent_rx) = freebird_security::consent::ConsentGate::new(
+    // 9. APPROVAL GATE — unified human-in-the-loop for consent + security warnings
+    let (approval_gate, approval_rx) = freebird_security::approval::ApprovalGate::new(
         config.security.require_consent_above.clone(),
         Duration::from_secs(config.security.consent_timeout_secs),
         config.security.max_pending_consent_requests,
@@ -177,7 +177,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         threshold = ?config.security.require_consent_above,
         timeout_secs = config.security.consent_timeout_secs,
         max_pending = config.security.max_pending_consent_requests,
-        "consent gate configured"
+        "approval gate configured"
     );
 
     // Clone knowledge store for the runtime (ToolExecutor also needs its own Arc).
@@ -232,7 +232,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         std::time::Duration::from_secs(tools_config.default_timeout_secs),
         audit_logger.clone(),
         tools_config.allowed_directories.clone(),
-        Some(consent_gate),
+        Some(approval_gate),
         knowledge_store,
         secret_guard,
     )
@@ -243,7 +243,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         registry,
         channel,
         tool_executor,
-        Some(consent_rx),
+        Some(approval_rx),
         Box::new(memory),
         ks_for_runtime,
         config.knowledge,

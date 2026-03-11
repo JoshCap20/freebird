@@ -104,7 +104,7 @@ pub fn parse_user_input(line: &str) -> ParseResult {
         if id.is_empty() {
             return ParseResult::LocalOutput("Usage: /approve <request-id>\n".to_string());
         }
-        return ParseResult::Send(ClientMessage::ConsentResponse {
+        return ParseResult::Send(ClientMessage::ApprovalResponse {
             request_id: id.to_string(),
             approved: true,
             reason: None,
@@ -121,7 +121,7 @@ pub fn parse_user_input(line: &str) -> ParseResult {
         let mut parts = rest.splitn(2, ' ');
         let id = parts.next().unwrap_or_default().to_string();
         let reason = parts.next().map(|s| s.trim().to_string());
-        return ParseResult::Send(ClientMessage::ConsentResponse {
+        return ParseResult::Send(ClientMessage::ApprovalResponse {
             request_id: id,
             approved: false,
             reason,
@@ -229,18 +229,16 @@ pub fn render_server_message(msg: &ServerMessage, is_tty: bool) -> String {
                 format!("[session: {session_id}, model: {model_id}]\n")
             }
         }
-        ServerMessage::ConsentRequest {
+        ServerMessage::ApprovalRequest {
             request_id,
-            tool_name,
-            risk_level,
-            action_summary,
+            category_json,
             ..
         } => {
+            // Parse category to render appropriate header.
             if is_tty {
                 format!(
-                    "{bold}{yellow}\u{26a0} CONSENT REQUIRED{reset}\n\
-                     {bold}Tool:{reset}   {tool_name} (risk: {risk_level})\n\
-                     {bold}Action:{reset} {action_summary}\n\
+                    "{bold}{yellow}\u{26a0} APPROVAL REQUIRED{reset}\n\
+                     {dim}{category_json}{reset}\n\
                      {dim}Reply: /approve {request_id}  or  /deny {request_id} [reason]{reset}\n",
                     bold = style::BOLD,
                     yellow = style::YELLOW,
@@ -249,8 +247,7 @@ pub fn render_server_message(msg: &ServerMessage, is_tty: bool) -> String {
                 )
             } else {
                 format!(
-                    "[CONSENT REQUIRED] tool={tool_name} risk={risk_level} \
-                     action={action_summary}\n\
+                    "[APPROVAL REQUIRED] {category_json}\n\
                      /approve {request_id} or /deny {request_id} [reason]\n"
                 )
             }
@@ -415,10 +412,10 @@ async fn handle_daemon_line<O: AsyncWrite + Unpin>(
     user_output.flush().await.context("flushing output")?;
 
     // Print "You: " prompt after TurnComplete (turn is done, user may type)
-    // and after ConsentRequest (user needs to type /approve or /deny).
+    // and after ApprovalRequest (user needs to type /approve or /deny).
     if matches!(
         &msg,
-        ServerMessage::TurnComplete | ServerMessage::ConsentRequest { .. }
+        ServerMessage::TurnComplete | ServerMessage::ApprovalRequest { .. }
     ) {
         write_prompt(user_output, is_tty).await?;
     }
@@ -666,7 +663,7 @@ mod tests {
     fn parse_approve_command() {
         assert_eq!(
             parse_user_input("/approve req-123"),
-            ParseResult::Send(ClientMessage::ConsentResponse {
+            ParseResult::Send(ClientMessage::ApprovalResponse {
                 request_id: "req-123".into(),
                 approved: true,
                 reason: None,
@@ -678,7 +675,7 @@ mod tests {
     fn parse_deny_command_with_reason() {
         assert_eq!(
             parse_user_input("/deny req-123 too risky"),
-            ParseResult::Send(ClientMessage::ConsentResponse {
+            ParseResult::Send(ClientMessage::ApprovalResponse {
                 request_id: "req-123".into(),
                 approved: false,
                 reason: Some("too risky".into()),
@@ -690,7 +687,7 @@ mod tests {
     fn parse_deny_command_no_reason() {
         assert_eq!(
             parse_user_input("/deny req-456"),
-            ParseResult::Send(ClientMessage::ConsentResponse {
+            ParseResult::Send(ClientMessage::ApprovalResponse {
                 request_id: "req-456".into(),
                 approved: false,
                 reason: None,
@@ -743,26 +740,24 @@ mod tests {
         assert!(rendered.contains("claude-sonnet-4-6"));
     }
 
-    // ── Consent rendering tests ─────────────────────────────────────
+    // ── Approval rendering tests ─────────────────────────────────────
 
     #[test]
-    fn render_consent_request_plain() {
-        let msg = ServerMessage::ConsentRequest {
+    fn render_approval_request_plain() {
+        let msg = ServerMessage::ApprovalRequest {
             request_id: "req-42".into(),
-            tool_name: "shell".into(),
-            description: "execute commands".into(),
-            risk_level: "high".into(),
-            action_summary: "rm -rf /tmp".into(),
+            category_json: r#"{"kind":"consent","tool_name":"shell","description":"execute commands","risk_level":"high","action_summary":"rm -rf /tmp"}"#.into(),
             expires_at: "2026-03-09T12:00:00Z".into(),
         };
         let rendered = render_server_message(&msg, false);
         assert!(
-            rendered.contains("CONSENT REQUIRED"),
+            rendered.contains("APPROVAL REQUIRED"),
             "should contain header"
         );
-        assert!(rendered.contains("shell"), "should contain tool name");
-        assert!(rendered.contains("high"), "should contain risk level");
-        assert!(rendered.contains("rm -rf /tmp"), "should contain action");
+        assert!(
+            rendered.contains("shell"),
+            "should contain tool name in category_json"
+        );
         assert!(
             rendered.contains("/approve req-42"),
             "should contain approve command with id"
@@ -774,25 +769,21 @@ mod tests {
     }
 
     #[test]
-    fn render_consent_request_tty_has_ansi() {
-        let msg = ServerMessage::ConsentRequest {
+    fn render_approval_request_tty_has_ansi() {
+        let msg = ServerMessage::ApprovalRequest {
             request_id: "req-42".into(),
-            tool_name: "shell".into(),
-            description: "execute commands".into(),
-            risk_level: "high".into(),
-            action_summary: "rm -rf /tmp".into(),
+            category_json: r#"{"kind":"consent","tool_name":"shell"}"#.into(),
             expires_at: "2026-03-09T12:00:00Z".into(),
         };
         let rendered = render_server_message(&msg, true);
         assert!(
             rendered.contains("\x1b["),
-            "tty consent should contain ANSI codes"
+            "tty approval should contain ANSI codes"
         );
         assert!(
-            rendered.contains("CONSENT REQUIRED"),
+            rendered.contains("APPROVAL REQUIRED"),
             "should contain header"
         );
-        assert!(rendered.contains("shell"), "should contain tool name");
         assert!(
             rendered.contains("/approve req-42"),
             "should contain approve command"

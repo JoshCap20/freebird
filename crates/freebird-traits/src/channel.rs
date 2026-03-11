@@ -75,8 +75,8 @@ pub enum InboundEvent {
         args: Vec<String>,
         sender_id: String,
     },
-    /// A user's response to a consent request.
-    ConsentResponse {
+    /// A user's response to an approval request (consent or security warning).
+    ApprovalResponse {
         request_id: String,
         approved: bool,
         reason: Option<String>,
@@ -132,13 +132,16 @@ pub enum OutboundEvent {
         provider_id: String,
         recipient_id: String,
     },
-    /// A consent request for the user to approve or deny a high-risk tool.
-    ConsentRequest {
+    /// An approval request for the user to approve or deny.
+    ///
+    /// Covers both action-driven consent (tool risk) and threat-driven
+    /// security warnings (injection detection). The `category_json` field
+    /// contains a serialized `ApprovalCategory` from `freebird-security`.
+    ApprovalRequest {
         request_id: String,
-        tool_name: String,
-        description: String,
-        risk_level: String,
-        action_summary: String,
+        /// JSON-serialized `ApprovalCategory` — keeps traits crate free
+        /// of security type dependencies.
+        category_json: String,
         expires_at: String,
         recipient_id: String,
     },
@@ -268,13 +271,10 @@ mod tests {
     }
 
     #[test]
-    fn test_outbound_consent_request_serde_roundtrip() {
-        let event = OutboundEvent::ConsentRequest {
+    fn test_outbound_approval_request_serde_roundtrip() {
+        let event = OutboundEvent::ApprovalRequest {
             request_id: "req-123".into(),
-            tool_name: "shell".into(),
-            description: "execute shell commands".into(),
-            risk_level: "high".into(),
-            action_summary: "rm -rf /tmp/test".into(),
+            category_json: r#"{"kind":"consent","tool_name":"shell","description":"execute shell commands","risk_level":"high","action_summary":"rm -rf /tmp/test"}"#.into(),
             expires_at: "2026-03-06T12:00:00Z".into(),
             recipient_id: "user-1".into(),
         };
@@ -282,23 +282,21 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let back: OutboundEvent = serde_json::from_str(&json).unwrap();
         match back {
-            OutboundEvent::ConsentRequest {
+            OutboundEvent::ApprovalRequest {
                 request_id,
-                tool_name,
-                risk_level,
+                category_json,
                 ..
             } => {
                 assert_eq!(request_id, "req-123");
-                assert_eq!(tool_name, "shell");
-                assert_eq!(risk_level, "high");
+                assert!(category_json.contains("consent"));
             }
-            _ => panic!("expected ConsentRequest"),
+            _ => panic!("expected ApprovalRequest"),
         }
     }
 
     #[test]
-    fn test_inbound_consent_response_serde_roundtrip() {
-        let event = InboundEvent::ConsentResponse {
+    fn test_inbound_approval_response_serde_roundtrip() {
+        let event = InboundEvent::ApprovalResponse {
             request_id: "req-456".into(),
             approved: false,
             reason: Some("too risky".into()),
@@ -308,7 +306,7 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let back: InboundEvent = serde_json::from_str(&json).unwrap();
         match back {
-            InboundEvent::ConsentResponse {
+            InboundEvent::ApprovalResponse {
                 request_id,
                 approved,
                 reason,
@@ -318,7 +316,7 @@ mod tests {
                 assert!(!approved);
                 assert_eq!(reason.unwrap(), "too risky");
             }
-            _ => panic!("expected ConsentResponse"),
+            _ => panic!("expected ApprovalResponse"),
         }
     }
 
