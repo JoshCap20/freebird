@@ -535,8 +535,8 @@ const MAX_ARG_LEN: usize = 4096;
 /// redirection, quoting (which can break out of quoted contexts),
 /// backslash escaping, glob expansion, and history expansion.
 const FORBIDDEN_ARG_CHARS: &[char] = &[
-    '|', ';', '&', '`', '$', '(', ')', '{', '}', '<', '>', '\'', '"', '\\', '*', '?', '!', '#',
-    '~', '\n', '\r',
+    '|', ';', '&', '`', '$', '(', ')', '{', '}', '[', ']', '<', '>', '\'', '"', '\\', '*', '?',
+    '!', '#', '~', '\n', '\r',
 ];
 
 impl SafeShellArg {

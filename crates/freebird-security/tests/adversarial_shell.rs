@@ -73,8 +73,8 @@ fn null_byte_injection() {
 #[test]
 fn all_forbidden_chars_individually_rejected() {
     let forbidden = [
-        '|', ';', '&', '`', '$', '(', ')', '{', '}', '<', '>', '\'', '"', '\\', '*', '?', '!', '#',
-        '~', '\n', '\r',
+        '|', ';', '&', '`', '$', '(', ')', '{', '}', '[', ']', '<', '>', '\'', '"', '\\', '*', '?',
+        '!', '#', '~', '\n', '\r',
     ];
 
     for ch in &forbidden {
@@ -152,7 +152,7 @@ mod proptest_shell {
         fn string_with_forbidden_char_rejected(
             prefix in "[a-z]{1,10}",
             forbidden in prop::sample::select(vec![
-                '|', ';', '&', '`', '$', '(', ')', '{', '}',
+                '|', ';', '&', '`', '$', '(', ')', '{', '}', '[', ']',
                 '<', '>', '\'', '"', '\\', '*', '?', '!', '#', '~', '\n', '\r'
             ]),
             suffix in "[a-z]{1,10}"
