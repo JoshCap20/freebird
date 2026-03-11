@@ -16,11 +16,7 @@ use freebird_traits::tool::{
     ToolOutput,
 };
 
-/// Minimal PATH for sandboxed command execution.
-///
-/// Only standard system directories. Prevents PATH hijacking where an
-/// attacker places a malicious binary earlier in PATH.
-const SANDBOXED_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+use crate::common::SANDBOXED_PATH;
 
 /// Maximum number of arguments per shell command (ASI08 resource exhaustion).
 ///
