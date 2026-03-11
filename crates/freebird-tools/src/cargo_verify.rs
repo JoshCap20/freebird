@@ -539,7 +539,15 @@ impl CargoVerifyTool {
                 (diags, None)
             }
             VerifyStep::Test => parse_test_output(&stdout, &stderr, sandbox_root),
-            VerifyStep::Fmt => (parse_fmt_output(&stdout, sandbox_root), None),
+            VerifyStep::Fmt => {
+                // rustfmt writes "Diff in" lines to stdout on most versions,
+                // but some configurations route them to stderr.
+                let mut fmt_issues = parse_fmt_output(&stdout, sandbox_root);
+                if fmt_issues.is_empty() && !output.status.success() {
+                    fmt_issues = parse_fmt_output(&stderr, sandbox_root);
+                }
+                (fmt_issues, None)
+            }
             VerifyStep::Deny => (parse_deny_output(&stderr), None),
         };
 
