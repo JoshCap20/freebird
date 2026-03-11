@@ -9,12 +9,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use freebird_security::budget::TokenBudget;
+use freebird_security::capability::CapabilityGrant;
 use freebird_traits::id::SessionId;
 use freebird_types::id::new_session_id;
 use tokio::sync::RwLock;
 
 /// Maps `(channel_id, sender_id)` pairs to [`SessionId`] values and
-/// tracks per-session [`TokenBudget`]s.
+/// tracks per-session [`TokenBudget`]s and [`CapabilityGrant`]s.
 ///
 /// Thread-safe via internal [`RwLock`]. All methods take `&self`, so the
 /// manager can be stored as a direct field on the agent runtime without
@@ -26,6 +27,9 @@ pub struct SessionManager {
     /// uses `AtomicU64` internally (interior mutability), and we need to
     /// return owned handles through the `RwLock`.
     budgets: RwLock<HashMap<SessionId, Arc<TokenBudget>>>,
+    /// Per-session capability grants. Each session has a scoped set of
+    /// permissions that determine which tools it can invoke.
+    grants: RwLock<HashMap<SessionId, CapabilityGrant>>,
 }
 
 impl SessionManager {
@@ -35,6 +39,7 @@ impl SessionManager {
         Self {
             sessions: RwLock::new(HashMap::new()),
             budgets: RwLock::new(HashMap::new()),
+            grants: RwLock::new(HashMap::new()),
         }
     }
 
@@ -62,12 +67,25 @@ impl SessionManager {
 
     /// Creates a new [`SessionId`] for this `(channel, sender)` pair,
     /// replacing any existing session. Used for the `/new` command.
+    ///
+    /// Cleans up the old session's grant and budget to avoid stale entries
+    /// accumulating in memory.
     #[must_use = "the returned SessionId identifies the new conversation"]
     pub async fn new_session(&self, channel_id: &str, sender_id: &str) -> SessionId {
         let key = (channel_id.to_owned(), sender_id.to_owned());
         let id = new_session_id();
-        let mut sessions = self.sessions.write().await;
-        sessions.insert(key, id.clone());
+
+        let old_id = {
+            let mut sessions = self.sessions.write().await;
+            sessions.insert(key, id.clone())
+        };
+
+        // Clean up old session's grant and budget if one existed.
+        if let Some(old_id) = old_id {
+            self.grants.write().await.remove(&old_id);
+            self.budgets.write().await.remove(&old_id);
+        }
+
         id
     }
 
@@ -102,6 +120,20 @@ impl SessionManager {
     pub async fn get_budget(&self, session_id: &SessionId) -> Option<Arc<TokenBudget>> {
         let budgets = self.budgets.read().await;
         budgets.get(session_id).cloned()
+    }
+
+    /// Associate a [`CapabilityGrant`] with a session.
+    ///
+    /// Replaces any existing grant for the given session.
+    pub async fn set_grant(&self, session_id: &SessionId, grant: CapabilityGrant) {
+        let mut grants = self.grants.write().await;
+        grants.insert(session_id.clone(), grant);
+    }
+
+    /// Returns the [`CapabilityGrant`] for a session, if one has been set.
+    pub async fn get_grant(&self, session_id: &SessionId) -> Option<CapabilityGrant> {
+        let grants = self.grants.read().await;
+        grants.get(session_id).cloned()
     }
 
     /// Returns the number of active session mappings.

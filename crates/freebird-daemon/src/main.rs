@@ -102,7 +102,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
     ));
 
     // 6. MEMORY — SQLite with SQLCipher encryption
-    let (memory, knowledge_store, db) = init_sqlite(&config)?;
+    let (memory, knowledge_store, db, db_salt) = init_sqlite(&config)?;
 
     // 6b. MIGRATION — one-time FileMemory → SQLite migration
     if let Some(legacy_dir) = home::home_dir().map(|h| h.join(".freebird/conversations")) {
@@ -194,11 +194,43 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         None
     };
 
-    // 11. TOOL EXECUTOR — consumes the registry, adds security pipeline (incl. secret guard)
+    // 11. AUDIT LOGGER — tamper-evident, hash-chained audit log (ASI security)
+    let audit_logger = if let Some(ref audit_dir) = config.logging.audit_dir {
+        let expanded_dir = expand_tilde(audit_dir)?;
+        std::fs::create_dir_all(&expanded_dir).with_context(|| {
+            format!(
+                "failed to create audit directory `{}`",
+                expanded_dir.display()
+            )
+        })?;
+        let audit_path = expanded_dir.join("audit.jsonl");
+
+        // Derive HMAC signing key from DB salt + domain separator.
+        // The salt is unique per installation and not publicly known,
+        // making the audit chain unforgeable without database access.
+        let audit_key_material = format!("freebird-audit-{}", hex::encode(&db_salt));
+        let signing_key =
+            ring::hmac::Key::new(ring::hmac::HMAC_SHA256, audit_key_material.as_bytes());
+
+        let logger = freebird_security::audit::AuditLogger::new(&audit_path, signing_key)
+            .with_context(|| {
+                format!(
+                    "failed to initialize audit logger at `{}`",
+                    audit_path.display()
+                )
+            })?;
+        tracing::info!(path = %audit_path.display(), "audit logger initialized");
+        Some(logger)
+    } else {
+        tracing::info!("audit logging disabled (no audit_dir configured)");
+        None
+    };
+
+    // 12. TOOL EXECUTOR — consumes the registry, adds security pipeline (incl. secret guard)
     let tool_executor = freebird_runtime::tool_executor::ToolExecutor::new(
         tool_registry.into_tools(),
         std::time::Duration::from_secs(tools_config.default_timeout_secs),
-        None, // audit logger — wired in a later issue
+        audit_logger.clone(),
         tools_config.allowed_directories.clone(),
         Some(consent_gate),
         knowledge_store,
@@ -206,7 +238,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
     )
     .context("failed to construct ToolExecutor (duplicate tool names?)")?;
 
-    // 12. AGENT RUNTIME
+    // 13. AGENT RUNTIME
     let mut runtime = AgentRuntime::new(
         registry,
         channel,
@@ -218,17 +250,17 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         config.runtime,
         tools_config,
         config.security.budgets,
-        None, // audit logger — wired in a later issue
+        audit_logger,
     );
 
-    // 13. RUN
+    // 14. RUN
     let run_result = runtime.run(token).await;
     match &run_result {
         Ok(()) => tracing::info!("runtime exited cleanly"),
         Err(e) => tracing::error!(%e, "runtime error"),
     }
 
-    // 13. DRAIN
+    // 15. DRAIN
     if drain_timeout > Duration::ZERO {
         tracing::info!(?drain_timeout, "draining in-flight work");
         let _ = tokio::time::timeout(drain_timeout, signal_handle).await;
@@ -317,11 +349,12 @@ fn validate_config(config: &AppConfig) -> Result<()> {
     Ok(())
 }
 
-/// Result of [`init_sqlite`]: memory backend, optional knowledge store, and raw DB handle.
+/// Result of [`init_sqlite`]: memory backend, optional knowledge store, raw DB handle, and salt.
 type SqliteComponents = (
     SqliteMemory,
     Option<std::sync::Arc<dyn freebird_traits::knowledge::KnowledgeStore>>,
     std::sync::Arc<freebird_memory::sqlite::SqliteDb>,
+    Vec<u8>,
 );
 
 /// Initialize the `SQLite`-backed memory and knowledge store.
@@ -367,7 +400,7 @@ fn init_sqlite(config: &AppConfig) -> Result<SqliteComponents> {
     let knowledge: Arc<dyn freebird_traits::knowledge::KnowledgeStore> =
         Arc::new(SqliteKnowledgeStore::new(Arc::clone(&db)));
 
-    Ok((memory, Some(knowledge), db))
+    Ok((memory, Some(knowledge), db, salt))
 }
 
 /// Populate the knowledge store with system-level entries on startup.

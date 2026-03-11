@@ -36,6 +36,8 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 rusqlite = { workspace = true }
 uuid = { workspace = true }
+ring = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

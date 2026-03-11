@@ -95,3 +95,4 @@ port = 7531
 [logging]
 level = "info"
 format = "pretty"
+audit_dir = "~/.freebird/audit"

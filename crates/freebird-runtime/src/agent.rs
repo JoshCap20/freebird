@@ -125,6 +125,31 @@ impl AgentRuntime {
         }
     }
 
+    /// Create a default [`CapabilityGrant`] for a new session.
+    ///
+    /// Grants all capabilities scoped to the configured sandbox root.
+    /// Returns `Err` if the sandbox root cannot be canonicalized.
+    fn create_default_grant(
+        &self,
+    ) -> Result<CapabilityGrant, freebird_security::error::SecurityError> {
+        CapabilityGrant::new(
+            [
+                Capability::FileRead,
+                Capability::FileWrite,
+                Capability::FileDelete,
+                Capability::ShellExecute,
+                Capability::ProcessSpawn,
+                Capability::NetworkOutbound,
+                Capability::NetworkListen,
+                Capability::EnvRead,
+            ]
+            .into_iter()
+            .collect(),
+            self.tools_config.sandbox_root.clone(),
+            None,
+        )
+    }
+
     /// Run the event loop until shutdown.
     ///
     /// Starts the channel, consumes inbound events, routes to handlers.
@@ -329,11 +354,30 @@ impl AgentRuntime {
                     .resolve(self.channel.info().id.as_str(), &sender_id)
                     .await;
 
-                // Ensure a per-session TokenBudget exists (idempotent).
+                // Ensure per-session TokenBudget and CapabilityGrant exist (idempotent).
                 if self.sessions.get_budget(&session_id).await.is_none() {
                     self.sessions
                         .set_budget(&session_id, TokenBudget::new(&self.budget_config))
                         .await;
+                }
+                if self.sessions.get_grant(&session_id).await.is_none() {
+                    match self.create_default_grant() {
+                        Ok(grant) => {
+                            self.sessions.set_grant(&session_id, grant).await;
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "cannot create capability grant for session");
+                            send_outbound(
+                                outbound,
+                                OutboundEvent::Error {
+                                    text: "Internal error: sandbox root is not accessible".into(),
+                                    recipient_id: sender_id.clone(),
+                                },
+                            )
+                            .await;
+                            return LoopAction::Continue;
+                        }
+                    }
                 }
 
                 tracing::info!(%session_id, %sender_id, "handling message");
@@ -415,12 +459,28 @@ impl AgentRuntime {
                 self.sessions
                     .set_budget(&session_id, TokenBudget::new(&self.budget_config))
                     .await;
-                let _ = outbound
-                    .send(OutboundEvent::Message {
-                        text: format!("New session started: {session_id}"),
-                        recipient_id: sender_id.into(),
-                    })
-                    .await;
+                // Create a fresh capability grant for the new session.
+                match self.create_default_grant() {
+                    Ok(grant) => {
+                        self.sessions.set_grant(&session_id, grant).await;
+                        let _ = outbound
+                            .send(OutboundEvent::Message {
+                                text: format!("New session started: {session_id}"),
+                                recipient_id: sender_id.into(),
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "cannot create capability grant for new session");
+                        let _ = outbound
+                            .send(OutboundEvent::Error {
+                                text: "Failed to start new session: sandbox root is not accessible"
+                                    .into(),
+                                recipient_id: sender_id.into(),
+                            })
+                            .await;
+                    }
+                }
                 LoopAction::Continue
             }
             "help" => {
@@ -508,7 +568,21 @@ impl AgentRuntime {
             return;
         };
 
-        // 3. Check streaming support and dispatch to appropriate loop
+        // 3. Retrieve per-session capability grant
+        let Some(grant) = self.sessions.get_grant(session_id).await else {
+            tracing::error!(%session_id, "no capability grant found for session");
+            send_outbound(
+                outbound,
+                OutboundEvent::Error {
+                    text: "Internal error: session has no capability grant".into(),
+                    recipient_id: sender_id.into(),
+                },
+            )
+            .await;
+            return;
+        };
+
+        // 4. Check streaming support and dispatch to appropriate loop
         let use_streaming = self
             .channel
             .info()
@@ -522,6 +596,7 @@ impl AgentRuntime {
                 sender_id,
                 session_id,
                 &conversation,
+                &grant,
                 outbound,
             )
             .await
@@ -531,6 +606,7 @@ impl AgentRuntime {
                 sender_id,
                 session_id,
                 &conversation,
+                &grant,
                 outbound,
                 None,
             )
@@ -702,6 +778,7 @@ impl AgentRuntime {
         &self,
         safe_message: &SafeMessage,
         conversation: &Conversation,
+        grant: &CapabilityGrant,
     ) -> (Vec<Message>, Turn, Vec<ToolDefinition>) {
         let user_message = Message {
             role: Role::User,
@@ -711,7 +788,7 @@ impl AgentRuntime {
             timestamp: Utc::now(),
         };
 
-        let tool_definitions = self.tool_executor.tool_definitions();
+        let tool_definitions = self.tool_executor.tool_definitions_for_grant(grant);
 
         let mut messages = conversation_to_messages(conversation);
 
@@ -832,17 +909,20 @@ impl AgentRuntime {
     /// When `initial_request` is `Some`, the first loop iteration uses it directly
     /// instead of building a fresh `CompletionRequest`. This supports the streaming
     /// fallback path where the request has already been constructed.
+    #[allow(clippy::too_many_arguments)]
     async fn run_agentic_loop(
         &self,
         safe_message: &SafeMessage,
         sender_id: &str,
         session_id: &SessionId,
         conversation: &Conversation,
+        grant: &CapabilityGrant,
         outbound: &mpsc::Sender<OutboundEvent>,
         initial_request: Option<CompletionRequest>,
     ) -> Turn {
-        let (mut messages, mut current_turn, tool_definitions) =
-            self.prepare_agentic_loop(safe_message, conversation).await;
+        let (mut messages, mut current_turn, tool_definitions) = self
+            .prepare_agentic_loop(safe_message, conversation, grant)
+            .await;
 
         let mut pending_request = initial_request;
 
@@ -914,6 +994,7 @@ impl AgentRuntime {
                         &response,
                         &mut messages,
                         &mut current_turn,
+                        grant,
                         session_id,
                         sender_id,
                         outbound,
@@ -958,8 +1039,11 @@ impl AgentRuntime {
         tool_definitions: &[ToolDefinition],
     ) -> CompletionRequest {
         let base = conversation.system_prompt.as_deref().unwrap_or("");
-        let system_prompt =
-            self.build_effective_system_prompt(base, conversation.model_id.as_str());
+        let system_prompt = self.build_effective_system_prompt(
+            base,
+            conversation.model_id.as_str(),
+            tool_definitions,
+        );
 
         CompletionRequest {
             model: conversation.model_id.clone(),
@@ -974,19 +1058,24 @@ impl AgentRuntime {
 
     /// Augment the base system prompt with tool and filesystem access
     /// information so the model knows what it can do.
-    fn build_effective_system_prompt(&self, base: &str, model_id: &str) -> String {
+    fn build_effective_system_prompt(
+        &self,
+        base: &str,
+        model_id: &str,
+        tool_definitions: &[ToolDefinition],
+    ) -> String {
         use std::fmt::Write;
 
         let mut prompt = base.to_owned();
         let _ = write!(prompt, "\n\nYou are running on model: {model_id}");
 
-        if self.tool_executor.tool_count() == 0 {
+        if tool_definitions.is_empty() {
             return prompt;
         }
 
         // List available tools by name and description.
         prompt.push_str("\n\nYou have the following tools available:\n");
-        for def in &self.tool_executor.tool_definitions() {
+        for def in tool_definitions {
             let _ = writeln!(prompt, "- **{}**: {}", def.name, def.description);
         }
 
@@ -1013,11 +1102,13 @@ impl AgentRuntime {
     }
 
     /// Execute tool calls from a `ToolUse` response and append results to the message list.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_tool_use_round(
         &self,
         response: &CompletionResponse,
         messages: &mut Vec<Message>,
         current_turn: &mut Turn,
+        grant: &CapabilityGrant,
         session_id: &SessionId,
         sender_id: &str,
         outbound: &mpsc::Sender<OutboundEvent>,
@@ -1026,6 +1117,7 @@ impl AgentRuntime {
             &response.message,
             messages,
             current_turn,
+            grant,
             session_id,
             sender_id,
             outbound,
@@ -1039,11 +1131,13 @@ impl AgentRuntime {
     /// Shared between the non-streaming (`handle_tool_use_round`) and streaming
     /// (`run_agentic_loop_streaming`) paths to avoid duplicating security-critical
     /// tool execution code.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_tool_calls(
         &self,
         assistant_message: &Message,
         messages: &mut Vec<Message>,
         current_turn: &mut Turn,
+        grant: &CapabilityGrant,
         session_id: &SessionId,
         sender_id: &str,
         outbound: &mpsc::Sender<OutboundEvent>,
@@ -1068,38 +1162,6 @@ impl AgentRuntime {
         // Add assistant message with tool_use blocks to conversation
         messages.push(assistant_message.clone());
 
-        // TODO(#27): Replace with per-session capability grants derived from session auth.
-        let grant = match CapabilityGrant::new(
-            [
-                Capability::FileRead,
-                Capability::FileWrite,
-                Capability::FileDelete,
-                Capability::ShellExecute,
-                Capability::ProcessSpawn,
-                Capability::NetworkOutbound,
-                Capability::NetworkListen,
-                Capability::EnvRead,
-            ]
-            .into_iter()
-            .collect(),
-            self.tools_config.sandbox_root.clone(),
-            None,
-        ) {
-            Ok(g) => g,
-            Err(e) => {
-                tracing::error!(error = %e, "cannot create capability grant — skipping tool execution");
-                send_outbound(
-                    outbound,
-                    OutboundEvent::Error {
-                        text: "Internal error: sandbox root is not accessible".into(),
-                        recipient_id: sender_id.into(),
-                    },
-                )
-                .await;
-                return;
-            }
-        };
-
         // Execute each tool and collect results
         let mut tool_results = Vec::with_capacity(tool_uses.len());
         for (tool_use_id, tool_name, input) in tool_uses {
@@ -1118,7 +1180,7 @@ impl AgentRuntime {
             // injection scanning, and audit logging. Output is already scanned.
             let output = self
                 .tool_executor
-                .execute(&tool_name, input.clone(), &grant, session_id, sender_id)
+                .execute(&tool_name, input.clone(), grant, session_id, sender_id)
                 .await;
 
             let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -1263,11 +1325,17 @@ impl AgentRuntime {
     /// Record an audit event if an audit logger is configured.
     ///
     /// No-op when `self.audit` is `None`. Errors from the audit logger
-    /// are intentionally discarded — audit failures must never block the
-    /// agent loop.
+    /// are logged but never block the agent loop — audit failures must
+    /// not prevent message processing.
     async fn audit(&self, session_id: &SessionId, event: AuditEventType) {
         if let Some(audit) = &self.audit {
-            let _ = audit.record(session_id.as_str(), event).await;
+            if let Err(e) = audit.record(session_id.as_str(), event).await {
+                tracing::error!(
+                    error = %e,
+                    %session_id,
+                    "audit logging failed — security events may not be recorded"
+                );
+            }
         }
     }
 
@@ -1305,10 +1373,12 @@ impl AgentRuntime {
         sender_id: &str,
         session_id: &SessionId,
         conversation: &Conversation,
+        grant: &CapabilityGrant,
         outbound: &mpsc::Sender<OutboundEvent>,
     ) -> Turn {
-        let (mut messages, mut current_turn, tool_definitions) =
-            self.prepare_agentic_loop(safe_message, conversation).await;
+        let (mut messages, mut current_turn, tool_definitions) = self
+            .prepare_agentic_loop(safe_message, conversation, grant)
+            .await;
 
         // Retrieve the per-session budget (if set).
         let budget = self.sessions.get_budget(session_id).await;
@@ -1354,6 +1424,7 @@ impl AgentRuntime {
                             sender_id,
                             session_id,
                             conversation,
+                            grant,
                             outbound,
                             Some(request),
                         )
@@ -1404,6 +1475,7 @@ impl AgentRuntime {
                         &assistant_message,
                         &mut messages,
                         &mut current_turn,
+                        grant,
                         session_id,
                         sender_id,
                         outbound,
