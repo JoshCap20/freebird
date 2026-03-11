@@ -28,6 +28,12 @@ use tokio::net::TcpStream;
 
 use freebird_types::protocol::{ClientMessage, ServerMessage};
 
+/// Sentinel value returned by [`parse_approval_category`] when the category
+/// is a `security_warning` kind. Used to drive display branching in
+/// [`render_consent_header`] without comparing against a raw string literal
+/// at the call site.
+const RISK_LEVEL_SECURITY_WARNING: &str = "warning";
+
 use self::consent::{ConsentAction, ConsentSelector};
 use self::input::{InputAction, InputEditor};
 use self::output::OutputRenderer;
@@ -209,7 +215,7 @@ impl TtyChat {
                         ConsentSelector::clear(&mut self.writer)?;
                         sel.render_outcome(&mut self.writer, approved)?;
                     }
-                    let msg = ClientMessage::ConsentResponse {
+                    let msg = ClientMessage::ApprovalResponse {
                         request_id,
                         approved,
                         reason,
@@ -343,27 +349,28 @@ impl TtyChat {
                     .set_session_info(&mut self.writer, &model_id, &session_id)?;
                 self.input.render(&mut self.writer)?;
             }
-            ServerMessage::ConsentRequest {
+            ServerMessage::ApprovalRequest {
                 request_id,
-                tool_name,
-                action_summary,
-                risk_level,
+                category_json,
                 expires_at,
-                ..
             } => {
-                // Stop the spinner — the tool is paused awaiting consent.
+                // Stop the spinner — the tool is paused awaiting approval.
                 if self.spinner.is_active() {
                     self.spinner.pause(&mut self.writer)?;
                 }
-                // If there's already a pending consent, auto-deny it.
+                // If there's already a pending approval, auto-deny it.
                 if let Some(prev) = self.consent.take() {
                     pending_send = Self::consent_action_to_message(prev.auto_deny("superseded"));
                 }
                 self.save_input_area()?;
-                self.render_consent_header(&tool_name, &action_summary, &risk_level)?;
+                // Parse category_json to extract display info for
+                // polymorphic rendering (Consent vs SecurityWarning).
+                let (display_name, action_summary, risk_level) =
+                    Self::parse_approval_category(&category_json);
+                self.render_consent_header(&display_name, &action_summary, &risk_level)?;
                 // Create the interactive selector (falls back to text hint if expired/unparseable).
                 if let Some(sel) =
-                    ConsentSelector::new(request_id.clone(), tool_name.clone(), &expires_at)
+                    ConsentSelector::new(request_id.clone(), display_name.clone(), &expires_at)
                 {
                     sel.render(&mut self.writer)?;
                     self.consent = Some(sel);
@@ -378,12 +385,15 @@ impl TtyChat {
         Ok(pending_send)
     }
 
-    /// Render the consent request header (tool name, risk, action summary).
+    /// Render the approval request header with polymorphic styling.
+    ///
+    /// - Consent requests: yellow "CONSENT REQUIRED" with tool name and risk level
+    /// - Security warnings: red "SECURITY WARNING" with threat details
     ///
     /// The interactive selector or text-based fallback is rendered separately.
     fn render_consent_header(
         &mut self,
-        tool_name: &str,
+        display_name: &str,
         action_summary: &str,
         risk_level: &str,
     ) -> std::io::Result<()> {
@@ -391,13 +401,28 @@ impl TtyChat {
             queue,
             style::{Attribute, Color, ResetColor, SetAttribute, SetForegroundColor},
         };
+
+        let is_security_warning = risk_level == RISK_LEVEL_SECURITY_WARNING;
+
         writeln!(self.writer)?;
         queue!(
             self.writer,
             SetAttribute(Attribute::Bold),
-            SetForegroundColor(Color::Yellow),
+            SetForegroundColor(if is_security_warning {
+                Color::Red
+            } else {
+                Color::Yellow
+            }),
         )?;
-        write!(self.writer, "  CONSENT REQUIRED")?;
+        write!(
+            self.writer,
+            "  {}",
+            if is_security_warning {
+                "SECURITY WARNING"
+            } else {
+                "CONSENT REQUIRED"
+            }
+        )?;
         queue!(self.writer, ResetColor, SetAttribute(Attribute::Reset))?;
 
         writeln!(self.writer)?;
@@ -406,7 +431,11 @@ impl TtyChat {
             SetAttribute(Attribute::Dim),
             SetForegroundColor(Color::White),
         )?;
-        write!(self.writer, "  Tool: {tool_name} (risk: {risk_level})")?;
+        if is_security_warning {
+            write!(self.writer, "  Source: {display_name}")?;
+        } else {
+            write!(self.writer, "  Tool: {display_name} (risk: {risk_level})")?;
+        }
         queue!(self.writer, ResetColor, SetAttribute(Attribute::Reset))?;
 
         writeln!(self.writer)?;
@@ -415,7 +444,16 @@ impl TtyChat {
             SetAttribute(Attribute::Dim),
             SetForegroundColor(Color::White),
         )?;
-        write!(self.writer, "  Action: {action_summary}")?;
+        write!(
+            self.writer,
+            "  {}",
+            if is_security_warning {
+                "Detail"
+            } else {
+                "Action"
+            }
+        )?;
+        write!(self.writer, ": {action_summary}")?;
         queue!(self.writer, ResetColor, SetAttribute(Attribute::Reset))?;
 
         writeln!(self.writer)?;
@@ -439,6 +477,51 @@ impl TtyChat {
         self.writer.flush()
     }
 
+    /// Parse `category_json` into display fields for the approval header.
+    ///
+    /// Returns `(header_label, action_summary, risk_info)`.
+    fn parse_approval_category(category_json: &str) -> (String, String, String) {
+        // Use serde_json::Value to parse without needing serde derive.
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(category_json) else {
+            return ("approval".into(), category_json.to_string(), "—".into());
+        };
+
+        let kind = val.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        let str_field = |key: &str| {
+            val.get(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or("—")
+                .to_string()
+        };
+
+        match kind {
+            "consent" => {
+                let tool_name = str_field("tool_name");
+                let risk_level = str_field("risk_level");
+                let action_summary = str_field("action_summary");
+                (tool_name, action_summary, risk_level)
+            }
+            "security_warning" => {
+                let threat_type = str_field("threat_type");
+                let detected_pattern = str_field("detected_pattern");
+                let content_preview = str_field("content_preview");
+                let source = str_field("source");
+
+                let header = format!("security: {threat_type} ({source})");
+                let summary = format!("Pattern: {detected_pattern} \u{2014} {content_preview}");
+                // Truncate summary to 200 chars for display.
+                let summary = if summary.chars().count() > 200 {
+                    let truncated: String = summary.chars().take(197).collect();
+                    format!("{truncated}...")
+                } else {
+                    summary
+                };
+                (header, summary, RISK_LEVEL_SECURITY_WARNING.into())
+            }
+            _ => ("approval".into(), category_json.to_string(), "—".into()),
+        }
+    }
+
     /// Convert a [`ConsentAction::Confirmed`] into a [`ClientMessage`].
     ///
     /// Returns `None` for non-Confirmed actions.
@@ -449,7 +532,7 @@ impl TtyChat {
             reason,
         } = action
         {
-            Some(ClientMessage::ConsentResponse {
+            Some(ClientMessage::ApprovalResponse {
                 request_id,
                 approved,
                 reason,

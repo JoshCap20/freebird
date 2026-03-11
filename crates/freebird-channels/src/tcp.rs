@@ -223,13 +223,13 @@ async fn read_client_lines(
                             })
                             .await;
                     }
-                    Ok(ClientMessage::ConsentResponse {
+                    Ok(ClientMessage::ApprovalResponse {
                         request_id,
                         approved,
                         reason,
                     }) => {
                         let _ = inbound_tx
-                            .send(InboundEvent::ConsentResponse {
+                            .send(InboundEvent::ApprovalResponse {
                                 request_id,
                                 approved,
                                 reason,
@@ -409,22 +409,16 @@ fn outbound_to_server_message(event: OutboundEvent) -> (String, ServerMessage) {
                 provider_id,
             },
         ),
-        OutboundEvent::ConsentRequest {
+        OutboundEvent::ApprovalRequest {
             request_id,
-            tool_name,
-            description,
-            risk_level,
-            action_summary,
+            category_json,
             expires_at,
             recipient_id,
         } => (
             recipient_id,
-            ServerMessage::ConsentRequest {
+            ServerMessage::ApprovalRequest {
                 request_id,
-                tool_name,
-                description,
-                risk_level,
-                action_summary,
+                category_json,
                 expires_at,
             },
         ),
@@ -846,23 +840,17 @@ mod tests {
                 ("tcp-6".to_string(), ServerMessage::TurnComplete),
             ),
             (
-                OutboundEvent::ConsentRequest {
+                OutboundEvent::ApprovalRequest {
                     request_id: "req-42".into(),
-                    tool_name: "shell".into(),
-                    description: "execute commands".into(),
-                    risk_level: "high".into(),
-                    action_summary: "rm -rf /tmp".into(),
+                    category_json: r#"{"kind":"consent","tool_name":"shell"}"#.into(),
                     expires_at: "2026-03-09T12:00:00Z".into(),
                     recipient_id: "tcp-7".into(),
                 },
                 (
                     "tcp-7".to_string(),
-                    ServerMessage::ConsentRequest {
+                    ServerMessage::ApprovalRequest {
                         request_id: "req-42".into(),
-                        tool_name: "shell".into(),
-                        description: "execute commands".into(),
-                        risk_level: "high".into(),
-                        action_summary: "rm -rf /tmp".into(),
+                        category_json: r#"{"kind":"consent","tool_name":"shell"}"#.into(),
                         expires_at: "2026-03-09T12:00:00Z".into(),
                     },
                 ),
@@ -913,7 +901,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_consent_response_from_client_becomes_inbound_event() {
+    async fn test_approval_response_from_client_becomes_inbound_event() {
         let (listener, port) = bind_random().await;
         let channel = TcpChannel::new("127.0.0.1", port);
         let mut handle = channel.start_with_listener(listener);
@@ -923,10 +911,10 @@ mod tests {
         // Consume Connected
         let _ = handle.inbound.next().await.unwrap();
 
-        // Send a ConsentResponse from the client
+        // Send an ApprovalResponse from the client
         send_json(
             &mut client,
-            &ClientMessage::ConsentResponse {
+            &ClientMessage::ApprovalResponse {
                 request_id: "req-42".into(),
                 approved: true,
                 reason: None,
@@ -936,7 +924,7 @@ mod tests {
 
         let event = handle.inbound.next().await.unwrap();
         match event {
-            InboundEvent::ConsentResponse {
+            InboundEvent::ApprovalResponse {
                 request_id,
                 approved,
                 reason,
@@ -947,14 +935,14 @@ mod tests {
                 assert!(reason.is_none());
                 assert_eq!(sender_id, "tcp-0");
             }
-            other => panic!("expected ConsentResponse, got {other:?}"),
+            other => panic!("expected ApprovalResponse, got {other:?}"),
         }
 
         channel.stop().await.unwrap();
     }
 
     #[tokio::test]
-    async fn test_consent_response_denied_from_client() {
+    async fn test_approval_response_denied_from_client() {
         let (listener, port) = bind_random().await;
         let channel = TcpChannel::new("127.0.0.1", port);
         let mut handle = channel.start_with_listener(listener);
@@ -966,7 +954,7 @@ mod tests {
 
         send_json(
             &mut client,
-            &ClientMessage::ConsentResponse {
+            &ClientMessage::ApprovalResponse {
                 request_id: "req-99".into(),
                 approved: false,
                 reason: Some("too dangerous".into()),
@@ -976,7 +964,7 @@ mod tests {
 
         let event = handle.inbound.next().await.unwrap();
         match event {
-            InboundEvent::ConsentResponse {
+            InboundEvent::ApprovalResponse {
                 request_id,
                 approved,
                 reason,
@@ -986,7 +974,7 @@ mod tests {
                 assert!(!approved);
                 assert_eq!(reason.unwrap(), "too dangerous");
             }
-            other => panic!("expected ConsentResponse, got {other:?}"),
+            other => panic!("expected ApprovalResponse, got {other:?}"),
         }
 
         channel.stop().await.unwrap();

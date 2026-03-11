@@ -66,7 +66,7 @@ pub struct ConsentSelector {
 }
 
 impl ConsentSelector {
-    /// Create a new consent selector from a received `ConsentRequest`.
+    /// Create a new consent selector from a received `ApprovalRequest`.
     ///
     /// `expires_at_str` is the RFC 3339 timestamp from the server.
     /// Returns `None` if the timestamp is unparseable or already expired.

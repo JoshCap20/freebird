@@ -71,15 +71,23 @@ pub enum AuditEventType {
         capability: String,
         result: CapabilityCheckResult,
     },
-    ConsentGranted {
-        tool_name: String,
+    ApprovalRequested {
+        request_id: String,
+        /// Serialized `ApprovalCategory` kind (e.g., `consent`, `security_warning`).
+        category: String,
     },
-    ConsentDenied {
-        tool_name: String,
+    ApprovalGranted {
+        /// Descriptive context, e.g. tool name or security warning category.
+        context: String,
+    },
+    ApprovalDenied {
+        /// Descriptive context, e.g. tool name or security warning category.
+        context: String,
         reason: Option<String>,
     },
-    ConsentExpired {
-        tool_name: String,
+    ApprovalExpired {
+        /// Descriptive context, e.g. tool name or security warning category.
+        context: String,
     },
     EgressBlocked {
         host: String,
@@ -670,8 +678,8 @@ mod tests {
         logger
             .record(
                 "s1",
-                AuditEventType::ConsentGranted {
-                    tool_name: "shell".into(),
+                AuditEventType::ApprovalGranted {
+                    context: "req-1".into(),
                 },
             )
             .await
@@ -857,19 +865,23 @@ mod tests {
                 capability: "shell".into(),
                 result: CapabilityCheckResult::Granted,
             },
-            AuditEventType::ConsentGranted {
-                tool_name: "rm".into(),
+            AuditEventType::ApprovalRequested {
+                request_id: "req-1".into(),
+                category: "consent".into(),
             },
-            AuditEventType::ConsentDenied {
-                tool_name: "rm".into(),
+            AuditEventType::ApprovalGranted {
+                context: "req-1".into(),
+            },
+            AuditEventType::ApprovalDenied {
+                context: "req-2".into(),
                 reason: Some("too risky".into()),
             },
-            AuditEventType::ConsentDenied {
-                tool_name: "rm".into(),
+            AuditEventType::ApprovalDenied {
+                context: "req-3".into(),
                 reason: None,
             },
-            AuditEventType::ConsentExpired {
-                tool_name: "rm".into(),
+            AuditEventType::ApprovalExpired {
+                context: "req-4".into(),
             },
             AuditEventType::EgressBlocked {
                 host: "evil.com".into(),

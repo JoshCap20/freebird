@@ -232,6 +232,7 @@ pub fn make_tool_executor(tools: Vec<Box<dyn Tool>>) -> ToolExecutor {
         None,
         None,
         None,
+        freebird_types::config::InjectionConfig::default(),
     )
     .expect("test tool executor construction should not fail")
 }

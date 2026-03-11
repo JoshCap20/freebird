@@ -88,6 +88,12 @@ redact_output = true
 # extra_sensitive_file_patterns = []
 # extra_sensitive_command_patterns = []
 
+[security.injection]
+input_response = "prompt"           # "block" | "prompt" | "allow"
+tool_output_response = "prompt"     # "block" | "prompt" | "allow"
+# model_output and context are always "block" (not configurable)
+prompt_timeout_secs = 60
+
 [daemon]
 host = "127.0.0.1"
 port = 7531

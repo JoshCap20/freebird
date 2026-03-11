@@ -159,11 +159,11 @@ pub enum ToolError {
     #[error("security violation in tool `{tool}`: {reason}")]
     SecurityViolation { tool: String, reason: String },
 
-    #[error("consent denied for tool `{tool}`")]
-    ConsentDenied { tool: String },
+    #[error("approval denied: {context}")]
+    ApprovalDenied { context: String },
 
-    #[error("consent expired for tool `{tool}`")]
-    ConsentExpired { tool: String },
+    #[error("approval expired: {context}")]
+    ApprovalExpired { context: String },
 }
 
 #[cfg(test)]

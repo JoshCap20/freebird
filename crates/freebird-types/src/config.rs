@@ -273,6 +273,9 @@ pub struct SecurityConfig {
     /// Token and tool-round budget limits.
     #[serde(default)]
     pub budgets: BudgetConfig,
+    /// Injection detection response configuration.
+    #[serde(default)]
+    pub injection: InjectionConfig,
 }
 
 /// Network egress allowlist configuration (CLAUDE.md §12 — ASI01).
@@ -379,6 +382,58 @@ const fn default_secret_guard_action() -> SecretGuardAction {
 
 const fn default_secret_guard_redact_output() -> bool {
     true
+}
+
+/// How injection detection responds when a pattern is found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InjectionResponse {
+    /// Block the content outright — no user choice.
+    Block,
+    /// Warn the user and ask whether to proceed (default for input/tool output).
+    Prompt,
+    /// Allow the content through without warning.
+    Allow,
+}
+
+/// Injection detection response configuration.
+///
+/// Controls how each injection detection layer responds when a pattern
+/// is found. Model output and loaded context are always blocked
+/// (non-configurable) because they represent compromised trust boundaries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InjectionConfig {
+    /// Response for injection patterns in user input. Default: `prompt`.
+    #[serde(default = "default_injection_input_response")]
+    pub input_response: InjectionResponse,
+    /// Response for injection patterns in tool output. Default: `prompt`.
+    #[serde(default = "default_injection_tool_output_response")]
+    pub tool_output_response: InjectionResponse,
+    /// Timeout in seconds for security prompts. Default: 60.
+    #[serde(default = "default_injection_prompt_timeout_secs")]
+    pub prompt_timeout_secs: u64,
+}
+
+impl Default for InjectionConfig {
+    fn default() -> Self {
+        Self {
+            input_response: default_injection_input_response(),
+            tool_output_response: default_injection_tool_output_response(),
+            prompt_timeout_secs: default_injection_prompt_timeout_secs(),
+        }
+    }
+}
+
+const fn default_injection_input_response() -> InjectionResponse {
+    InjectionResponse::Prompt
+}
+
+const fn default_injection_tool_output_response() -> InjectionResponse {
+    InjectionResponse::Prompt
+}
+
+const fn default_injection_prompt_timeout_secs() -> u64 {
+    60
 }
 
 const fn default_consent_timeout_secs() -> u64 {

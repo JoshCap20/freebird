@@ -9,13 +9,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::Utc;
+use freebird_security::approval::ApprovalRequest;
 use freebird_security::audit::{AuditEventType, AuditLogger, InjectionSource};
 use freebird_security::budget::TokenBudget;
 use freebird_security::capability::CapabilityGrant;
-use freebird_security::consent::ConsentRequest;
 use freebird_security::error::Severity;
 use freebird_security::injection;
-use freebird_security::safe_types::{SafeMessage, ScannedModelResponse};
+use freebird_security::safe_types::{SafeMessage, ScannedModelResponse, ValidationResult};
 use freebird_security::taint::Tainted;
 use freebird_traits::channel::{
     Channel, ChannelError, ChannelFeature, InboundEvent, OutboundEvent,
@@ -28,7 +28,12 @@ use freebird_traits::provider::{
     StreamEvent, TokenUsage, ToolDefinition,
 };
 use freebird_traits::tool::{Capability, ToolOutcome};
-use freebird_types::config::{BudgetConfig, KnowledgeConfig, RuntimeConfig, ToolsConfig};
+use freebird_types::config::{
+    BudgetConfig, InjectionResponse, KnowledgeConfig, RuntimeConfig, ToolsConfig,
+};
+// Re-exported for test module via `use super::*`.
+#[cfg(test)]
+use freebird_types::config::InjectionConfig;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -74,9 +79,9 @@ pub struct AgentRuntime {
     provider_registry: ProviderRegistry,
     channel: Box<dyn Channel>,
     tool_executor: crate::tool_executor::ToolExecutor,
-    /// Receives consent requests from the `ToolExecutor`'s `ConsentGate`.
-    /// Consumed by the third arm of the `run()` select loop.
-    consent_rx: Option<tokio::sync::mpsc::Receiver<ConsentRequest>>,
+    /// Receives approval requests from the `ToolExecutor`'s `ApprovalGate`.
+    /// Consumed by the approval-forwarder background task.
+    approval_rx: Option<tokio::sync::mpsc::Receiver<ApprovalRequest>>,
     memory: Box<dyn Memory>,
     knowledge_store: Option<Arc<dyn KnowledgeStore>>,
     knowledge_config: KnowledgeConfig,
@@ -100,7 +105,7 @@ impl AgentRuntime {
         provider_registry: ProviderRegistry,
         channel: Box<dyn Channel>,
         tool_executor: crate::tool_executor::ToolExecutor,
-        consent_rx: Option<tokio::sync::mpsc::Receiver<ConsentRequest>>,
+        approval_rx: Option<tokio::sync::mpsc::Receiver<ApprovalRequest>>,
         memory: Box<dyn Memory>,
         knowledge_store: Option<Arc<dyn KnowledgeStore>>,
         knowledge_config: KnowledgeConfig,
@@ -113,7 +118,7 @@ impl AgentRuntime {
             provider_registry,
             channel,
             tool_executor,
-            consent_rx,
+            approval_rx,
             memory,
             knowledge_store,
             knowledge_config,
@@ -169,11 +174,10 @@ impl AgentRuntime {
 
         tracing::info!("agent runtime started, waiting for messages");
 
-        // Fan-out inbound events into a splitter task and optional consent
-        // bridge task. See `spawn_inbound_splitter` and
-        // `spawn_consent_forwarder` for details.
-        let (mut main_rx, splitter_task, consent_task) =
-            self.spawn_consent_bridge(handle.inbound, &outbound, &cancel);
+        // Fan-out inbound events into a splitter task and optional approval
+        // bridge task. See `spawn_approval_bridge` for details.
+        let (mut main_rx, splitter_task, approval_task) =
+            self.spawn_approval_bridge(handle.inbound, &outbound, &cancel);
 
         loop {
             tokio::select! {
@@ -199,7 +203,7 @@ impl AgentRuntime {
 
         // Clean up spawned tasks
         splitter_task.abort();
-        if let Some(task) = consent_task {
+        if let Some(task) = approval_task {
             task.abort();
         }
 
@@ -207,23 +211,23 @@ impl AgentRuntime {
         Ok(())
     }
 
-    /// Spawn background tasks for consent bridge plumbing.
+    /// Spawn background tasks for approval bridge plumbing.
     ///
-    /// Returns a receiver for non-consent inbound events, the splitter task
-    /// handle, and an optional consent-forwarder task handle.
+    /// Returns a receiver for non-approval inbound events, the splitter task
+    /// handle, and an optional approval-forwarder task handle.
     ///
     /// **Splitter task**: reads from the raw inbound stream and routes
-    /// `ConsentResponse` events directly to the consent gate's
-    /// [`ConsentResponder`], bypassing the main event loop. All other
+    /// `ApprovalResponse` events directly to the approval gate's
+    /// [`ApprovalResponder`], bypassing the main event loop. All other
     /// events are forwarded to the returned `main_rx`. This is necessary
     /// because `handle_event()` may block on `check_consent()` (awaiting
-    /// user approval via oneshot), and the `ConsentResponse` that unblocks
+    /// user approval via oneshot), and the `ApprovalResponse` that unblocks
     /// it also arrives as an `InboundEvent`.
     ///
-    /// **Consent-forwarder task**: reads `ConsentRequest`s from the gate's
-    /// mpsc channel and forwards them as `OutboundEvent::ConsentRequest` to
+    /// **Approval-forwarder task**: reads `ApprovalRequest`s from the gate's
+    /// mpsc channel and forwards them as `OutboundEvent::ApprovalRequest` to
     /// the user's channel.
-    fn spawn_consent_bridge(
+    fn spawn_approval_bridge(
         &mut self,
         inbound: Pin<Box<dyn futures::Stream<Item = InboundEvent> + Send>>,
         outbound: &mpsc::Sender<OutboundEvent>,
@@ -234,8 +238,8 @@ impl AgentRuntime {
         Option<tokio::task::JoinHandle<()>>,
     ) {
         let (main_tx, main_rx) = mpsc::channel::<InboundEvent>(32);
-        let consent_responder = self.tool_executor.consent_responder();
-        let has_consent_gate = consent_responder.is_some();
+        let approval_responder = self.tool_executor.approval_responder();
+        let has_approval_gate = approval_responder.is_some();
 
         let splitter_cancel = cancel.clone();
         let splitter_outbound = outbound.clone();
@@ -247,29 +251,29 @@ impl AgentRuntime {
                         () = splitter_cancel.cancelled() => break,
                         event = inbound.next() => {
                             match event {
-                                Some(InboundEvent::ConsentResponse {
+                                Some(InboundEvent::ApprovalResponse {
                                     request_id, approved, reason, sender_id,
-                                }) if has_consent_gate => {
-                                    if let Some(ref resp) = consent_responder {
+                                }) if has_approval_gate => {
+                                    if let Some(ref resp) = approval_responder {
                                         let response = if approved {
-                                            freebird_security::consent::ConsentResponse::Approved
+                                            freebird_security::approval::ApprovalResponse::Approved
                                         } else {
-                                            freebird_security::consent::ConsentResponse::Denied { reason }
+                                            freebird_security::approval::ApprovalResponse::Denied { reason }
                                         };
                                         if resp.respond(&request_id, response).await {
                                             tracing::info!(
                                                 %request_id, %sender_id, approved,
-                                                "consent response delivered"
+                                                "approval response delivered"
                                             );
                                         } else {
                                             tracing::warn!(
                                                 %request_id, %sender_id,
-                                                "consent response for unknown or expired request"
+                                                "approval response for unknown or expired request"
                                             );
                                             let _ = splitter_outbound.send(
                                                 OutboundEvent::Error {
                                                     text: format!(
-                                                        "No pending consent request with id `{request_id}` \
+                                                        "No pending approval request with id `{request_id}` \
                                                          (expired or already responded)"
                                                     ),
                                                     recipient_id: sender_id,
@@ -289,35 +293,28 @@ impl AgentRuntime {
             }
         });
 
-        let consent_task = self.consent_rx.take().map(|mut consent_rx| {
-            let consent_cancel = cancel.clone();
-            let consent_outbound = outbound.clone();
+        let approval_task = self.approval_rx.take().map(|mut approval_rx| {
+            let approval_cancel = cancel.clone();
+            let approval_outbound = outbound.clone();
             tokio::spawn(async move {
                 loop {
                     tokio::select! {
-                        () = consent_cancel.cancelled() => break,
-                        req = consent_rx.recv() => {
+                        () = approval_cancel.cancelled() => break,
+                        req = approval_rx.recv() => {
                             match req {
                                 Some(req) => {
-                                    // Serialize risk_level via serde to get the canonical
-                                    // snake_case form ("high", not "High" from Debug).
-                                    let risk_level = serde_json::to_value(&req.risk_level)
-                                        .ok()
-                                        .and_then(|v| v.as_str().map(String::from))
-                                        .unwrap_or_else(|| format!("{:?}", req.risk_level));
-                                    let event = OutboundEvent::ConsentRequest {
+                                    let category_json = serde_json::to_string(&req.category)
+                                        .unwrap_or_else(|_| String::from("{}"));
+                                    let event = OutboundEvent::ApprovalRequest {
                                         request_id: req.id,
-                                        tool_name: req.tool_name,
-                                        description: req.description,
-                                        risk_level,
-                                        action_summary: req.action_summary,
+                                        category_json,
                                         expires_at: req.expires_at.to_rfc3339(),
                                         recipient_id: req.sender_id,
                                     };
-                                    if consent_outbound.send(event).await.is_err() {
+                                    if approval_outbound.send(event).await.is_err() {
                                         tracing::warn!(
-                                            "consent outbound channel closed; \
-                                             consent request dropped"
+                                            "approval outbound channel closed; \
+                                             approval request dropped"
                                         );
                                         break;
                                     }
@@ -330,7 +327,7 @@ impl AgentRuntime {
             })
         });
 
-        (main_rx, splitter_task, consent_task)
+        (main_rx, splitter_task, approval_task)
     }
 
     /// Route an inbound event to the appropriate handler.
@@ -410,20 +407,20 @@ impl AgentRuntime {
                 tracing::info!(%sender_id, "user disconnected");
                 LoopAction::Continue
             }
-            InboundEvent::ConsentResponse {
+            InboundEvent::ApprovalResponse {
                 request_id,
                 sender_id,
                 ..
             } => {
-                // When a consent gate is configured, ConsentResponse events
+                // When an approval gate is configured, ApprovalResponse events
                 // are handled by the splitter task (which runs concurrently
                 // and can deliver responses while handle_event is blocked).
-                // This arm only fires when no consent gate is configured
+                // This arm only fires when no approval gate is configured
                 // (the splitter passes them through to the main loop).
                 tracing::warn!(
                     %request_id,
                     %sender_id,
-                    "consent response received but no consent gate is configured"
+                    "approval response received but no approval gate is configured"
                 );
                 LoopAction::Continue
             }
@@ -623,6 +620,15 @@ impl AgentRuntime {
     }
 
     /// Validate raw input through taint tracking. Returns `None` if rejected.
+    ///
+    /// Uses three-state `ValidationResult`:
+    /// - `Clean` → proceed immediately
+    /// - `Warning` → behavior depends on `injection_config.input_response`:
+    ///   - `Block` → reject outright
+    ///   - `Prompt` → ask user via `ApprovalGate`; fallback to warn-and-proceed
+    ///   - `Allow` → warn and proceed
+    /// - `Rejected` → hard failure (e.g., input too long)
+    #[allow(clippy::too_many_lines)] // three-way config branch + three-way gate result
     async fn validate_input(
         &self,
         raw_text: &str,
@@ -632,20 +638,113 @@ impl AgentRuntime {
     ) -> Option<SafeMessage> {
         let tainted = Tainted::new(raw_text);
         match SafeMessage::from_tainted(&tainted) {
-            Ok(msg) => Some(msg),
-            Err(e) => {
+            ValidationResult::Clean(msg) => Some(msg),
+            ValidationResult::Warning { message, warning } => {
+                let warning_str = warning.to_string();
+
+                // Audit the injection detection.
                 self.audit(
                     session_id,
                     AuditEventType::InjectionDetected {
-                        pattern: format!("{e}"),
+                        pattern: warning_str.clone(),
                         source: InjectionSource::UserInput,
                         severity: Severity::High,
                     },
                 )
                 .await;
+
+                match self.tool_executor.input_injection_response() {
+                    InjectionResponse::Block => {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            "injection detected in user input — blocking per config"
+                        );
+                        let _ = outbound
+                            .send(OutboundEvent::Error {
+                                text: format!(
+                                    "Message rejected: injection pattern detected — {warning_str}"
+                                ),
+                                recipient_id: sender_id.into(),
+                            })
+                            .await;
+                        return None;
+                    }
+                    InjectionResponse::Allow => {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            "injection detected in user input — allowing per config"
+                        );
+                        let _ = outbound
+                            .send(OutboundEvent::Error {
+                                text: format!(
+                                    "Warning: {warning_str}. Proceeding with your message."
+                                ),
+                                recipient_id: sender_id.into(),
+                            })
+                            .await;
+                        return Some(message);
+                    }
+                    InjectionResponse::Prompt => {} // fall through to prompt logic
+                }
+
+                let preview = raw_text.chars().take(200).collect::<String>();
+
+                match self
+                    .tool_executor
+                    .check_security_warning(
+                        "injection_input".into(),
+                        warning_str.clone(),
+                        preview,
+                        "user_input".into(),
+                        sender_id,
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::info!(
+                            session_id = %session_id,
+                            "user approved security warning for input injection — proceeding"
+                        );
+                        Some(message)
+                    }
+                    Err(freebird_security::approval::ApprovalError::Denied { .. }) => {
+                        tracing::warn!(%session_id, "user denied input injection security warning");
+                        let _ = outbound
+                            .send(OutboundEvent::Error {
+                                text: format!(
+                                    "Message rejected: security warning denied — {warning_str}"
+                                ),
+                                recipient_id: sender_id.into(),
+                            })
+                            .await;
+                        None
+                    }
+                    Err(e) => {
+                        // Expired, too many pending, channel closed, or no gate.
+                        // Fall back to warn-and-proceed since the sanitized
+                        // message is safe to use.
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %e,
+                            "approval gate unavailable for input security warning — proceeding with sanitized content"
+                        );
+                        let _ = outbound
+                            .send(OutboundEvent::Error {
+                                text: format!(
+                                    "Warning: {warning_str}. Proceeding with your message."
+                                ),
+                                recipient_id: sender_id.into(),
+                            })
+                            .await;
+                        Some(message)
+                    }
+                }
+            }
+            ValidationResult::Rejected(e) => {
+                tracing::warn!(%session_id, "input validation rejected message");
                 let _ = outbound
                     .send(OutboundEvent::Error {
-                        text: "Message rejected by input validation.".into(),
+                        text: format!("Message rejected: {e}"),
                         recipient_id: sender_id.into(),
                     })
                     .await;
@@ -1780,6 +1879,7 @@ mod tests {
                 None,
                 None,
                 None,
+                InjectionConfig::default(),
             )
             .unwrap(),
             None,
