@@ -663,6 +663,14 @@ impl SafeBashCommand {
             .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
             .collect();
 
+        // Re-check after sanitization: input of only control chars becomes empty.
+        if clean.trim().is_empty() {
+            return Err(SecurityError::ForbiddenCharacter {
+                character: ' ',
+                context: "bash command must not be empty after sanitization".into(),
+            });
+        }
+
         Ok(Self(clean))
     }
 
@@ -1420,6 +1428,13 @@ mod tests {
         let t = Tainted::new("echo\x07hello\x1bworld");
         let cmd = SafeBashCommand::from_tainted(&t).unwrap();
         assert_eq!(cmd.as_str(), "echohelloworld");
+    }
+
+    #[test]
+    fn test_bash_command_rejects_only_control_chars() {
+        let t = Tainted::new("\x07\x1b\x03");
+        let err = SafeBashCommand::from_tainted(&t).unwrap_err();
+        assert!(matches!(err, SecurityError::ForbiddenCharacter { .. }));
     }
 
     #[test]
