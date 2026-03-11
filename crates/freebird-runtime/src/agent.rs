@@ -28,7 +28,12 @@ use freebird_traits::provider::{
     StreamEvent, TokenUsage, ToolDefinition,
 };
 use freebird_traits::tool::{Capability, ToolOutcome};
-use freebird_types::config::{BudgetConfig, KnowledgeConfig, RuntimeConfig, ToolsConfig};
+use freebird_types::config::{
+    BudgetConfig, InjectionResponse, KnowledgeConfig, RuntimeConfig, ToolsConfig,
+};
+// Re-exported for test module via `use super::*`.
+#[cfg(test)]
+use freebird_types::config::InjectionConfig;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -618,10 +623,12 @@ impl AgentRuntime {
     ///
     /// Uses three-state `ValidationResult`:
     /// - `Clean` → proceed immediately
-    /// - `Warning` → injection pattern detected; prompts user via `ApprovalGate`
-    ///   for approval. If no gate configured, warns and proceeds (the sanitized
-    ///   message is safe to use regardless).
+    /// - `Warning` → behavior depends on `injection_config.input_response`:
+    ///   - `Block` → reject outright
+    ///   - `Prompt` → ask user via `ApprovalGate`; fallback to warn-and-proceed
+    ///   - `Allow` → warn and proceed
     /// - `Rejected` → hard failure (e.g., input too long)
+    #[allow(clippy::too_many_lines)] // three-way config branch + three-way gate result
     async fn validate_input(
         &self,
         raw_text: &str,
@@ -633,19 +640,53 @@ impl AgentRuntime {
         match SafeMessage::from_tainted(&tainted) {
             ValidationResult::Clean(msg) => Some(msg),
             ValidationResult::Warning { message, warning } => {
+                let warning_str = warning.to_string();
+
                 // Audit the injection detection.
                 self.audit(
                     session_id,
                     AuditEventType::InjectionDetected {
-                        pattern: format!("{warning}"),
+                        pattern: warning_str.clone(),
                         source: InjectionSource::UserInput,
                         severity: Severity::High,
                     },
                 )
                 .await;
 
-                // Prompt the user for approval via the unified ApprovalGate.
-                let warning_str = format!("{warning}");
+                match self.tool_executor.input_injection_response() {
+                    InjectionResponse::Block => {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            "injection detected in user input — blocking per config"
+                        );
+                        let _ = outbound
+                            .send(OutboundEvent::Error {
+                                text: format!(
+                                    "Message rejected: injection pattern detected — {warning_str}"
+                                ),
+                                recipient_id: sender_id.into(),
+                            })
+                            .await;
+                        return None;
+                    }
+                    InjectionResponse::Allow => {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            "injection detected in user input — allowing per config"
+                        );
+                        let _ = outbound
+                            .send(OutboundEvent::Error {
+                                text: format!(
+                                    "Warning: {warning_str}. Proceeding with your message."
+                                ),
+                                recipient_id: sender_id.into(),
+                            })
+                            .await;
+                        return Some(message);
+                    }
+                    InjectionResponse::Prompt => {} // fall through to prompt logic
+                }
+
                 let preview = raw_text.chars().take(200).collect::<String>();
 
                 match self
@@ -1836,6 +1877,7 @@ mod tests {
                 None,
                 None,
                 None,
+                InjectionConfig::default(),
             )
             .unwrap(),
             None,

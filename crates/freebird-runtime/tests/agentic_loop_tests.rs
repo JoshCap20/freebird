@@ -40,7 +40,7 @@ use freebird_traits::tool::{
     ToolOutput,
 };
 use freebird_types::config::{
-    BudgetConfig, EditConfig, KnowledgeConfig, RuntimeConfig, ToolsConfig,
+    BudgetConfig, EditConfig, InjectionConfig, KnowledgeConfig, RuntimeConfig, ToolsConfig,
 };
 
 use helpers::{
@@ -678,6 +678,7 @@ async fn test_tool_use_timeout() {
         None,
         None,
         None,
+        InjectionConfig::default(),
     )
     .unwrap();
 

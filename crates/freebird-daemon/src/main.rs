@@ -235,6 +235,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         Some(approval_gate),
         knowledge_store,
         secret_guard,
+        config.security.injection.clone(),
     )
     .context("failed to construct ToolExecutor (duplicate tool names?)")?;
 

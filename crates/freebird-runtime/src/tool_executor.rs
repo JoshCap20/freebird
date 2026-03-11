@@ -32,6 +32,7 @@ use freebird_traits::provider::ToolDefinition;
 use freebird_traits::tool::{
     Capability, RiskLevel, Tool, ToolContext, ToolInfo, ToolOutcome, ToolOutput,
 };
+use freebird_types::config::{InjectionConfig, InjectionResponse};
 
 /// Result of the secret guard input check, used to control flow in `execute()`.
 enum SecretGuardInputResult {
@@ -68,6 +69,7 @@ pub struct ToolExecutor {
     approval_gate: Option<ApprovalGate>,
     knowledge_store: Option<Arc<dyn KnowledgeStore>>,
     secret_guard: Option<SecretGuard>,
+    injection_config: InjectionConfig,
 }
 
 impl std::fmt::Debug for ToolExecutor {
@@ -80,6 +82,7 @@ impl std::fmt::Debug for ToolExecutor {
             .field("has_approval_gate", &self.approval_gate.is_some())
             .field("has_knowledge_store", &self.knowledge_store.is_some())
             .field("has_secret_guard", &self.secret_guard.is_some())
+            .field("injection_config", &self.injection_config)
             .finish()
     }
 }
@@ -102,6 +105,7 @@ impl ToolExecutor {
         approval_gate: Option<ApprovalGate>,
         knowledge_store: Option<Arc<dyn KnowledgeStore>>,
         secret_guard: Option<SecretGuard>,
+        injection_config: InjectionConfig,
     ) -> Result<Self, ToolExecutorError> {
         let mut map = HashMap::with_capacity(tools.len());
         for tool in tools {
@@ -125,6 +129,7 @@ impl ToolExecutor {
             approval_gate,
             knowledge_store,
             secret_guard,
+            injection_config,
         })
     }
 
@@ -165,6 +170,12 @@ impl ToolExecutor {
     #[must_use]
     pub fn tool_count(&self) -> usize {
         self.tools.len()
+    }
+
+    /// How injection detection should respond for user input.
+    #[must_use]
+    pub const fn input_injection_response(&self) -> &InjectionResponse {
+        &self.injection_config.input_response
     }
 
     /// Forward a user's consent response to the internal consent gate.
@@ -570,10 +581,10 @@ impl ToolExecutor {
 
     /// Scan non-error tool output for prompt injection patterns.
     ///
-    /// When injection is detected, prompts the user via the `ApprovalGate`.
-    /// On approval, returns the original content. On denial, returns a
-    /// synthetic error. If no gate is configured, falls back to
-    /// warn-and-proceed (the `ScannedToolOutput` preserves original content).
+    /// Behavior depends on `injection_config.tool_output_response`:
+    /// - `Block` → synthetic error, no user prompt
+    /// - `Prompt` → ask user via `ApprovalGate`; approve passes original, deny blocks
+    /// - `Allow` → warn in logs, pass through original content
     async fn scan_output_for_injection(
         &self,
         output: ToolOutput,
@@ -588,6 +599,36 @@ impl ToolExecutor {
         if scanned.injection_detected() {
             self.audit_injection_detected(session_id, "prompt injection pattern in tool output")
                 .await;
+
+            match self.injection_config.tool_output_response {
+                InjectionResponse::Block => {
+                    tracing::warn!(
+                        tool = %tool_name,
+                        session_id = %session_id,
+                        "injection detected in tool output — blocking per config"
+                    );
+                    return ToolOutput {
+                        content: format!(
+                            "Tool output from `{tool_name}` was blocked: injection pattern detected"
+                        ),
+                        outcome: ToolOutcome::Error,
+                        metadata: None,
+                    };
+                }
+                InjectionResponse::Allow => {
+                    tracing::warn!(
+                        tool = %tool_name,
+                        session_id = %session_id,
+                        "injection detected in tool output — allowing per config"
+                    );
+                    return ToolOutput {
+                        content: scanned.into_original_or_content(),
+                        outcome: output.outcome,
+                        metadata: output.metadata,
+                    };
+                }
+                InjectionResponse::Prompt => {} // fall through to prompt logic
+            }
 
             let preview = output.content.chars().take(200).collect::<String>();
 
@@ -958,6 +999,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -988,6 +1030,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -1019,6 +1062,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = expired_grant(&path, &[Capability::FileRead]);
@@ -1054,6 +1098,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -1089,6 +1134,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -1119,6 +1165,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -1151,6 +1198,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -1184,6 +1232,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -1217,6 +1266,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -1255,6 +1305,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -1293,6 +1344,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -1331,6 +1383,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -1368,6 +1421,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -1406,6 +1460,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -1437,6 +1492,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         );
         let err = result.expect_err("should fail");
         assert!(err.to_string().contains("duplicate tool name"));
@@ -1452,6 +1508,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         assert_eq!(executor.tool_count(), 0);
@@ -1468,6 +1525,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         assert!(executor.get("nonexistent").is_none());
@@ -1484,6 +1542,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let found = executor.get("my_tool");
@@ -1506,6 +1565,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
 
@@ -1532,6 +1592,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead, Capability::FileWrite]);
@@ -1553,6 +1614,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = expired_grant(&path, &[Capability::FileRead]);
@@ -1578,6 +1640,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead, Capability::FileWrite]);
@@ -1610,6 +1673,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::ShellExecute]);
@@ -1643,6 +1707,7 @@ mod tests {
             Some(gate),
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -1679,6 +1744,7 @@ mod tests {
                 Some(gate),
                 None,
                 None,
+                InjectionConfig::default(),
             )
             .unwrap(),
         );
@@ -1726,6 +1792,7 @@ mod tests {
                 Some(gate),
                 None,
                 None,
+                InjectionConfig::default(),
             )
             .unwrap(),
         );
@@ -1768,6 +1835,7 @@ mod tests {
             Some(gate),
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::ShellExecute]);
@@ -1801,6 +1869,7 @@ mod tests {
                 Some(gate),
                 None,
                 None,
+                InjectionConfig::default(),
             )
             .unwrap(),
         );
@@ -1846,6 +1915,7 @@ mod tests {
                 Some(gate),
                 None,
                 None,
+                InjectionConfig::default(),
             )
             .unwrap(),
         );
@@ -1888,6 +1958,7 @@ mod tests {
                 Some(gate),
                 None,
                 None,
+                InjectionConfig::default(),
             )
             .unwrap(),
         );
@@ -1930,6 +2001,7 @@ mod tests {
             Some(gate),
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
 
@@ -1949,6 +2021,7 @@ mod tests {
             None,
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
 
@@ -1981,6 +2054,7 @@ mod tests {
             Some(gate),
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileDelete]);
@@ -2047,6 +2121,7 @@ mod tests {
             Some(gate),
             None,
             None,
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileDelete]);
@@ -2114,6 +2189,7 @@ mod tests {
             None,
             None,
             Some(make_block_secret_guard()),
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -2156,6 +2232,7 @@ mod tests {
                 Some(approval_gate),
                 None,
                 Some(make_secret_guard()),
+                InjectionConfig::default(),
             )
             .unwrap(),
         );
@@ -2220,6 +2297,7 @@ mod tests {
             None,
             None,
             Some(make_secret_guard()),
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -2256,6 +2334,7 @@ mod tests {
             None,
             None,
             Some(make_secret_guard()),
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&path, &[Capability::FileRead]);
@@ -2297,6 +2376,7 @@ mod tests {
             None,
             None,
             Some(make_block_secret_guard()),
+            InjectionConfig::default(),
         )
         .unwrap();
         let grant = grant_with_caps(&sandbox_path, &[Capability::FileRead]);

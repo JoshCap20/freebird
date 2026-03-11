@@ -43,7 +43,7 @@ use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
     ToolOutput,
 };
-use freebird_types::config::{BudgetConfig, KnowledgeConfig};
+use freebird_types::config::{BudgetConfig, InjectionConfig, KnowledgeConfig};
 use helpers::{
     MockChannel, QueuedProvider, ResponseFactory, default_config, default_tools_config,
     make_registry, message_text, without_status_events,
@@ -184,6 +184,7 @@ async fn test_consent_request_forwarded_to_channel() {
         Some(gate),
         None,
         None,
+        InjectionConfig::default(),
     )
     .expect("executor construction should succeed");
 
@@ -303,6 +304,7 @@ async fn test_consent_approved_executes_tool() {
         Some(gate),
         None,
         None,
+        InjectionConfig::default(),
     )
     .expect("executor construction should succeed");
 
@@ -431,6 +433,7 @@ async fn test_consent_denied_returns_error_to_provider() {
         Some(gate),
         None,
         None,
+        InjectionConfig::default(),
     )
     .expect("executor construction should succeed");
 
@@ -558,6 +561,7 @@ async fn test_consent_low_risk_no_prompt() {
         Some(gate),
         None,
         None,
+        InjectionConfig::default(),
     )
     .expect("executor construction should succeed");
 
@@ -656,6 +660,7 @@ async fn test_consent_no_gate_executes_freely() {
         None,
         None,
         None,
+        InjectionConfig::default(),
     )
     .expect("executor construction should succeed");
 
@@ -738,6 +743,7 @@ async fn test_consent_response_unknown_id_logged() {
         Some(gate),
         None,
         None,
+        InjectionConfig::default(),
     )
     .expect("executor construction should succeed");
 
