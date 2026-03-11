@@ -48,14 +48,9 @@ pub(super) enum TagKind {
 ///
 /// Self-edges (same file) are excluded — they carry no cross-file signal.
 pub(super) struct ReferenceGraph {
-    file_to_index: HashMap<PathBuf, usize>,
     index_to_file: Vec<PathBuf>,
     /// `adjacency[i]` = set of file indices that file `i` references.
     adjacency: Vec<HashSet<usize>>,
-    /// Maps symbol name to list of `(file_index, line)` for definitions.
-    definitions: HashMap<String, Vec<(usize, usize)>>,
-    /// All tags grouped by file.
-    tags_by_file: HashMap<PathBuf, Vec<Tag>>,
 }
 
 impl ReferenceGraph {
@@ -65,7 +60,7 @@ impl ReferenceGraph {
     /// 2. Build a definitions map: name to `[(file_idx, line)]`.
     /// 3. For each reference tag, look up the name in definitions.
     ///    If found in a different file, add edge `ref_file` to `def_file`.
-    pub fn build(tags_by_file: HashMap<PathBuf, Vec<Tag>>) -> Self {
+    pub fn build(tags_by_file: &HashMap<PathBuf, Vec<Tag>>) -> Self {
         // Step 1: index files deterministically (sorted for stable output).
         let mut sorted_files: Vec<PathBuf> = tags_by_file.keys().cloned().collect();
         sorted_files.sort();
@@ -80,7 +75,7 @@ impl ReferenceGraph {
 
         // Step 2: build definitions map.
         let mut definitions: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
-        for (file, tags) in &tags_by_file {
+        for (file, tags) in tags_by_file {
             let Some(&file_idx) = file_to_index.get(file) else {
                 continue;
             };
@@ -94,8 +89,8 @@ impl ReferenceGraph {
             }
         }
 
-        // Step 3: resolve references → edges.
-        for (file, tags) in &tags_by_file {
+        // Step 3: resolve references → edges (drops moved `tags_by_file` at block end).
+        for (file, tags) in tags_by_file {
             let Some(&ref_idx) = file_to_index.get(file) else {
                 continue;
             };
@@ -115,11 +110,8 @@ impl ReferenceGraph {
         }
 
         Self {
-            file_to_index,
             index_to_file: sorted_files,
             adjacency,
-            definitions,
-            tags_by_file,
         }
     }
 
@@ -139,18 +131,6 @@ impl ReferenceGraph {
     #[must_use]
     pub fn index_to_file(&self) -> &[PathBuf] {
         &self.index_to_file
-    }
-
-    /// Borrow the tags for a specific file.
-    #[must_use]
-    pub fn tags_for_file(&self, file: &Path) -> Option<&[Tag]> {
-        self.tags_by_file.get(file).map(Vec::as_slice)
-    }
-
-    /// Borrow the definitions map.
-    #[must_use]
-    pub const fn definitions(&self) -> &HashMap<String, Vec<(usize, usize)>> {
-        &self.definitions
     }
 }
 
@@ -456,6 +436,16 @@ fn slice_source(source: &[u8], start: usize, end: usize) -> &str {
 mod tests {
     use super::*;
 
+    /// Build a reverse index from `index_to_file()` for test assertions.
+    fn file_index(graph: &ReferenceGraph) -> HashMap<PathBuf, usize> {
+        graph
+            .index_to_file()
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.clone(), i))
+            .collect()
+    }
+
     fn parse_rust(source: &str) -> tree_sitter::Tree {
         let mut parser = tree_sitter::Parser::new();
         parser
@@ -704,7 +694,7 @@ fn validate(cfg: &Config) -> bool {
 
     #[test]
     fn test_build_graph_empty() {
-        let graph = ReferenceGraph::build(HashMap::new());
+        let graph = ReferenceGraph::build(&HashMap::new());
         assert_eq!(graph.num_files(), 0);
         assert!(graph.adjacency().is_empty());
     }
@@ -734,12 +724,12 @@ fn validate(cfg: &Config) -> bool {
             }],
         );
 
-        let graph = ReferenceGraph::build(tags);
+        let graph = ReferenceGraph::build(&tags);
         assert_eq!(graph.num_files(), 2);
 
         // Find indices.
-        let a_idx = graph.file_to_index[&PathBuf::from("/a.rs")];
-        let b_idx = graph.file_to_index[&PathBuf::from("/b.rs")];
+        let a_idx = file_index(&graph)[&PathBuf::from("/a.rs")];
+        let b_idx = file_index(&graph)[&PathBuf::from("/b.rs")];
 
         // A → B edge should exist (A references Config defined in B).
         assert!(graph.adjacency()[a_idx].contains(&b_idx));
@@ -771,8 +761,8 @@ fn validate(cfg: &Config) -> bool {
             ],
         );
 
-        let graph = ReferenceGraph::build(tags);
-        let a_idx = graph.file_to_index[&PathBuf::from("/a.rs")];
+        let graph = ReferenceGraph::build(&tags);
+        let a_idx = file_index(&graph)[&PathBuf::from("/a.rs")];
         assert!(graph.adjacency()[a_idx].is_empty());
     }
 
@@ -791,8 +781,8 @@ fn validate(cfg: &Config) -> bool {
             }],
         );
 
-        let graph = ReferenceGraph::build(tags);
-        let a_idx = graph.file_to_index[&PathBuf::from("/a.rs")];
+        let graph = ReferenceGraph::build(&tags);
+        let a_idx = file_index(&graph)[&PathBuf::from("/a.rs")];
         assert!(graph.adjacency()[a_idx].is_empty());
     }
 
@@ -823,13 +813,13 @@ fn validate(cfg: &Config) -> bool {
             );
         }
 
-        let graph = ReferenceGraph::build(tags);
+        let graph = ReferenceGraph::build(&tags);
         assert_eq!(graph.num_files(), 4);
 
-        let a_idx = graph.file_to_index[&PathBuf::from("/a.rs")];
+        let a_idx = file_index(&graph)[&PathBuf::from("/a.rs")];
         // All of B, C, D should point to A.
         for name in &["/b.rs", "/c.rs", "/d.rs"] {
-            let idx = graph.file_to_index[&PathBuf::from(name)];
+            let idx = file_index(&graph)[&PathBuf::from(name)];
             assert!(
                 graph.adjacency()[idx].contains(&a_idx),
                 "{name} should reference /a.rs"
@@ -859,30 +849,9 @@ fn validate(cfg: &Config) -> bool {
             tags
         };
 
-        let g1 = ReferenceGraph::build(make_tags());
-        let g2 = ReferenceGraph::build(make_tags());
+        let g1 = ReferenceGraph::build(&make_tags());
+        let g2 = ReferenceGraph::build(&make_tags());
 
         assert_eq!(g1.index_to_file(), g2.index_to_file());
-    }
-
-    #[test]
-    fn test_tags_for_file() {
-        let mut tags = HashMap::new();
-        tags.insert(
-            PathBuf::from("/a.rs"),
-            vec![Tag {
-                name: "hello".into(),
-                file: PathBuf::from("/a.rs"),
-                line: 1,
-                is_definition: true,
-                kind: TagKind::Function,
-            }],
-        );
-
-        let graph = ReferenceGraph::build(tags);
-        let file_tags = graph.tags_for_file(Path::new("/a.rs"));
-        assert!(file_tags.is_some());
-        assert_eq!(file_tags.unwrap().len(), 1);
-        assert!(graph.tags_for_file(Path::new("/nonexistent.rs")).is_none());
     }
 }

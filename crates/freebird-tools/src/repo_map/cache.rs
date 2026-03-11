@@ -148,7 +148,8 @@ impl TagCache {
         );
     }
 
-    /// Number of cached files.
+    /// Number of cached files (test utility).
+    #[cfg(test)]
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
