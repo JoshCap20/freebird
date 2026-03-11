@@ -392,7 +392,13 @@ fn init_sqlite(config: &AppConfig) -> Result<SqliteComponents> {
     let key =
         freebird_security::db_key::derive_key(&passphrase, &salt, config.memory.pbkdf2_iterations);
 
-    let db = SqliteDb::open(&db_path, &key).context("failed to open encrypted database")?;
+    // Derive HMAC signing key from salt for event and audit chain integrity.
+    let signing_key_material = format!("freebird-audit-{}", hex::encode(&salt));
+    let signing_key =
+        ring::hmac::Key::new(ring::hmac::HMAC_SHA256, signing_key_material.as_bytes());
+
+    let db =
+        SqliteDb::open(&db_path, &key, signing_key).context("failed to open encrypted database")?;
     let db = Arc::new(db);
 
     tracing::info!(path = %db_path.display(), "encrypted database opened");

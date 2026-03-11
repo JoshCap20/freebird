@@ -177,7 +177,8 @@ mod tests {
     fn test_db(dir: &Path) -> SqliteDb {
         let db_path = dir.join("test.db");
         let key = SecretString::from("a".repeat(64));
-        SqliteDb::open(&db_path, &key).unwrap()
+        let signing_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"test-signing-key");
+        SqliteDb::open(&db_path, &key, signing_key).unwrap()
     }
 
     /// Create a minimal valid `Conversation` with the given session ID.

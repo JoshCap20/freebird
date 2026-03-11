@@ -243,7 +243,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let key = SecretString::from("a".repeat(64));
-        let db = Arc::new(SqliteDb::open(&db_path, &key).unwrap());
+        let signing_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"test-signing-key");
+        let db = Arc::new(SqliteDb::open(&db_path, &key, signing_key).unwrap());
         (dir, SqliteMemory::new(db))
     }
 
