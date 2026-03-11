@@ -97,8 +97,8 @@ pub fn parse_user_input(line: &str) -> ParseResult {
         _ => {}
     }
 
-    // Consent commands — handled before the generic command parser because
-    // they produce a ConsentResponse (not a Command) on the wire.
+    // Approval commands — handled before the generic command parser because
+    // they produce an ApprovalResponse (not a Command) on the wire.
     if let Some(rest) = line.strip_prefix("/approve ") {
         let id = rest.trim();
         if id.is_empty() {

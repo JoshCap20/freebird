@@ -279,6 +279,7 @@ impl ApprovalGate {
     ///
     /// Returns `true` if the response was delivered, `false` if the
     /// request ID was not found (already expired or already responded).
+    #[must_use]
     pub async fn respond(&self, request_id: &str, response: ApprovalResponse) -> bool {
         Self::respond_inner(&self.pending, request_id, response).await
     }
@@ -308,6 +309,7 @@ impl ApprovalGate {
     }
 
     /// Returns the number of currently pending approval requests.
+    #[must_use]
     pub async fn pending_count(&self) -> usize {
         self.pending.lock().await.len()
     }
@@ -343,26 +345,11 @@ impl ApprovalResponder {
     ///
     /// Returns `true` if the response was delivered, `false` if the
     /// request ID was not found (already expired or already responded).
+    #[must_use]
     pub async fn respond(&self, request_id: &str, response: ApprovalResponse) -> bool {
         ApprovalGate::respond_inner(&self.pending, request_id, response).await
     }
 }
-
-// ── Backward-compatible re-exports ────────────────────────────────────
-
-// These type aliases allow existing code to compile during migration.
-// They will be removed once all call sites are updated.
-
-/// Alias for backward compatibility — use [`ApprovalGate`] instead.
-pub type ConsentGate = ApprovalGate;
-/// Alias for backward compatibility — use [`ApprovalRequest`] instead.
-pub type ConsentRequest = ApprovalRequest;
-/// Alias for backward compatibility — use [`ApprovalResponse`] instead.
-pub type ConsentResponse = ApprovalResponse;
-/// Alias for backward compatibility — use [`ApprovalError`] instead.
-pub type ConsentError = ApprovalError;
-/// Alias for backward compatibility — use [`ApprovalResponder`] instead.
-pub type ConsentResponder = ApprovalResponder;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -426,7 +413,7 @@ mod tests {
             }
         }
 
-        gate.respond(&request.id, ApprovalResponse::Approved).await;
+        let _ = gate.respond(&request.id, ApprovalResponse::Approved).await;
         assert!(handle.await.unwrap().is_ok());
     }
 
@@ -445,7 +432,7 @@ mod tests {
         });
 
         let request = rx.recv().await.unwrap();
-        gate.respond(&request.id, ApprovalResponse::Approved).await;
+        let _ = gate.respond(&request.id, ApprovalResponse::Approved).await;
         assert!(handle.await.unwrap().is_ok());
     }
 
@@ -486,7 +473,7 @@ mod tests {
         });
 
         let req = rx.recv().await.unwrap();
-        gate.respond(&req.id, ApprovalResponse::Approved).await;
+        let _ = gate.respond(&req.id, ApprovalResponse::Approved).await;
         assert!(handle.await.unwrap().is_ok());
     }
 
@@ -505,13 +492,14 @@ mod tests {
         });
 
         let req = rx.recv().await.unwrap();
-        gate.respond(
-            &req.id,
-            ApprovalResponse::Denied {
-                reason: Some("too risky".into()),
-            },
-        )
-        .await;
+        let _ = gate
+            .respond(
+                &req.id,
+                ApprovalResponse::Denied {
+                    reason: Some("too risky".into()),
+                },
+            )
+            .await;
 
         let err = handle.await.unwrap().unwrap_err();
         match err {
@@ -581,7 +569,7 @@ mod tests {
             ApprovalCategory::Consent { .. } => panic!("expected SecurityWarning, got Consent"),
         }
 
-        gate.respond(&req.id, ApprovalResponse::Approved).await;
+        let _ = gate.respond(&req.id, ApprovalResponse::Approved).await;
         assert!(handle.await.unwrap().is_ok());
     }
 
@@ -604,13 +592,14 @@ mod tests {
         });
 
         let req = rx.recv().await.unwrap();
-        gate.respond(
-            &req.id,
-            ApprovalResponse::Denied {
-                reason: Some("suspicious".into()),
-            },
-        )
-        .await;
+        let _ = gate
+            .respond(
+                &req.id,
+                ApprovalResponse::Denied {
+                    reason: Some("suspicious".into()),
+                },
+            )
+            .await;
 
         let err = handle.await.unwrap().unwrap_err();
         assert!(matches!(err, ApprovalError::Denied { .. }));

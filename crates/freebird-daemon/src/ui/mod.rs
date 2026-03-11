@@ -28,6 +28,12 @@ use tokio::net::TcpStream;
 
 use freebird_types::protocol::{ClientMessage, ServerMessage};
 
+/// Sentinel value returned by [`parse_approval_category`] when the category
+/// is a `security_warning` kind. Used to drive display branching in
+/// [`render_consent_header`] without comparing against a raw string literal
+/// at the call site.
+const RISK_LEVEL_SECURITY_WARNING: &str = "warning";
+
 use self::consent::{ConsentAction, ConsentSelector};
 use self::input::{InputAction, InputEditor};
 use self::output::OutputRenderer;
@@ -396,7 +402,7 @@ impl TtyChat {
             style::{Attribute, Color, ResetColor, SetAttribute, SetForegroundColor},
         };
 
-        let is_security_warning = risk_level == "warning";
+        let is_security_warning = risk_level == RISK_LEVEL_SECURITY_WARNING;
 
         writeln!(self.writer)?;
         queue!(
@@ -510,7 +516,7 @@ impl TtyChat {
                 } else {
                     summary
                 };
-                (header, summary, "warning".into())
+                (header, summary, RISK_LEVEL_SECURITY_WARNING.into())
             }
             _ => ("approval".into(), category_json.to_string(), "—".into()),
         }

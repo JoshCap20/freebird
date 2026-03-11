@@ -739,10 +739,6 @@ impl SafeFileContent {
 
 // ── ScannedToolOutput ────────────────────────────────────────────
 
-// ── Shared injection-scan helper ─────────────────────────────────
-
-// ── ScannedToolOutput ────────────────────────────────────────────
-
 /// Tool output that has been scanned for prompt injection.
 ///
 /// When injection is detected, the original content is preserved
