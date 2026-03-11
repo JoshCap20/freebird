@@ -243,8 +243,9 @@ static RE_BEARER: LazyLock<Regex> = LazyLock::new(|| {
 /// returned string is identical to the input (no allocation).
 #[must_use]
 pub fn redact_sensitive_content(content: &str) -> (String, bool) {
-    let mut result = content.to_owned();
-    let mut redacted = false;
+    use std::borrow::Cow;
+
+    let mut result: Cow<'_, str> = Cow::Borrowed(content);
 
     // Order matters: PEM first (multi-line), then more specific patterns,
     // then generic password assignments last.
@@ -256,20 +257,19 @@ pub fn redact_sensitive_content(content: &str) -> (String, bool) {
         (&*RE_BEARER, "Bearer [REDACTED]"),
     ] {
         let replaced = re.replace_all(&result, replacement);
-        if let std::borrow::Cow::Owned(new) = replaced {
-            result = new;
-            redacted = true;
+        if let Cow::Owned(new) = replaced {
+            result = Cow::Owned(new);
         }
     }
 
     // Password assignments: keep the key name, redact the value.
     let replaced = RE_PASSWORD.replace_all(&result, "$1=[REDACTED]");
-    if let std::borrow::Cow::Owned(new) = replaced {
-        result = new;
-        redacted = true;
+    if let Cow::Owned(new) = replaced {
+        result = Cow::Owned(new);
     }
 
-    (result, redacted)
+    let redacted = matches!(result, Cow::Owned(_));
+    (result.into_owned(), redacted)
 }
 
 #[cfg(test)]
