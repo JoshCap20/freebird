@@ -802,7 +802,11 @@ fn parse_rendered_line(line: &str) -> Option<(IssueLevel, String)> {
         .trim_start_matches(':')
         .trim();
 
-    if msg.is_empty() || msg.starts_with("could not compile") {
+    if msg.is_empty()
+        || msg.starts_with("could not compile")
+        || msg.starts_with("aborting due to")
+        || msg.starts_with("build failed")
+    {
         return None;
     }
 
@@ -1659,6 +1663,29 @@ test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
         assert_eq!(VerifyStep::from_str("doc"), Some(VerifyStep::Doc));
         assert_eq!(VerifyStep::from_str("build"), Some(VerifyStep::Build));
         assert_eq!(VerifyStep::from_str("banana"), None);
+    }
+
+    #[test]
+    fn test_parse_rendered_diagnostics() {
+        let sandbox = PathBuf::from("/tmp/sandbox");
+        let text = "\
+error[E0308]: mismatched types
+  --> src/lib.rs:5:10
+warning: unused variable `x`
+  --> src/lib.rs:3:9
+error: aborting due to 3 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `test-crate`
+";
+        let issues = parse_rendered_diagnostics(text, &sandbox);
+        // Should only capture the real diagnostics, not meta-messages
+        assert_eq!(issues.len(), 2, "issues: {issues:?}");
+        assert_eq!(issues[0].level, IssueLevel::Error);
+        assert!(issues[0].message.contains("mismatched types"));
+        assert_eq!(issues[0].file.as_deref(), Some("src/lib.rs"));
+        assert_eq!(issues[0].line, Some(5));
+        assert_eq!(issues[1].level, IssueLevel::Warning);
+        assert!(issues[1].message.contains("unused variable"));
     }
 
     #[test]
