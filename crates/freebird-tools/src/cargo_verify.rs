@@ -1114,12 +1114,7 @@ pub fn cargo_verify_tools() -> Vec<Box<dyn Tool>> {
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::needless_pass_by_value
-)]
+#[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use std::path::PathBuf;
 
