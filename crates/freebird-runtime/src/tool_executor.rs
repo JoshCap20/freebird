@@ -5,10 +5,12 @@
 //!
 //! 1. Tool lookup
 //! 2. Capability + expiration check via [`CapabilityGrant::check`]
-//! 3. Consent gate for high-risk tools (ASI09)
-//! 4. Audit logging
-//! 5. Execution with timeout
-//! 6. Injection scan on output via [`ScannedToolOutput::from_raw`]
+//! 3. Secret guard input check — flags sensitive file/command access (step 2.5)
+//! 4. Consent gate for high-risk tools (ASI09), with escalation from step 3
+//! 5. Audit logging
+//! 6. Execution with timeout
+//! 7. Secret guard output redaction — replaces detected secrets (step 5.5)
+//! 8. Injection scan on output via [`ScannedToolOutput::from_raw`]
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
