@@ -101,7 +101,7 @@ impl FileMemory {
             }
         }
 
-        summaries.sort_unstable_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        summaries.sort_unstable_by_key(|s| std::cmp::Reverse(s.updated_at));
         summaries.truncate(limit);
         Ok(summaries)
     }

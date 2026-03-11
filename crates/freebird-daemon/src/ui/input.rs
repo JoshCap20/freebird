@@ -297,8 +297,11 @@ impl InputEditor {
                 cursor_visual_row.saturating_add(visual_rows(indent, chars, self.term_width));
         }
         // Add wrapped rows within the cursor's own line.
-        if self.term_width > 0 {
-            cursor_visual_row += cursor_indent.saturating_add(cursor_col_u16) / self.term_width;
+        if let Some(wrapped) = cursor_indent
+            .saturating_add(cursor_col_u16)
+            .checked_div(self.term_width)
+        {
+            cursor_visual_row += wrapped;
         }
 
         // Compute total visual rows for all content.

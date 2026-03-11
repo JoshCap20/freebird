@@ -139,7 +139,7 @@ impl ToolExecutor {
     #[must_use]
     pub fn tool_definitions(&self) -> Vec<ToolDefinition> {
         let mut defs: Vec<_> = self.tools.values().map(|t| t.to_definition()).collect();
-        defs.sort_by(|a, b| a.name.cmp(&b.name));
+        defs.sort_by_key(|d| d.name.clone());
         defs
     }
 
@@ -156,7 +156,7 @@ impl ToolExecutor {
             .filter(|t| grant.check(&t.info().required_capability).is_ok())
             .map(|t| t.to_definition())
             .collect();
-        defs.sort_by(|a, b| a.name.cmp(&b.name));
+        defs.sort_by_key(|d| d.name.clone());
         defs
     }
 

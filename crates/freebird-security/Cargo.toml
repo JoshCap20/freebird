@@ -3,6 +3,7 @@ name = "freebird-security"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+publish = false
 license.workspace = true
 description = "Security primitives for Freebird — taint tracking, safe paths, capabilities, audit"
 

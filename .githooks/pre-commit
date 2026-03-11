@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # FreeBird pre-commit hook
-# All Rust best-practice checks, ordered cheapest-first with fail-fast.
+# Enforces CLAUDE.md §16, §17, §20, §22, §23, §24.
+# Ordered cheapest-first with fail-fast. Warnings don't block; failures do.
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -10,13 +11,21 @@ YELLOW='\033[0;33m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-fail() { echo -e "  ${RED}FAIL${NC} $1"; exit 1; }
-pass() { echo -e "  ${GREEN}ok${NC}   $1"; }
-warn() { echo -e "  ${YELLOW}WARN${NC} $1"; }
+fail()  { echo -e "  ${RED}FAIL${NC} $1"; exit 1; }
+pass()  { echo -e "  ${GREEN}ok${NC}   $1"; }
+warn()  { echo -e "  ${YELLOW}WARN${NC} $1"; }
+info()  { echo -e "       $1"; }
 
 echo -e "${BOLD}pre-commit${NC}"
 
-# ── 1. Formatting (no compilation, ~instant) ─────────────────────
+# Temp file for check output — cleaned up on exit (including interrupts).
+HITS_FILE=$(mktemp /tmp/pre-commit-hits.XXXXXX)
+trap 'rm -f "$HITS_FILE"' EXIT
+
+# Collect staged .rs files once — reused by all source-scanning checks.
+staged_rs=$(git diff --cached --name-only --diff-filter=ACM -- '*.rs' || true)
+
+# ── 1. Formatting (~instant, no compilation) ──────────────────────
 fmt_output=$(cargo fmt --all -- --check 2>&1) || {
     echo -e "  ${RED}FAIL${NC} cargo fmt"
     echo "$fmt_output"
@@ -25,15 +34,15 @@ fmt_output=$(cargo fmt --all -- --check 2>&1) || {
 }
 pass "cargo fmt"
 
-# ── 2. Deny .env files ──────────────────────────────────────────
-env_files=$(git diff --cached --name-only -- '*.env' '.env*' || true)
+# ── 2. Deny .env / credential files ──────────────────────────────
+env_files=$(git diff --cached --name-only -- '*.env' '.env*' '*.pem' '*.key' 'credentials*' || true)
 if [ -n "$env_files" ]; then
-    fail ".env files should not be committed: $env_files"
+    fail "sensitive files should not be committed: $env_files"
 fi
-pass "no .env files"
+pass "no sensitive files"
 
-# ── 3. Secrets in staged diffs ───────────────────────────────────
-secret_patterns='(PRIVATE.KEY|SECRET_KEY|BEGIN RSA|BEGIN EC|BEGIN OPENSSH|api_key\s*=\s*"[^"]+"|password\s*=\s*"[^"]+")'
+# ── 3. Secrets in staged diffs ────────────────────────────────────
+secret_patterns='(PRIVATE.KEY|SECRET_KEY|BEGIN RSA|BEGIN EC|BEGIN OPENSSH|BEGIN PGP|api_key\s*=\s*"[^"]+"|password\s*=\s*"[^"]+"|sk-ant-[a-zA-Z0-9]+|ghp_[a-zA-Z0-9]+|AKIA[A-Z0-9]{16})'
 matches=$(git diff --cached -U0 -- '*.rs' '*.toml' '*.env' '*.json' '*.yaml' '*.yml' \
     | grep -iE "$secret_patterns" | grep '^+' | grep -v '^+++' || true)
 if [ -n "$matches" ]; then
@@ -43,8 +52,7 @@ if [ -n "$matches" ]; then
 fi
 pass "no secrets"
 
-# ── 4. Unsafe blocks without // SAFETY: comment ─────────────────
-staged_rs=$(git diff --cached --name-only --diff-filter=ACM -- '*.rs' || true)
+# ── 4. Unsafe blocks without // SAFETY: comment ──────────────────
 unsafe_issues=0
 if [ -n "$staged_rs" ]; then
     while IFS= read -r file; do
@@ -67,8 +75,243 @@ else
     pass "unsafe audit"
 fi
 
-# ── 5. Clippy (strict lints from CLAUDE.md) ──────────────────────
-# Shares build cache with step 6, so only compiles once.
+# ════════════════════════════════════════════════════════════════════
+# Source-level anti-pattern checks (CLAUDE.md §17, §22, §23)
+# All scan staged file content via `git show ":$file"`.
+# Checks that need test-awareness use awk to skip #[cfg(test)] blocks.
+# ════════════════════════════════════════════════════════════════════
+
+# Helper: scan staged .rs files for a pattern, excluding #[cfg(test)] modules.
+# Usage: scan_non_test_code <pattern> <description>
+# Prints matching lines and returns 1 if any found, 0 otherwise.
+scan_non_test_code() {
+    local pattern="$1"
+    local found=0
+    if [ -z "$staged_rs" ]; then return 0; fi
+    while IFS= read -r file; do
+        [ -z "$file" ] && continue
+        # awk tracks brace depth after #[cfg(test)] to skip test modules
+        local hits
+        hits=$(git show ":$file" 2>/dev/null | awk -v file="$file" -v pat="$pattern" '
+            /^[[:space:]]*#\[cfg\(test\)\]/ { in_test_attr = 1; next }
+            in_test_attr && /\{/ {
+                in_test = 1
+                test_depth = 1
+                in_test_attr = 0
+            }
+            in_test_attr && !/^[[:space:]]*$/ && !/^[[:space:]]*\/\// {
+                # non-blank, non-comment line after #[cfg(test)] without opening brace — reset
+                in_test_attr = 0
+            }
+            in_test {
+                n = split($0, chars, "")
+                for (i = 1; i <= n; i++) {
+                    if (chars[i] == "{") test_depth++
+                    if (chars[i] == "}") test_depth--
+                }
+                if (test_depth <= 0) in_test = 0
+                next
+            }
+            !in_test && $0 ~ pat {
+                # Skip comments
+                line = $0
+                sub(/^[[:space:]]*/, "", line)
+                if (line !~ /^\/\//) {
+                    printf "    %s:%d: %s\n", file, NR, $0
+                    found = 1
+                }
+            }
+            END { exit (found ? 1 : 0) }
+        ') || found=1
+        if [ -n "$hits" ]; then echo "$hits"; fi
+    done <<< "$staged_rs"
+    return $found
+}
+
+# Helper: scan ALL staged .rs files (including tests) for a pattern.
+scan_all_code() {
+    local pattern="$1"
+    local found=0
+    if [ -z "$staged_rs" ]; then return 0; fi
+    while IFS= read -r file; do
+        [ -z "$file" ] && continue
+        local hits
+        hits=$(git show ":$file" 2>/dev/null | grep -n "$pattern" | grep -v '^[[:space:]]*//' | while IFS= read -r line; do
+            echo "    $file:$line"
+        done) || true
+        if [ -n "$hits" ]; then
+            echo "$hits"
+            found=1
+        fi
+    done <<< "$staged_rs"
+    return $found
+}
+
+# ── 5. println!/eprintln! in non-test code (§23: use tracing) ────
+if scan_non_test_code 'println!\|eprintln!' > $HITS_FILE 2>&1; then
+    pass "no println!/eprintln!"
+else
+    echo -e "  ${RED}FAIL${NC} println!/eprintln! found — use tracing::{info,warn,error,debug}! instead"
+    cat $HITS_FILE
+    rm -f $HITS_FILE
+    exit 1
+fi
+rm -f $HITS_FILE
+
+# ── 6. dbg! macro left in code ────────────────────────────────────
+if scan_all_code 'dbg!' > $HITS_FILE 2>&1; then
+    pass "no dbg!()"
+else
+    echo -e "  ${RED}FAIL${NC} dbg!() found — remove before committing"
+    cat $HITS_FILE
+    rm -f $HITS_FILE
+    exit 1
+fi
+rm -f $HITS_FILE
+
+# ── 7. todo!/unimplemented! markers ──────────────────────────────
+if scan_all_code 'todo!\|unimplemented!' > $HITS_FILE 2>&1; then
+    pass "no todo!/unimplemented!"
+else
+    echo -e "  ${RED}FAIL${NC} todo!/unimplemented! found — implement or remove before committing"
+    cat $HITS_FILE
+    rm -f $HITS_FILE
+    exit 1
+fi
+rm -f $HITS_FILE
+
+# ── 8. .unwrap() / .expect() in non-test code (§17, §22) ─────────
+if scan_non_test_code '\.unwrap()\|\.expect(' > $HITS_FILE 2>&1; then
+    pass "no .unwrap()/.expect() outside tests"
+else
+    echo -e "  ${RED}FAIL${NC} .unwrap()/.expect() in non-test code — use ? with .context()"
+    cat $HITS_FILE
+    rm -f $HITS_FILE
+    exit 1
+fi
+rm -f $HITS_FILE
+
+# ── 9. std::sync::Mutex in async code (§20, §23) ─────────────────
+if scan_non_test_code 'std::sync::Mutex' > $HITS_FILE 2>&1; then
+    pass "no std::sync::Mutex"
+else
+    echo -e "  ${RED}FAIL${NC} std::sync::Mutex found — use tokio::sync::Mutex in async code"
+    cat $HITS_FILE
+    rm -f $HITS_FILE
+    exit 1
+fi
+rm -f $HITS_FILE
+
+# ── 10. openssl imports (§1: banned dependency) ───────────────────
+if scan_all_code 'use openssl' > $HITS_FILE 2>&1; then
+    pass "no openssl imports"
+else
+    echo -e "  ${RED}FAIL${NC} openssl import found — use ring or rustls instead"
+    cat $HITS_FILE
+    rm -f $HITS_FILE
+    exit 1
+fi
+rm -f $HITS_FILE
+
+# ── 11. Box<dyn Error> in library crates (§17, §23) ──────────────
+boxdyn_issues=0
+if [ -n "$staged_rs" ]; then
+    while IFS= read -r file; do
+        [ -z "$file" ] && continue
+        # Skip the daemon crate (binary — anyhow is fine there)
+        [[ "$file" == crates/freebird-daemon/* ]] && continue
+        hits=$(git show ":$file" 2>/dev/null | grep -n 'Box<dyn.*Error>' || true)
+        if [ -n "$hits" ]; then
+            echo "$hits" | while IFS= read -r line; do
+                echo "    $file:$line"
+            done
+            boxdyn_issues=1
+        fi
+    done <<< "$staged_rs"
+fi
+if [ "$boxdyn_issues" -ne 0 ]; then
+    warn "Box<dyn Error> in library crate — prefer thiserror enums"
+else
+    pass "no Box<dyn Error> in libraries"
+fi
+
+# ── 12. #[allow(unused)] blanket suppression ──────────────────────
+allow_unused_issues=0
+if [ -n "$staged_rs" ]; then
+    while IFS= read -r file; do
+        [ -z "$file" ] && continue
+        hits=$(git show ":$file" 2>/dev/null | grep -n '#\[allow(unused)\]' || true)
+        if [ -n "$hits" ]; then
+            echo "$hits" | while IFS= read -r line; do
+                echo "    $file:$line"
+            done
+            allow_unused_issues=1
+        fi
+    done <<< "$staged_rs"
+fi
+if [ "$allow_unused_issues" -ne 0 ]; then
+    warn "#[allow(unused)] is too broad — use specific allows like #[allow(dead_code)]"
+else
+    pass "no blanket #[allow(unused)]"
+fi
+
+# ── 13. FIXME/HACK/XXX markers ───────────────────────────────────
+marker_issues=0
+if [ -n "$staged_rs" ]; then
+    while IFS= read -r file; do
+        [ -z "$file" ] && continue
+        hits=$(git show ":$file" 2>/dev/null | grep -nE '\b(FIXME|HACK|XXX)\b' || true)
+        if [ -n "$hits" ]; then
+            echo "$hits" | while IFS= read -r line; do
+                echo "    $file:$line"
+            done
+            marker_issues=1
+        fi
+    done <<< "$staged_rs"
+fi
+if [ "$marker_issues" -ne 0 ]; then
+    warn "FIXME/HACK/XXX markers found — resolve before shipping"
+else
+    pass "no FIXME/HACK/XXX"
+fi
+
+# ── 14. Large files (>500 lines) ─────────────────────────────────
+large_file_issues=0
+if [ -n "$staged_rs" ]; then
+    while IFS= read -r file; do
+        [ -z "$file" ] && continue
+        lines=$(git show ":$file" 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$lines" -gt 500 ]; then
+            info "    $file — $lines lines (consider splitting)"
+            large_file_issues=1
+        fi
+    done <<< "$staged_rs"
+fi
+if [ "$large_file_issues" -ne 0 ]; then
+    warn "files over 500 lines (see above)"
+else
+    pass "no oversized files"
+fi
+
+# ── 15. Trailing whitespace in staged additions ──────────────────
+trailing_ws=$(git diff --cached --diff-filter=ACM -- '*.rs' | grep -nE '^\+.*[[:space:]]+$' | grep -v '^+++' | head -5 || true)
+if [ -n "$trailing_ws" ]; then
+    warn "trailing whitespace in staged .rs additions"
+    echo "$trailing_ws" | while IFS= read -r line; do info "    $line"; done
+else
+    pass "no trailing whitespace"
+fi
+
+# ── 16. Cargo deny — supply chain (§16) ──────────────────────────
+echo -en "  ...  cargo deny\r"
+deny_output=$(cargo deny check advisories licenses bans sources 2>&1) || {
+    echo -e "  ${RED}FAIL${NC} cargo deny"
+    echo "$deny_output" | grep -E 'error\[' | head -10
+    exit 1
+}
+pass "cargo deny"
+
+# ── 17. Clippy (strict lints from CLAUDE.md §22) ─────────────────
 echo -en "  ...  cargo clippy\r"
 clippy_output=$(cargo clippy --workspace --all-targets --message-format=short -- \
     -D clippy::all \
@@ -86,7 +329,7 @@ clippy_output=$(cargo clippy --workspace --all-targets --message-format=short --
 }
 pass "cargo clippy"
 
-# ── 6. Tests (reuses compilation from clippy) ────────────────────
+# ── 18. Tests (reuses compilation from clippy) ────────────────────
 echo -en "  ...  cargo test\r"
 test_output=$(cargo test --workspace 2>&1) || {
     echo -e "  ${RED}FAIL${NC} cargo test"

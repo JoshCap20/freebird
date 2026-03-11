@@ -3,6 +3,7 @@ name = "freebird-channels"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+publish = false
 license.workspace = true
 description = "Channel implementations for Freebird — CLI, Signal, WebSocket, etc."
 

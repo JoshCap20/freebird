@@ -228,7 +228,7 @@ impl Tool for GlobFindTool {
         }
 
         // Sort alphabetically
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries.sort_by_key(|e| e.0.clone());
 
         // No matches
         if entries.is_empty() {

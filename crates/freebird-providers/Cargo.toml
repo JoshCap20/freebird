@@ -3,6 +3,7 @@ name = "freebird-providers"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+publish = false
 license.workspace = true
 description = "LLM provider implementations for Freebird — Anthropic, OpenAI, etc."
 
