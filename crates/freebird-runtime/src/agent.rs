@@ -1453,6 +1453,7 @@ fn extract_text(message: &Message) -> String {
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use freebird_types::config::EditConfig;
 
     // -- extract_text --
 
@@ -1589,6 +1590,7 @@ mod tests {
                 allowed_directories: vec![],
                 allowed_shell_commands: vec![],
                 max_shell_output_bytes: 1_048_576,
+                edit: EditConfig::default(),
             },
             None,
         )
