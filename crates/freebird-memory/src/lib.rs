@@ -5,6 +5,7 @@
 #![deny(clippy::indexing_slicing)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod event;
 pub mod file;
 mod helpers;
 pub mod in_memory;
