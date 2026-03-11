@@ -119,12 +119,14 @@ impl TokenBudget {
     }
 
     /// Returns the number of tokens remaining before the session limit.
+    #[must_use]
     pub fn remaining_tokens(&self) -> u64 {
         self.max_tokens_per_session
             .saturating_sub(self.tokens_used.load(Ordering::Relaxed))
     }
 
     /// Returns the total tokens consumed in this session so far.
+    #[must_use]
     pub fn tokens_used(&self) -> u64 {
         self.tokens_used.load(Ordering::Relaxed)
     }
