@@ -15,7 +15,7 @@ use freebird_runtime::registry::ProviderRegistry;
 use freebird_traits::channel::InboundEvent;
 use freebird_traits::id::{ModelId, ProviderId, SessionId};
 use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary};
-use freebird_types::config::{RuntimeConfig, ToolsConfig};
+use freebird_types::config::{KnowledgeConfig, RuntimeConfig, ToolsConfig};
 use tokio_util::sync::CancellationToken;
 
 use helpers::{MockChannel, error_text, make_tool_executor, message_text};
@@ -54,6 +54,8 @@ fn make_runtime(channel: MockChannel) -> AgentRuntime {
         make_tool_executor(vec![]),
         None,
         Box::new(NoopMemory),
+        None,
+        KnowledgeConfig::default(),
         RuntimeConfig {
             default_model: ModelId::from("test-model"),
             default_provider: ProviderId::from("test-provider"),

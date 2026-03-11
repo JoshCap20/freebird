@@ -44,7 +44,7 @@ use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
     ToolOutput,
 };
-use freebird_types::config::RuntimeConfig;
+use freebird_types::config::{KnowledgeConfig, RuntimeConfig};
 
 use helpers::{default_tools_config, error_text, make_tool_executor, message_text};
 
@@ -506,6 +506,8 @@ fn make_stream_runtime(
         tools,
         None,
         Box::new(InMemoryMemory::new()),
+        None,
+        KnowledgeConfig::default(),
         default_config(),
         default_tools_config(),
         None,
@@ -676,6 +678,8 @@ async fn test_streaming_fallback_on_stream_setup_failure() {
         make_tool_executor(vec![]),
         None,
         Box::new(InMemoryMemory::new()),
+        None,
+        KnowledgeConfig::default(),
         RuntimeConfig {
             default_provider: "test-fallback-provider".into(),
             ..default_config()
@@ -709,6 +713,8 @@ async fn test_non_streaming_channel_uses_non_streaming_path() {
         make_tool_executor(vec![]),
         None,
         Box::new(InMemoryMemory::new()),
+        None,
+        KnowledgeConfig::default(),
         RuntimeConfig {
             default_provider: "test-fallback-provider".into(),
             ..default_config()
@@ -797,6 +803,8 @@ async fn test_streaming_conversation_persisted() {
         make_tool_executor(vec![]),
         None,
         Box::new(memory.clone()),
+        None,
+        KnowledgeConfig::default(),
         default_config(),
         default_tools_config(),
         None,
@@ -950,6 +958,8 @@ async fn test_streaming_max_tool_rounds_exceeded() {
         make_tool_executor(vec![Box::new(tool)]),
         None,
         Box::new(InMemoryMemory::new()),
+        None,
+        KnowledgeConfig::default(),
         RuntimeConfig {
             max_tool_rounds: 1,
             ..default_config()
@@ -995,6 +1005,8 @@ async fn test_streaming_stop_sequence() {
         make_tool_executor(vec![]),
         None,
         Box::new(memory.clone()),
+        None,
+        KnowledgeConfig::default(),
         default_config(),
         default_tools_config(),
         None,
@@ -1081,6 +1093,8 @@ async fn test_non_streaming_provider_uses_complete_path() {
         make_tool_executor(vec![]),
         None,
         Box::new(InMemoryMemory::new()),
+        None,
+        KnowledgeConfig::default(),
         RuntimeConfig {
             default_provider: "no-stream-provider".into(),
             ..default_config()
@@ -1124,6 +1138,8 @@ async fn test_streaming_empty_done() {
         make_tool_executor(vec![]),
         None,
         Box::new(memory.clone()),
+        None,
+        KnowledgeConfig::default(),
         default_config(),
         default_tools_config(),
         None,

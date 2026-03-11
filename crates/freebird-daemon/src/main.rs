@@ -130,6 +130,14 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
     let tool_registry =
         tools::build_tool_registry(&config).context("failed to build tool registry")?;
 
+    // 7b. BOOTSTRAP — populate system knowledge (tool capabilities, system config).
+    // Must run before config.tools is moved below.
+    if let Some(ref store) = knowledge_store {
+        populate_system_knowledge(store.as_ref(), &tool_registry, &config)
+            .await
+            .context("failed to populate system knowledge")?;
+    }
+
     let mut tools_config = config.tools;
     tools_config.sandbox_root = expand_tilde(&tools_config.sandbox_root)?;
     tokio::fs::create_dir_all(&tools_config.sandbox_root)
@@ -171,6 +179,9 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         "consent gate configured"
     );
 
+    // Clone knowledge store for the runtime (ToolExecutor also needs its own Arc).
+    let ks_for_runtime = knowledge_store.clone();
+
     // 10. TOOL EXECUTOR — consumes the registry, adds security pipeline
     let tool_executor = freebird_runtime::tool_executor::ToolExecutor::new(
         tool_registry.into_tools(),
@@ -189,6 +200,8 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         tool_executor,
         Some(consent_rx),
         Box::new(memory),
+        ks_for_runtime,
+        config.knowledge,
         config.runtime,
         tools_config,
         None, // audit logger — wired in a later issue
@@ -341,6 +354,112 @@ fn init_sqlite(config: &AppConfig) -> Result<SqliteComponents> {
         Arc::new(SqliteKnowledgeStore::new(Arc::clone(&db)));
 
     Ok((memory, Some(knowledge), db))
+}
+
+/// Populate the knowledge store with system-level entries on startup.
+///
+/// Uses `replace_kind()` for idempotent updates — safe to call on every boot.
+/// Two categories are populated:
+///
+/// - **`ToolCapability`**: one entry per registered tool (name, description, capability, risk).
+/// - **`SystemConfig`**: key runtime configuration facts.
+async fn populate_system_knowledge(
+    store: &dyn freebird_traits::knowledge::KnowledgeStore,
+    tool_registry: &freebird_runtime::tool_registry::ToolRegistry,
+    config: &AppConfig,
+) -> Result<()> {
+    use std::collections::BTreeSet;
+
+    use chrono::Utc;
+    use freebird_traits::id::KnowledgeId;
+    use freebird_traits::knowledge::{KnowledgeEntry, KnowledgeKind, KnowledgeSource};
+
+    let now = Utc::now();
+
+    // --- ToolCapability entries ---
+    let mut tool_entries = Vec::with_capacity(tool_registry.tool_count());
+    for tool in tool_registry.iter() {
+        let info = tool.info();
+        let content = format!(
+            "Tool: {}\nDescription: {}\nCapability: {:?}\nRisk: {:?}\nSide effects: {:?}",
+            info.name,
+            info.description,
+            info.required_capability,
+            info.risk_level,
+            info.side_effects,
+        );
+        tool_entries.push(KnowledgeEntry {
+            id: KnowledgeId::from_string(uuid::Uuid::new_v4().to_string()),
+            kind: KnowledgeKind::ToolCapability,
+            content,
+            tags: BTreeSet::from(["tool".to_owned(), info.name.clone()]),
+            source: KnowledgeSource::System,
+            confidence: 1.0,
+            session_id: None,
+            created_at: now,
+            updated_at: now,
+            access_count: 0,
+            last_accessed: None,
+        });
+    }
+
+    store
+        .replace_kind(&KnowledgeKind::ToolCapability, tool_entries)
+        .await
+        .context("failed to populate ToolCapability knowledge")?;
+
+    // --- SystemConfig entries ---
+    let config_facts = [
+        format!(
+            "Default provider: {}, default model: {}",
+            config.runtime.default_provider, config.runtime.default_model,
+        ),
+        format!(
+            "Max tool rounds per turn: {}, max output tokens: {}",
+            config.runtime.max_tool_rounds, config.runtime.max_output_tokens,
+        ),
+        format!(
+            "Consent required above: {:?}, consent timeout: {}s",
+            config.security.require_consent_above, config.security.consent_timeout_secs,
+        ),
+        format!(
+            "Knowledge auto-retrieve: {}, max context entries: {}, relevance threshold: {}",
+            config.knowledge.auto_retrieve,
+            config.knowledge.max_context_entries,
+            config.knowledge.relevance_threshold,
+        ),
+    ];
+
+    let config_entries: Vec<KnowledgeEntry> = config_facts
+        .into_iter()
+        .map(|content| KnowledgeEntry {
+            id: KnowledgeId::from_string(uuid::Uuid::new_v4().to_string()),
+            kind: KnowledgeKind::SystemConfig,
+            content,
+            tags: BTreeSet::from(["config".to_owned()]),
+            source: KnowledgeSource::System,
+            confidence: 1.0,
+            session_id: None,
+            created_at: now,
+            updated_at: now,
+            access_count: 0,
+            last_accessed: None,
+        })
+        .collect();
+
+    let entry_count = config_entries.len();
+    store
+        .replace_kind(&KnowledgeKind::SystemConfig, config_entries)
+        .await
+        .context("failed to populate SystemConfig knowledge")?;
+
+    tracing::info!(
+        tool_capabilities = tool_registry.tool_count(),
+        system_config = entry_count,
+        "system knowledge bootstrapped"
+    );
+
+    Ok(())
 }
 
 /// Merge CLI `--allow-dir` flags into the tools configuration.

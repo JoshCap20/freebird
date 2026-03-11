@@ -6,6 +6,7 @@
 //! cancellation token fires or the inbound stream closes.
 
 use std::pin::Pin;
+use std::sync::Arc;
 
 use chrono::Utc;
 use freebird_security::audit::{AuditEventType, AuditLogger, InjectionSource};
@@ -19,13 +20,14 @@ use freebird_traits::channel::{
     Channel, ChannelError, ChannelFeature, InboundEvent, OutboundEvent,
 };
 use freebird_traits::id::SessionId;
+use freebird_traits::knowledge::{KnowledgeMatch, KnowledgeStore};
 use freebird_traits::memory::{Conversation, Memory, MemoryError, ToolInvocation, Turn};
 use freebird_traits::provider::{
     CompletionRequest, CompletionResponse, ContentBlock, Message, ProviderError, Role, StopReason,
     StreamEvent, TokenUsage, ToolDefinition,
 };
 use freebird_traits::tool::{Capability, ToolOutcome};
-use freebird_types::config::{RuntimeConfig, ToolsConfig};
+use freebird_types::config::{KnowledgeConfig, RuntimeConfig, ToolsConfig};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -75,6 +77,8 @@ pub struct AgentRuntime {
     /// Consumed by the third arm of the `run()` select loop.
     consent_rx: Option<tokio::sync::mpsc::Receiver<ConsentRequest>>,
     memory: Box<dyn Memory>,
+    knowledge_store: Option<Arc<dyn KnowledgeStore>>,
+    knowledge_config: KnowledgeConfig,
     config: RuntimeConfig,
     tools_config: ToolsConfig,
     audit: Option<AuditLogger>,
@@ -94,6 +98,8 @@ impl AgentRuntime {
         tool_executor: crate::tool_executor::ToolExecutor,
         consent_rx: Option<tokio::sync::mpsc::Receiver<ConsentRequest>>,
         memory: Box<dyn Memory>,
+        knowledge_store: Option<Arc<dyn KnowledgeStore>>,
+        knowledge_config: KnowledgeConfig,
         config: RuntimeConfig,
         tools_config: ToolsConfig,
         audit: Option<AuditLogger>,
@@ -104,6 +110,8 @@ impl AgentRuntime {
             tool_executor,
             consent_rx,
             memory,
+            knowledge_store,
+            knowledge_config,
             config,
             tools_config,
             audit,
@@ -583,8 +591,96 @@ impl AgentRuntime {
         }
     }
 
+    /// Retrieve relevant knowledge entries for auto-injection into the prompt.
+    ///
+    /// Returns an empty vec when auto-retrieval is disabled, no knowledge store
+    /// is configured, or no entries pass the relevance threshold.
+    async fn retrieve_knowledge_context(&self, query: &str) -> Vec<KnowledgeMatch> {
+        if !self.knowledge_config.auto_retrieve {
+            return Vec::new();
+        }
+
+        let Some(ref store) = self.knowledge_store else {
+            return Vec::new();
+        };
+
+        let matches = match store
+            .search(query, self.knowledge_config.max_context_entries)
+            .await
+        {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(error = %e, "knowledge auto-retrieval failed");
+                return Vec::new();
+            }
+        };
+
+        // BM25: lower (more negative) = more relevant. Keep entries at or below threshold.
+        let filtered: Vec<KnowledgeMatch> = matches
+            .into_iter()
+            .filter(|m| m.rank <= self.knowledge_config.relevance_threshold)
+            .collect();
+
+        if filtered.is_empty() {
+            return Vec::new();
+        }
+
+        // Record access for analytics (fire-and-forget).
+        let ids: Vec<_> = filtered.iter().map(|m| m.entry.id.clone()).collect();
+        if let Err(e) = store.record_access(&ids).await {
+            tracing::warn!(error = %e, "failed to record knowledge access");
+        }
+
+        tracing::debug!(
+            count = filtered.len(),
+            "injecting knowledge context into prompt"
+        );
+
+        filtered
+    }
+
+    /// Format knowledge matches into a context block for injection into the prompt.
+    ///
+    /// Returns `None` if there are no matches. Respects the configured
+    /// `max_context_tokens` budget (estimated at ~4 chars per token).
+    fn format_knowledge_context(&self, matches: &[KnowledgeMatch]) -> Option<String> {
+        if matches.is_empty() {
+            return None;
+        }
+
+        let token_budget_chars = self.knowledge_config.max_context_tokens.saturating_mul(4);
+        let mut buf = String::with_capacity(token_budget_chars.min(8192));
+        buf.push_str("[RELEVANT CONTEXT]\n");
+        let mut remaining = token_budget_chars.saturating_sub(buf.len());
+
+        for m in matches {
+            let label = format!("[{:?}] ", m.entry.kind);
+            let entry_len = label.len() + m.entry.content.len() + 1; // +1 for newline
+
+            if entry_len > remaining {
+                // Fit as much of this entry as possible, then stop.
+                let avail = remaining.saturating_sub(label.len() + 1);
+                if avail > 0 {
+                    buf.push_str(&label);
+                    // Truncate at a char boundary.
+                    let truncated: String = m.entry.content.chars().take(avail).collect();
+                    buf.push_str(&truncated);
+                    buf.push('\n');
+                }
+                break;
+            }
+
+            buf.push_str(&label);
+            buf.push_str(&m.entry.content);
+            buf.push('\n');
+            remaining -= entry_len;
+        }
+
+        Some(buf)
+    }
+
     /// Build the initial state for an agentic loop: user message, turn, messages, tool defs.
-    fn prepare_agentic_loop(
+    async fn prepare_agentic_loop(
         &self,
         safe_message: &SafeMessage,
         conversation: &Conversation,
@@ -618,6 +714,17 @@ impl AgentRuntime {
             }
             true
         });
+
+        // CLAUDE.md §5: retrieve relevant knowledge via FTS5 search and inject
+        // before the user message so the model has context for its response.
+        let knowledge_matches = self.retrieve_knowledge_context(safe_message.as_str()).await;
+        if let Some(context_text) = self.format_knowledge_context(&knowledge_matches) {
+            messages.push(Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text { text: context_text }],
+                timestamp: Utc::now(),
+            });
+        }
 
         messages.push(user_message.clone());
 
@@ -678,7 +785,7 @@ impl AgentRuntime {
         initial_request: Option<CompletionRequest>,
     ) -> Turn {
         let (mut messages, mut current_turn, tool_definitions) =
-            self.prepare_agentic_loop(safe_message, conversation);
+            self.prepare_agentic_loop(safe_message, conversation).await;
 
         let mut pending_request = initial_request;
 
@@ -1101,7 +1208,7 @@ impl AgentRuntime {
         outbound: &mpsc::Sender<OutboundEvent>,
     ) -> Turn {
         let (mut messages, mut current_turn, tool_definitions) =
-            self.prepare_agentic_loop(safe_message, conversation);
+            self.prepare_agentic_loop(safe_message, conversation).await;
 
         for _round in 0..self.config.max_tool_rounds {
             let request = self.build_completion_request(conversation, &messages, &tool_definitions);
@@ -1422,5 +1529,196 @@ mod tests {
             timestamp: Utc::now(),
         };
         assert_eq!(extract_text(&msg), "");
+    }
+
+    // -- format_knowledge_context --
+
+    use freebird_traits::id::KnowledgeId;
+    use freebird_traits::knowledge::{KnowledgeEntry, KnowledgeKind, KnowledgeSource};
+    use std::collections::BTreeSet;
+
+    fn make_match(kind: KnowledgeKind, content: &str, rank: f64) -> KnowledgeMatch {
+        KnowledgeMatch {
+            entry: KnowledgeEntry {
+                id: KnowledgeId::from_string("test-id"),
+                kind,
+                content: content.to_owned(),
+                tags: BTreeSet::new(),
+                source: KnowledgeSource::System,
+                confidence: 1.0,
+                session_id: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                access_count: 0,
+                last_accessed: None,
+            },
+            rank,
+        }
+    }
+
+    fn test_runtime_with_knowledge_config(config: KnowledgeConfig) -> AgentRuntime {
+        AgentRuntime::new(
+            ProviderRegistry::new(),
+            Box::new(NullChannel),
+            crate::tool_executor::ToolExecutor::new(
+                vec![],
+                std::time::Duration::from_secs(30),
+                None,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap(),
+            None,
+            Box::new(NullMemory),
+            None,
+            config,
+            RuntimeConfig {
+                default_model: freebird_traits::id::ModelId::from("m"),
+                default_provider: freebird_traits::id::ProviderId::from("p"),
+                system_prompt: None,
+                max_output_tokens: 1024,
+                max_tool_rounds: 1,
+                temperature: None,
+                max_turns_per_session: 10,
+                drain_timeout_secs: 1,
+            },
+            ToolsConfig {
+                sandbox_root: std::env::temp_dir(),
+                default_timeout_secs: 30,
+                allowed_directories: vec![],
+                allowed_shell_commands: vec![],
+                max_shell_output_bytes: 1_048_576,
+            },
+            None,
+        )
+    }
+
+    /// Minimal channel for unit tests — never used, just satisfies the type.
+    struct NullChannel;
+    #[async_trait::async_trait]
+    impl freebird_traits::channel::Channel for NullChannel {
+        fn info(&self) -> &freebird_traits::channel::ChannelInfo {
+            static INFO: std::sync::OnceLock<freebird_traits::channel::ChannelInfo> =
+                std::sync::OnceLock::new();
+            INFO.get_or_init(|| freebird_traits::channel::ChannelInfo {
+                id: freebird_traits::id::ChannelId::from("null"),
+                display_name: "null".into(),
+                features: BTreeSet::new(),
+                auth: freebird_traits::channel::AuthRequirement::None,
+            })
+        }
+        async fn start(
+            &self,
+        ) -> Result<freebird_traits::channel::ChannelHandle, freebird_traits::channel::ChannelError>
+        {
+            Err(freebird_traits::channel::ChannelError::StartupFailed {
+                channel: "null".into(),
+                reason: "null channel".into(),
+            })
+        }
+        async fn stop(&self) -> Result<(), freebird_traits::channel::ChannelError> {
+            Ok(())
+        }
+    }
+
+    /// Minimal memory for unit tests.
+    struct NullMemory;
+    #[async_trait::async_trait]
+    impl freebird_traits::memory::Memory for NullMemory {
+        async fn load(
+            &self,
+            _: &SessionId,
+        ) -> Result<Option<Conversation>, freebird_traits::memory::MemoryError> {
+            Ok(None)
+        }
+        async fn save(&self, _: &Conversation) -> Result<(), freebird_traits::memory::MemoryError> {
+            Ok(())
+        }
+        async fn list_sessions(
+            &self,
+            _: usize,
+        ) -> Result<
+            Vec<freebird_traits::memory::SessionSummary>,
+            freebird_traits::memory::MemoryError,
+        > {
+            Ok(vec![])
+        }
+        async fn delete(&self, _: &SessionId) -> Result<(), freebird_traits::memory::MemoryError> {
+            Ok(())
+        }
+        async fn search(
+            &self,
+            _: &str,
+            _: usize,
+        ) -> Result<
+            Vec<freebird_traits::memory::SessionSummary>,
+            freebird_traits::memory::MemoryError,
+        > {
+            Ok(vec![])
+        }
+    }
+
+    #[test]
+    fn test_format_knowledge_context_empty_returns_none() {
+        let rt = test_runtime_with_knowledge_config(KnowledgeConfig::default());
+        assert!(rt.format_knowledge_context(&[]).is_none());
+    }
+
+    #[test]
+    fn test_format_knowledge_context_formats_entries() {
+        let rt = test_runtime_with_knowledge_config(KnowledgeConfig::default());
+        let matches = vec![
+            make_match(KnowledgeKind::LearnedPattern, "Use pattern X", -2.0),
+            make_match(KnowledgeKind::ErrorResolution, "Fix Y with Z", -1.5),
+        ];
+
+        let result = rt.format_knowledge_context(&matches).unwrap();
+        assert!(result.starts_with("[RELEVANT CONTEXT]\n"));
+        assert!(result.contains("[LearnedPattern] Use pattern X"));
+        assert!(result.contains("[ErrorResolution] Fix Y with Z"));
+    }
+
+    #[test]
+    fn test_format_knowledge_context_respects_token_budget() {
+        let config = KnowledgeConfig {
+            max_context_tokens: 10, // ~40 chars budget
+            ..KnowledgeConfig::default()
+        };
+        let rt = test_runtime_with_knowledge_config(config);
+
+        let matches = vec![
+            make_match(KnowledgeKind::LearnedPattern, "short", -2.0),
+            make_match(
+                KnowledgeKind::ErrorResolution,
+                "this is a very long entry that should be truncated or excluded",
+                -1.5,
+            ),
+        ];
+
+        let result = rt.format_knowledge_context(&matches).unwrap();
+        // Should have the header and at most the first entry fully.
+        // The second entry should be truncated or excluded due to budget.
+        assert!(result.starts_with("[RELEVANT CONTEXT]\n"));
+        assert!(result.len() <= 60); // 10 tokens * 4 chars + some slack for the first entry
+    }
+
+    #[tokio::test]
+    async fn test_retrieve_knowledge_context_disabled() {
+        let config = KnowledgeConfig {
+            auto_retrieve: false,
+            ..KnowledgeConfig::default()
+        };
+        let rt = test_runtime_with_knowledge_config(config);
+        let result = rt.retrieve_knowledge_context("hello").await;
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_retrieve_knowledge_context_no_store() {
+        // Default test runtime has no knowledge store (None)
+        let rt = test_runtime_with_knowledge_config(KnowledgeConfig::default());
+        let result = rt.retrieve_knowledge_context("hello").await;
+        assert!(result.is_empty());
     }
 }
