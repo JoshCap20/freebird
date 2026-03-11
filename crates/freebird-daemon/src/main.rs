@@ -184,8 +184,15 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
     let ks_for_runtime = knowledge_store.clone();
 
     // 10. SECRET GUARD — intercepts tool inputs and redacts secrets from outputs
-    let secret_guard = SecretGuard::from_config(&config.security.secret_guard)
-        .context("failed to construct SecretGuard from config")?;
+    let secret_guard = if config.security.secret_guard.enabled {
+        Some(
+            SecretGuard::from_config(&config.security.secret_guard)
+                .context("failed to construct SecretGuard from config")?,
+        )
+    } else {
+        tracing::info!("secret guard disabled via config");
+        None
+    };
 
     // 11. TOOL EXECUTOR — consumes the registry, adds security pipeline (incl. secret guard)
     let tool_executor = freebird_runtime::tool_executor::ToolExecutor::new(
@@ -195,7 +202,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         tools_config.allowed_directories.clone(),
         Some(consent_gate),
         knowledge_store,
-        Some(secret_guard),
+        secret_guard,
     )
     .context("failed to construct ToolExecutor (duplicate tool names?)")?;
 
