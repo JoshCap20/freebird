@@ -99,10 +99,22 @@ impl SessionManager {
 
     /// Removes the session mapping for this `(channel, sender)` pair.
     /// Returns the removed [`SessionId`], or `None` if no mapping existed.
+    ///
+    /// Also cleans up any associated grant and budget to prevent stale
+    /// entries from accumulating in memory.
     pub async fn remove(&self, channel_id: &str, sender_id: &str) -> Option<SessionId> {
         let key = (channel_id.to_owned(), sender_id.to_owned());
-        let mut sessions = self.sessions.write().await;
-        sessions.remove(&key)
+        let removed_id = {
+            let mut sessions = self.sessions.write().await;
+            sessions.remove(&key)
+        };
+
+        if let Some(ref id) = removed_id {
+            self.grants.write().await.remove(id);
+            self.budgets.write().await.remove(id);
+        }
+
+        removed_id
     }
 
     /// Associate a [`TokenBudget`] with a session.
@@ -150,6 +162,7 @@ impl Default for SessionManager {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use std::sync::Arc;
 
@@ -278,5 +291,104 @@ mod tests {
     async fn test_default_is_empty() {
         let mgr = SessionManager::default();
         assert_eq!(mgr.session_count().await, 0);
+    }
+
+    // ── Budget and grant management ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_set_and_get_budget() {
+        let mgr = SessionManager::new();
+        let id = mgr.resolve("cli", "alice").await;
+
+        let config = freebird_types::config::BudgetConfig {
+            max_tokens_per_session: 1000,
+            max_tokens_per_request: 200,
+            max_tool_rounds_per_turn: 3,
+        };
+        mgr.set_budget(&id, freebird_security::budget::TokenBudget::new(&config))
+            .await;
+
+        let budget = mgr.get_budget(&id).await;
+        assert!(budget.is_some());
+        assert_eq!(budget.unwrap().remaining_tokens(), 1000);
+    }
+
+    #[tokio::test]
+    async fn test_get_budget_returns_none_for_unknown() {
+        let mgr = SessionManager::new();
+        let id = freebird_types::id::new_session_id();
+        assert!(mgr.get_budget(&id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_set_and_get_grant() {
+        let mgr = SessionManager::new();
+        let id = mgr.resolve("cli", "alice").await;
+
+        let grant = freebird_security::capability::CapabilityGrant::new(
+            std::iter::once(freebird_traits::tool::Capability::FileRead).collect(),
+            std::env::current_dir().unwrap(),
+            None,
+        )
+        .unwrap();
+        mgr.set_grant(&id, grant).await;
+
+        let retrieved = mgr.get_grant(&id).await;
+        assert!(retrieved.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_get_grant_returns_none_for_unknown() {
+        let mgr = SessionManager::new();
+        let id = freebird_types::id::new_session_id();
+        assert!(mgr.get_grant(&id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_new_session_cleans_up_old_budget_and_grant() {
+        let mgr = SessionManager::new();
+        let old_id = mgr.resolve("cli", "alice").await;
+
+        let config = freebird_types::config::BudgetConfig::default();
+        mgr.set_budget(
+            &old_id,
+            freebird_security::budget::TokenBudget::new(&config),
+        )
+        .await;
+        let grant = freebird_security::capability::CapabilityGrant::new(
+            std::iter::once(freebird_traits::tool::Capability::FileRead).collect(),
+            std::env::current_dir().unwrap(),
+            None,
+        )
+        .unwrap();
+        mgr.set_grant(&old_id, grant).await;
+
+        // Create new session — old budget and grant should be cleaned up.
+        let _new_id = mgr.new_session("cli", "alice").await;
+        assert!(mgr.get_budget(&old_id).await.is_none());
+        assert!(mgr.get_grant(&old_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_remove_cleans_up_budget_and_grant() {
+        let mgr = SessionManager::new();
+        let id = mgr.resolve("cli", "alice").await;
+
+        let config = freebird_types::config::BudgetConfig::default();
+        mgr.set_budget(&id, freebird_security::budget::TokenBudget::new(&config))
+            .await;
+        let grant = freebird_security::capability::CapabilityGrant::new(
+            std::iter::once(freebird_traits::tool::Capability::FileRead).collect(),
+            std::env::current_dir().unwrap(),
+            None,
+        )
+        .unwrap();
+        mgr.set_grant(&id, grant).await;
+
+        // Remove session — budget and grant should be cleaned up.
+        let removed = mgr.remove("cli", "alice").await;
+        assert_eq!(removed, Some(id.clone()));
+        assert!(mgr.get_budget(&id).await.is_none());
+        assert!(mgr.get_grant(&id).await.is_none());
     }
 }
