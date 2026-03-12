@@ -32,3 +32,4 @@ serde_json = { workspace = true }
 proptest = { workspace = true }
 wiremock = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
+freebird-memory = { workspace = true }
