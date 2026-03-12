@@ -5,6 +5,7 @@
 //! - `freebird chat`   — connect to running daemon for interactive chat
 //! - `freebird status` — check if daemon is running
 //! - `freebird stop`   — send graceful shutdown to daemon
+//! - `freebird replay` — replay a past session as a detailed trace
 
 #![deny(clippy::all, clippy::pedantic, clippy::nursery)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -61,6 +62,17 @@ enum Commands {
     Status,
     /// Send graceful shutdown to the daemon.
     Stop,
+    /// Replay a past session as a detailed trace.
+    Replay {
+        /// Session ID to replay (UUID).
+        session_id: Option<String>,
+        /// Replay the most recent session.
+        #[arg(long)]
+        last: bool,
+        /// Output as JSON instead of human-readable trace.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -72,6 +84,11 @@ async fn main() -> Result<()> {
         Commands::Chat => cmd_chat().await,
         Commands::Status => cmd_status().await,
         Commands::Stop => cmd_stop().await,
+        Commands::Replay {
+            session_id,
+            last,
+            json,
+        } => cmd_replay(session_id, last, json).await,
     }
 }
 
@@ -327,6 +344,55 @@ async fn cmd_stop() -> Result<()> {
         .context("sending shutdown command")?;
 
     println!("shutdown command sent to daemon at {addr}");
+    Ok(())
+}
+
+/// `freebird replay` — display a past session as a detailed trace.
+///
+/// Opens the encrypted database (prompts for key if needed), resolves the
+/// session via `--last` or an explicit session ID, and prints the formatted
+/// replay to stdout.
+async fn cmd_replay(session_id: Option<String>, last: bool, json: bool) -> Result<()> {
+    let config = load_config()?;
+
+    if session_id.is_none() && !last {
+        bail!("specify a session ID or use --last to replay the most recent session");
+    }
+
+    let (memory, _knowledge, _db, _salt) = init_sqlite(&config)?;
+
+    // Resolve session ID
+    let sid = if last {
+        let sessions = memory
+            .list_sessions(1)
+            .await
+            .context("failed to list sessions")?;
+        sessions
+            .into_iter()
+            .next()
+            .map(|s| s.session_id)
+            .ok_or_else(|| anyhow::anyhow!("no sessions found"))?
+    } else {
+        // session_id is Some(...) due to the bail above
+        let raw = session_id.ok_or_else(|| anyhow::anyhow!("missing session ID"))?;
+        freebird_traits::id::SessionId::from(raw.as_str())
+    };
+
+    let conversation = memory
+        .load(&sid)
+        .await
+        .with_context(|| format!("failed to load session `{sid}`"))?
+        .ok_or_else(|| anyhow::anyhow!("session `{sid}` not found"))?;
+
+    if json {
+        let output =
+            replay::format_replay_json(&conversation).context("failed to serialize session")?;
+        println!("{output}");
+    } else {
+        let output = replay::format_replay(&conversation);
+        print!("{output}");
+    }
+
     Ok(())
 }
 
