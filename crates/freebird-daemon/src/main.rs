@@ -104,7 +104,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
     ));
 
     // 6. MEMORY — SQLite with SQLCipher encryption
-    let (memory, knowledge_store, db, db_salt) = init_sqlite(&config)?;
+    let (memory, knowledge_store, db, _db_salt) = init_sqlite(&config)?;
 
     // 6a. EVENT SINK + AUDIT SINK — event-sourced persistence into the same SQLite DB
     let event_sink: Option<std::sync::Arc<dyn freebird_traits::event::EventSink>> =
@@ -191,43 +191,11 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         None
     };
 
-    // 11. AUDIT LOGGER — tamper-evident, hash-chained audit log (ASI security)
-    let audit_logger = if let Some(ref audit_dir) = config.logging.audit_dir {
-        let expanded_dir = expand_tilde(audit_dir)?;
-        std::fs::create_dir_all(&expanded_dir).with_context(|| {
-            format!(
-                "failed to create audit directory `{}`",
-                expanded_dir.display()
-            )
-        })?;
-        let audit_path = expanded_dir.join("audit.jsonl");
-
-        // Derive HMAC signing key from DB salt + domain separator.
-        // The salt is unique per installation and not publicly known,
-        // making the audit chain unforgeable without database access.
-        let audit_key_material = format!("freebird-audit-{}", hex::encode(&db_salt));
-        let signing_key =
-            ring::hmac::Key::new(ring::hmac::HMAC_SHA256, audit_key_material.as_bytes());
-
-        let logger = freebird_security::audit::AuditLogger::new(&audit_path, signing_key)
-            .with_context(|| {
-                format!(
-                    "failed to initialize audit logger at `{}`",
-                    audit_path.display()
-                )
-            })?;
-        tracing::info!(path = %audit_path.display(), "audit logger initialized");
-        Some(logger)
-    } else {
-        tracing::info!("audit logging disabled (no audit_dir configured)");
-        None
-    };
-
-    // 12. TOOL EXECUTOR — consumes the registry, adds security pipeline (incl. secret guard)
+    // 11. TOOL EXECUTOR — consumes the registry, adds security pipeline (incl. secret guard)
     let tool_executor = freebird_runtime::tool_executor::ToolExecutor::new(
         tool_registry.into_tools(),
         std::time::Duration::from_secs(tools_config.default_timeout_secs),
-        audit_logger.clone(),
+        audit_sink.clone(),
         tools_config.allowed_directories.clone(),
         Some(approval_gate),
         knowledge_store,
@@ -252,7 +220,6 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         tools_config,
         config.security.budgets,
         config.security.default_session_ttl_hours,
-        audit_logger,
         event_sink,
         audit_sink,
     );

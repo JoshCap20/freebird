@@ -81,7 +81,6 @@ fn make_runtime(channel: MockChannel) -> AgentRuntime {
         24, // default_session_ttl_hours
         None,
         None,
-        None,
     )
 }
 

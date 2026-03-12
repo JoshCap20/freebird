@@ -381,7 +381,6 @@ fn make_test_runtime(
         24, // default_session_ttl_hours
         None,
         None,
-        None,
     )
 }
 
@@ -699,7 +698,6 @@ async fn test_tool_use_timeout() {
         24, // default_session_ttl_hours
         None,
         None,
-        None,
     );
 
     let events = without_status_events(
@@ -761,7 +759,6 @@ async fn test_tool_use_max_rounds_exceeded() {
         default_tools_config(),
         budget_config,
         24, // default_session_ttl_hours
-        None,
         None,
         None,
     );
@@ -848,7 +845,6 @@ async fn test_conversation_saved_after_turn() {
         24, // default_session_ttl_hours
         None,
         None,
-        None,
     );
 
     let _events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hello").await;
@@ -889,7 +885,6 @@ async fn test_tool_invocations_recorded_in_turn() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
         None,
         None,
     );
@@ -1043,7 +1038,6 @@ async fn test_tool_output_injection_replaced_with_error() {
         24, // default_session_ttl_hours
         None,
         None,
-        None,
     );
 
     let events = without_status_events(
@@ -1097,7 +1091,6 @@ async fn test_model_output_injection_blocks_delivery() {
         24, // default_session_ttl_hours
         None,
         None,
-        None,
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -1145,7 +1138,6 @@ async fn test_truncated_response_injection_blocks_delivery() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
         None,
         None,
     );
@@ -1222,7 +1214,6 @@ async fn test_memory_load_error_sends_error_event() {
         24, // default_session_ttl_hours
         None,
         None,
-        None,
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -1260,7 +1251,6 @@ async fn test_memory_save_error_does_not_crash() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
         None,
         None,
     );
@@ -1362,7 +1352,6 @@ async fn test_continuing_session_includes_history_in_request() {
         24, // default_session_ttl_hours
         None,
         None,
-        None,
     );
 
     let events =
@@ -1446,7 +1435,6 @@ async fn test_new_conversation_uses_config_values() {
         24, // default_session_ttl_hours
         None,
         None,
-        None,
     );
 
     let _events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -1502,7 +1490,6 @@ async fn test_multi_turn_within_same_session() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
         None,
         None,
     );
@@ -1639,7 +1626,6 @@ async fn test_token_budget_per_request_exceeded() {
         24, // default_session_ttl_hours
         None,
         None,
-        None,
     );
 
     let events = without_status_events(
@@ -1684,7 +1670,6 @@ async fn test_token_budget_per_session_exceeded() {
         default_tools_config(),
         budget,
         24, // default_session_ttl_hours
-        None,
         None,
         None,
     );

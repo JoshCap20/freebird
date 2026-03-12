@@ -530,12 +530,11 @@ pub enum LogFormat {
     Compact,
 }
 
-/// Logging and audit configuration.
+/// Logging configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingConfig {
     pub level: LogLevel,
     pub format: LogFormat,
-    pub audit_dir: Option<PathBuf>,
 }
 
 #[cfg(test)]

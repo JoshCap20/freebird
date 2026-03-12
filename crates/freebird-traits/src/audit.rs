@@ -1,7 +1,6 @@
 //! Audit sink trait — abstracts over audit event persistence backends.
 //!
-//! Replaces the file-based `AuditLogger` with a trait that can be backed
-//! by `SQLite`, enabling unified encrypted storage with conversation events.
+//! Backed by `SQLite`, enabling unified encrypted storage with conversation events.
 //!
 //! The trait takes stringly-typed event data to avoid coupling `freebird-traits`
 //! to security-specific types (`AuditEventType` lives in `freebird-security`).

@@ -202,7 +202,6 @@ async fn test_consent_request_forwarded_to_channel() {
         24, // default_session_ttl_hours
         None,
         None,
-        None,
     );
 
     // Send message that triggers the high-risk tool
@@ -324,7 +323,6 @@ async fn test_consent_approved_executes_tool() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
         None,
         None,
     );
@@ -459,7 +457,6 @@ async fn test_consent_denied_returns_error_to_provider() {
         24, // default_session_ttl_hours
         None,
         None,
-        None,
     );
 
     inbound_tx
@@ -591,7 +588,6 @@ async fn test_consent_low_risk_no_prompt() {
         24, // default_session_ttl_hours
         None,
         None,
-        None,
     );
 
     inbound_tx
@@ -693,7 +689,6 @@ async fn test_consent_no_gate_executes_freely() {
         24, // default_session_ttl_hours
         None,
         None,
-        None,
     );
 
     inbound_tx
@@ -777,7 +772,6 @@ async fn test_consent_response_unknown_id_logged() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
         None,
         None,
     );

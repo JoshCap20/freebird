@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use freebird_security::approval::ApprovalRequest;
-use freebird_security::audit::{AuditEventType, AuditLogger, InjectionSource};
+use freebird_security::audit::{AuditEventType, InjectionSource};
 use freebird_security::budget::TokenBudget;
 use freebird_security::capability::CapabilityGrant;
 use freebird_security::error::Severity;
@@ -95,7 +95,6 @@ pub struct AgentRuntime {
     /// Default session TTL in hours. Used to set expiration on capability
     /// grants when per-session auth is not yet wired up.
     default_session_ttl_hours: u64,
-    audit: Option<AuditLogger>,
     event_sink: Option<Arc<dyn EventSink>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
     sessions: SessionManager,
@@ -120,7 +119,6 @@ impl AgentRuntime {
         tools_config: ToolsConfig,
         budget_config: BudgetConfig,
         default_session_ttl_hours: u64,
-        audit: Option<AuditLogger>,
         event_sink: Option<Arc<dyn EventSink>>,
         audit_sink: Option<Arc<dyn AuditSink>>,
     ) -> Self {
@@ -137,7 +135,6 @@ impl AgentRuntime {
             tools_config,
             budget_config,
             default_session_ttl_hours,
-            audit,
             event_sink,
             audit_sink,
             sessions,
@@ -1651,27 +1648,12 @@ impl AgentRuntime {
         current_turn.completed_at = Some(Utc::now());
     }
 
-    /// Record an audit event if an audit logger is configured.
-    ///
-    /// Writes to both the legacy file-based `AuditLogger` and the new
-    /// `AuditSink` (SQLite-backed). No-op when neither is configured.
-    /// Errors are logged but never block the agent loop.
     /// Record an audit event without a session context.
     ///
     /// Used for daemon-level and channel-level events that occur
-    /// outside of a specific session.
+    /// outside of a specific session. No-op when no `AuditSink` is configured.
+    /// Errors are logged but never block the agent loop.
     async fn audit_no_session(&self, event: AuditEventType) {
-        // Legacy file-based audit logger — use a synthetic session ID
-        if let Some(audit) = &self.audit {
-            if let Err(e) = audit.record("_system", event.clone()).await {
-                tracing::error!(
-                    error = %e,
-                    "audit logging failed — security events may not be recorded"
-                );
-            }
-        }
-
-        // New SQLite-backed audit sink
         if let Some(sink) = &self.audit_sink {
             let event_value = match serde_json::to_value(&event) {
                 Ok(v) => v,
@@ -1692,20 +1674,7 @@ impl AgentRuntime {
     }
 
     async fn audit(&self, session_id: &SessionId, event: AuditEventType) {
-        // Legacy file-based audit logger
-        if let Some(audit) = &self.audit {
-            if let Err(e) = audit.record(session_id.as_str(), event.clone()).await {
-                tracing::error!(
-                    error = %e,
-                    %session_id,
-                    "audit logging failed — security events may not be recorded"
-                );
-            }
-        }
-
-        // New SQLite-backed audit sink
         if let Some(sink) = &self.audit_sink {
-            // Serialize to Value once, extract the serde "type" tag, then stringify.
             let event_value = match serde_json::to_value(&event) {
                 Ok(v) => v,
                 Err(e) => {
@@ -1917,7 +1886,7 @@ impl AgentRuntime {
                 event_stream,
                 sender_id,
                 session_id,
-                self.audit.as_ref(),
+                self.audit_sink.as_deref(),
                 outbound,
             )
             .await
@@ -2061,7 +2030,7 @@ impl AgentRuntime {
         >,
         sender_id: &str,
         session_id: &SessionId,
-        audit: Option<&AuditLogger>,
+        audit_sink: Option<&dyn AuditSink>,
         outbound: &mpsc::Sender<OutboundEvent>,
     ) -> Option<(StreamAccumulator, StopReason, TokenUsage)> {
         let mut accumulator = StreamAccumulator::new();
@@ -2088,7 +2057,7 @@ impl AgentRuntime {
                 Ok(StreamEvent::Error(e)) => {
                     tracing::error!(error = %e, "stream error mid-response");
                     Self::audit_stream_error(
-                        audit,
+                        audit_sink,
                         session_id,
                         "stream_error",
                         &format!("mid-stream error: {e}"),
@@ -2100,7 +2069,7 @@ impl AgentRuntime {
                 Err(e) => {
                     tracing::error!(error = %e, "provider error during streaming");
                     Self::audit_stream_error(
-                        audit,
+                        audit_sink,
                         session_id,
                         "stream_provider_error",
                         &format!("provider error during streaming: {e}"),
@@ -2124,22 +2093,27 @@ impl AgentRuntime {
 
     /// Record an audit event for a stream error.
     async fn audit_stream_error(
-        audit: Option<&AuditLogger>,
+        audit_sink: Option<&dyn AuditSink>,
         session_id: &SessionId,
         rule: &str,
         context: &str,
     ) {
-        if let Some(a) = audit {
-            let _ = a
-                .record(
-                    session_id.as_str(),
-                    AuditEventType::PolicyViolation {
-                        rule: rule.into(),
-                        context: context.into(),
-                        severity: Severity::Medium,
-                    },
-                )
-                .await;
+        if let Some(sink) = audit_sink {
+            let event = AuditEventType::PolicyViolation {
+                rule: rule.into(),
+                context: context.into(),
+                severity: Severity::Medium,
+            };
+            if let Ok(event_value) = serde_json::to_value(&event) {
+                let event_type = event_value
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let event_json = event_value.to_string();
+                let _ = sink
+                    .record(Some(session_id.as_str()), event_type, &event_json)
+                    .await;
+            }
         }
     }
 
@@ -2348,7 +2322,6 @@ mod tests {
             },
             BudgetConfig::default(),
             24, // default_session_ttl_hours
-            None,
             None,
             None,
         )
