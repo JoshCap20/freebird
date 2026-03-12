@@ -668,6 +668,13 @@ mod tests {
             warning.context_label(),
             "security warning (injection_input)"
         );
+
+        let budget = ApprovalCategory::BudgetExceeded {
+            resource: "tokens_per_request".into(),
+            used: 36000,
+            limit: 32768,
+        };
+        assert_eq!(budget.context_label(), "budget `tokens_per_request`");
     }
 
     // ── Cleanup and edge cases ─────────────────────────────────────
