@@ -329,17 +329,17 @@ impl RateLimiter {
     ///
     /// Returns `SecurityError::InvalidSessionKey` if the rate limit is exceeded.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned (indicates a prior panic in
-    /// another thread holding the lock).
     #[must_use = "rate limit check result must not be silently discarded"]
     pub fn check_rate_limit(&self, key_id: &str) -> Result<(), SecurityError> {
         let now = Instant::now();
         // Lock scope is nanosecond-scale — no `.await` inside.
-        #[allow(clippy::unwrap_used)]
-        // Mutex::lock only fails if poisoned (panic in another thread).
-        let attempts = self.attempts.lock().unwrap();
+        // std::sync::Mutex is acceptable per CLAUDE.md §20 (nanosecond-held, no .await).
+        let attempts = self
+            .attempts
+            .lock()
+            .map_err(|_| SecurityError::InvalidCredential {
+                reason: "rate limiter internal error".into(),
+            })?;
         if let Some(timestamps) = attempts.get(key_id) {
             let recent_count = timestamps
                 .iter()
@@ -359,14 +359,14 @@ impl RateLimiter {
     ///
     /// Also prunes expired entries for this `key_id` to prevent unbounded growth.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned.
     pub fn record_attempt(&self, key_id: &str) {
         let now = Instant::now();
         // Lock scope is nanosecond-scale — no `.await` inside.
-        #[allow(clippy::unwrap_used)]
-        let mut attempts = self.attempts.lock().unwrap();
+        // std::sync::Mutex is acceptable per CLAUDE.md §20 (nanosecond-held, no .await).
+        let Ok(mut attempts) = self.attempts.lock() else {
+            tracing::error!("rate limiter mutex poisoned — skipping attempt recording");
+            return;
+        };
         let entry = attempts.entry(key_id.to_owned()).or_default();
         // Prune expired entries
         entry.retain(|&t| now.duration_since(t) < self.window);
