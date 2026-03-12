@@ -104,6 +104,7 @@ impl SqliteDb {
         let migrations: &[(i64, &str)] = &[
             (1, include_str!("migrations/001_initial.sql")),
             (2, include_str!("migrations/002_event_store.sql")),
+            (3, include_str!("migrations/003_drop_conversations.sql")),
         ];
 
         for &(version, sql) in migrations {
@@ -160,12 +161,15 @@ mod tests {
     async fn test_migration_creates_tables() {
         let (_dir, db) = test_db();
         let conn = db.conn().await;
+        // conversations table dropped by migration 003
         let count: i64 = conn
-            .query_row("SELECT count(*) FROM conversations", [], |row| row.get(0))
+            .query_row("SELECT count(*) FROM knowledge", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 0);
         let count: i64 = conn
-            .query_row("SELECT count(*) FROM knowledge", [], |row| row.get(0))
+            .query_row("SELECT count(*) FROM conversation_events", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(count, 0);
     }
@@ -179,7 +183,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     fn test_signing_key() -> ring::hmac::Key {

@@ -32,7 +32,6 @@ use freebird_security::secret_guard::SecretGuard;
 use freebird_types::config::AppConfig;
 
 mod chat;
-mod migrate;
 mod providers;
 mod tools;
 mod ui;
@@ -115,42 +114,6 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         Some(std::sync::Arc::new(
             freebird_memory::sqlite_audit::SqliteAuditSink::new(std::sync::Arc::clone(&db)),
         ));
-
-    // 6b. MIGRATION — one-time FileMemory → SQLite migration
-    if let Some(legacy_dir) = home::home_dir().map(|h| h.join(".freebird/conversations")) {
-        if legacy_dir.is_dir() {
-            let report = migrate::migrate_file_conversations(&db, &legacy_dir)
-                .await
-                .context("FileMemory migration failed")?;
-            if report.migrated > 0 {
-                tracing::info!(
-                    migrated = report.migrated,
-                    skipped = report.skipped,
-                    "FileMemory → SQLite migration complete"
-                );
-            }
-            if !report.failed.is_empty() {
-                tracing::warn!(
-                    failed_count = report.failed.len(),
-                    failed_files = ?report.failed,
-                    "FileMemory migration had failures; originals remain in legacy directory"
-                );
-            }
-        }
-    }
-
-    // 6c. MIGRATION — one-time blob → event-sourced migration
-    {
-        let report = migrate::migrate_blob_to_events(&db)
-            .await
-            .context("blob-to-event migration failed")?;
-        if report.migrated > 0 {
-            tracing::info!(
-                migrated = report.migrated,
-                "blob → event-sourced migration complete"
-            );
-        }
-    }
 
     // 7. TOOLS — build registry before moving config.tools
     let tool_registry =
