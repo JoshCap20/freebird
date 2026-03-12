@@ -19,6 +19,16 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 
 // ── Category enum ─────────────────────────────────────────────────────
 
+/// Result of a consent check — distinguishes "no approval needed" from
+/// "user was prompted and approved".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsentOutcome {
+    /// Tool risk was below the configured threshold — no prompt was shown.
+    NotRequired,
+    /// User was prompted and explicitly approved the action.
+    Approved,
+}
+
 /// What kind of approval is being requested.
 ///
 /// Determines the metadata shown to the user and the UX treatment:
@@ -317,9 +327,9 @@ impl ApprovalGate {
         tool_info: &ToolInfo,
         action_summary: String,
         sender_id: &str,
-    ) -> Result<(), ApprovalError> {
+    ) -> Result<ConsentOutcome, ApprovalError> {
         if tool_info.risk_level < self.threshold {
-            return Ok(());
+            return Ok(ConsentOutcome::NotRequired);
         }
 
         let category = ApprovalCategory::Consent {
@@ -329,7 +339,9 @@ impl ApprovalGate {
             action_summary,
         };
 
-        self.request_approval(category, sender_id).await
+        self.request_approval(category, sender_id)
+            .await
+            .map(|()| ConsentOutcome::Approved)
     }
 
     /// Request approval for a budget limit exceeded event.
@@ -503,7 +515,7 @@ mod tests {
         let result = gate
             .check_consent(&tool, "reading /tmp/foo".into(), "test-sender")
             .await;
-        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), ConsentOutcome::NotRequired);
 
         // No request should have been sent.
         assert!(rx.try_recv().is_err());
@@ -539,7 +551,7 @@ mod tests {
         }
 
         let _ = gate.respond(&request.id, ApprovalResponse::Approved).await;
-        assert!(handle.await.unwrap().is_ok());
+        assert_eq!(handle.await.unwrap().unwrap(), ConsentOutcome::Approved);
     }
 
     #[tokio::test]
@@ -558,7 +570,7 @@ mod tests {
 
         let request = rx.recv().await.unwrap();
         let _ = gate.respond(&request.id, ApprovalResponse::Approved).await;
-        assert!(handle.await.unwrap().is_ok());
+        assert_eq!(handle.await.unwrap().unwrap(), ConsentOutcome::Approved);
     }
 
     #[tokio::test]
@@ -571,10 +583,11 @@ mod tests {
             ("shell", RiskLevel::High),
         ] {
             let tool = make_tool_info(name, risk);
-            assert!(
+            assert_eq!(
                 gate.check_consent(&tool, "action".into(), "test-sender")
                     .await
-                    .is_ok()
+                    .unwrap(),
+                ConsentOutcome::NotRequired,
             );
         }
 
@@ -599,7 +612,7 @@ mod tests {
 
         let req = rx.recv().await.unwrap();
         let _ = gate.respond(&req.id, ApprovalResponse::Approved).await;
-        assert!(handle.await.unwrap().is_ok());
+        assert_eq!(handle.await.unwrap().unwrap(), ConsentOutcome::Approved);
     }
 
     #[tokio::test]

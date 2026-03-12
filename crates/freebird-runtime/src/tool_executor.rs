@@ -520,9 +520,11 @@ impl ToolExecutor {
             .check_consent(tool_info, action_summary, sender_id)
             .await
         {
-            Ok(()) => {
-                self.audit_approval_granted(session_id, tool_name).await;
-                tracing::info!(tool = %tool_name, %session_id, "consent approved by user");
+            Ok(outcome) => {
+                if outcome == freebird_security::approval::ConsentOutcome::Approved {
+                    self.audit_approval_granted(session_id, tool_name).await;
+                    tracing::info!(tool = %tool_name, %session_id, "consent approved by user");
+                }
                 None
             }
             Err(ApprovalError::Denied { context, reason }) => {
