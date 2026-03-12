@@ -410,12 +410,12 @@ impl ToolExecutor {
                 self.audit_policy_violation(
                     session_id,
                     "tool_timeout",
-                    &format!("tool `{tool_name}` exceeded {timeout_ms}ms timeout",),
+                    &format!("tool `{tool_name}` exceeded {timeout_ms}ms timeout"),
                     Severity::Medium,
                 )
                 .await;
                 return ToolOutput {
-                    content: format!("Tool `{tool_name}` timed out after {timeout_ms}ms",),
+                    content: format!("Tool `{tool_name}` timed out after {timeout_ms}ms"),
                     outcome: ToolOutcome::Error,
                     metadata: None,
                 };
