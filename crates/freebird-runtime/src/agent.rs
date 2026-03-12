@@ -959,6 +959,16 @@ impl AgentRuntime {
 
         let mut messages = conversation_to_messages(conversation);
 
+        // Collapse stale tool outputs from older turns to free context space.
+        // Only affects the wire messages — persisted data retains full output.
+        if self.config.context.collapse_tool_outputs {
+            crate::observation::collapse_observations(
+                &mut messages,
+                conversation,
+                self.config.context.collapse_after_turns,
+            );
+        }
+
         // CLAUDE.md §14: scan loaded conversation history for context injection
         // before sending to provider. Filter out any messages containing injection
         // patterns to prevent memory poisoning attacks.
