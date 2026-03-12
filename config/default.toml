@@ -45,6 +45,7 @@ diff_context_lines = 3
 db_path = "~/.freebird/freebird.db"
 keyfile_path = "~/.freebird/db.key"
 # pbkdf2_iterations = 100000
+verify_on_load = true
 
 [knowledge]
 auto_retrieve = true

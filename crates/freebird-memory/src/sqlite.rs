@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use freebird_traits::memory::MemoryError;
+use ring::hmac;
 use secrecy::{ExposeSecret, SecretString};
 
 /// Shared encrypted `SQLite` database connection.
@@ -13,8 +14,12 @@ use secrecy::{ExposeSecret, SecretString};
 /// All access goes through the async mutex. Single connection is sufficient
 /// because `FreeBird` handles one user at a time. `SQLCipher` key is applied
 /// once at open time and is transparent for all subsequent operations.
+///
+/// The `signing_key` is used for HMAC chain integrity on conversation events
+/// and audit events.
 pub struct SqliteDb {
     conn: tokio::sync::Mutex<rusqlite::Connection>,
+    signing_key: hmac::Key,
 }
 
 impl std::fmt::Debug for SqliteDb {
@@ -38,7 +43,11 @@ impl SqliteDb {
     ///
     /// - `MemoryError::IntegrityViolation` if the key is wrong
     /// - `MemoryError::Io` if the database cannot be opened or migrated
-    pub fn open(path: &Path, key: &SecretString) -> Result<Self, MemoryError> {
+    pub fn open(
+        path: &Path,
+        key: &SecretString,
+        signing_key: hmac::Key,
+    ) -> Result<Self, MemoryError> {
         // Create parent directory if needed
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -71,6 +80,7 @@ impl SqliteDb {
 
         Ok(Self {
             conn: tokio::sync::Mutex::new(conn),
+            signing_key,
         })
     }
 
@@ -79,6 +89,12 @@ impl SqliteDb {
     /// Callers MUST NOT hold this lock across `.await` points.
     pub async fn conn(&self) -> tokio::sync::MutexGuard<'_, rusqlite::Connection> {
         self.conn.lock().await
+    }
+
+    /// The HMAC signing key for event and audit chain integrity.
+    #[must_use]
+    pub const fn signing_key(&self) -> &hmac::Key {
+        &self.signing_key
     }
 
     /// Run pending schema migrations.
@@ -126,7 +142,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let key = SecretString::from("a".repeat(64));
-        let db = SqliteDb::open(&db_path, &key).unwrap();
+        let signing_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"test-signing-key");
+        let db = SqliteDb::open(&db_path, &key, signing_key).unwrap();
         (dir, db)
     }
 
@@ -140,12 +157,15 @@ mod tests {
     async fn test_migration_creates_tables() {
         let (_dir, db) = test_db();
         let conn = db.conn().await;
+        // conversations table dropped by migration 003
         let count: i64 = conn
-            .query_row("SELECT count(*) FROM conversations", [], |row| row.get(0))
+            .query_row("SELECT count(*) FROM knowledge", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 0);
         let count: i64 = conn
-            .query_row("SELECT count(*) FROM knowledge", [], |row| row.get(0))
+            .query_row("SELECT count(*) FROM conversation_events", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(count, 0);
     }
@@ -162,6 +182,10 @@ mod tests {
         assert_eq!(version, 1);
     }
 
+    fn test_signing_key() -> ring::hmac::Key {
+        ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"test-signing-key")
+    }
+
     #[test]
     fn test_wrong_key_returns_integrity_violation() {
         let dir = tempfile::tempdir().unwrap();
@@ -169,11 +193,11 @@ mod tests {
         let key = SecretString::from("a".repeat(64));
 
         // Create DB with key, then drop
-        drop(SqliteDb::open(&db_path, &key).unwrap());
+        drop(SqliteDb::open(&db_path, &key, test_signing_key()).unwrap());
 
         // Try to open with wrong key
         let wrong_key = SecretString::from("b".repeat(64));
-        let result = SqliteDb::open(&db_path, &wrong_key);
+        let result = SqliteDb::open(&db_path, &wrong_key, test_signing_key());
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -188,8 +212,8 @@ mod tests {
         let key = SecretString::from("a".repeat(64));
 
         // Open twice — migrations should not fail on second open
-        drop(SqliteDb::open(&db_path, &key).unwrap());
-        drop(SqliteDb::open(&db_path, &key).unwrap());
+        drop(SqliteDb::open(&db_path, &key, test_signing_key()).unwrap());
+        drop(SqliteDb::open(&db_path, &key, test_signing_key()).unwrap());
     }
 
     #[tokio::test]
@@ -204,5 +228,49 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_migration_creates_event_tables() {
+        let (_dir, db) = test_db();
+        let conn = db.conn().await;
+
+        // conversation_events table exists
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM conversation_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+
+        // session_metadata table exists
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM session_metadata", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+
+        // audit_events table exists
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM audit_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+
+        // conversation_fts virtual table exists
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'conversation_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_signing_key_accessible() {
+        let (_dir, db) = test_db();
+        let _key = db.signing_key();
     }
 }

@@ -20,6 +20,8 @@ use figment::Figment;
 use figment::providers::{Env, Format, Toml};
 use tracing_subscriber::EnvFilter;
 
+use secrecy::ExposeSecret as _;
+
 use freebird_channels::tcp::TcpChannel;
 use freebird_memory::sqlite::SqliteDb;
 use freebird_memory::sqlite_knowledge::SqliteKnowledgeStore;
@@ -30,7 +32,6 @@ use freebird_security::secret_guard::SecretGuard;
 use freebird_types::config::AppConfig;
 
 mod chat;
-mod migrate;
 mod providers;
 mod tools;
 mod ui;
@@ -104,28 +105,15 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
     // 6. MEMORY — SQLite with SQLCipher encryption
     let (memory, knowledge_store, db, db_salt) = init_sqlite(&config)?;
 
-    // 6b. MIGRATION — one-time FileMemory → SQLite migration
-    if let Some(legacy_dir) = home::home_dir().map(|h| h.join(".freebird/conversations")) {
-        if legacy_dir.is_dir() {
-            let report = migrate::migrate_file_conversations(&db, &legacy_dir)
-                .await
-                .context("FileMemory migration failed")?;
-            if report.migrated > 0 {
-                tracing::info!(
-                    migrated = report.migrated,
-                    skipped = report.skipped,
-                    "FileMemory → SQLite migration complete"
-                );
-            }
-            if !report.failed.is_empty() {
-                tracing::warn!(
-                    failed_count = report.failed.len(),
-                    failed_files = ?report.failed,
-                    "FileMemory migration had failures; originals remain in legacy directory"
-                );
-            }
-        }
-    }
+    // 6a. EVENT SINK + AUDIT SINK — event-sourced persistence into the same SQLite DB
+    let event_sink: Option<std::sync::Arc<dyn freebird_traits::event::EventSink>> =
+        Some(std::sync::Arc::new(
+            freebird_memory::sqlite_event::SqliteEventSink::new(std::sync::Arc::clone(&db)),
+        ));
+    let audit_sink: Option<std::sync::Arc<dyn freebird_traits::audit::AuditSink>> =
+        Some(std::sync::Arc::new(
+            freebird_memory::sqlite_audit::SqliteAuditSink::new(std::sync::Arc::clone(&db)),
+        ));
 
     // 7. TOOLS — build registry before moving config.tools
     let tool_registry =
@@ -252,6 +240,8 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         tools_config,
         config.security.budgets,
         audit_logger,
+        event_sink,
+        audit_sink,
     );
 
     // 14. RUN
@@ -392,12 +382,25 @@ fn init_sqlite(config: &AppConfig) -> Result<SqliteComponents> {
     let key =
         freebird_security::db_key::derive_key(&passphrase, &salt, config.memory.pbkdf2_iterations);
 
-    let db = SqliteDb::open(&db_path, &key).context("failed to open encrypted database")?;
+    // Derive HMAC signing key from passphrase + salt for event and audit chain integrity.
+    // Uses HMAC-SHA256 with the passphrase as key and a domain-separated salt as message,
+    // ensuring the signing key cannot be reconstructed without the secret passphrase.
+    let signing_tag = ring::hmac::sign(
+        &ring::hmac::Key::new(
+            ring::hmac::HMAC_SHA256,
+            passphrase.expose_secret().as_bytes(),
+        ),
+        format!("freebird-event-signing|{}", hex::encode(&salt)).as_bytes(),
+    );
+    let signing_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, signing_tag.as_ref());
+
+    let db =
+        SqliteDb::open(&db_path, &key, signing_key).context("failed to open encrypted database")?;
     let db = Arc::new(db);
 
     tracing::info!(path = %db_path.display(), "encrypted database opened");
 
-    let memory = SqliteMemory::new(Arc::clone(&db));
+    let memory = SqliteMemory::new(Arc::clone(&db), config.memory.verify_on_load);
     let knowledge: Arc<dyn freebird_traits::knowledge::KnowledgeStore> =
         Arc::new(SqliteKnowledgeStore::new(Arc::clone(&db)));
 

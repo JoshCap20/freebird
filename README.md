@@ -44,11 +44,11 @@ All filesystem operations go through `SafeFilePath`, which canonicalizes paths, 
 
 ### Tamper-Evident Audit Logging
 
-Every action — user messages, tool invocations, approval decisions, pairing events — is recorded in a hash-chained audit log. Each entry includes the SHA-256 hash of the previous entry. If a single log line is altered or removed, the chain breaks and the tampering is detected on the next verification pass.
+Every security-relevant action — tool invocations, approval decisions, injection detections, session creation, pairing events — is recorded in an HMAC-chained audit log stored in the encrypted database. Each entry's HMAC covers the previous entry's HMAC, forming a global tamper-evident chain. If a single entry is altered or removed, the chain breaks and `verify_chain()` detects it.
 
 ### Memory Integrity
 
-Persisted conversations are HMAC-signed. On every load, the signature is verified. Tampered conversation files are quarantined automatically — they never reach the LLM context. This defends against the memory poisoning attacks described in OWASP ASI-06.
+Conversations are persisted as immutable event logs with per-session HMAC chains. Each event's HMAC covers the session ID, sequence number, event data, timestamp, and the previous event's HMAC — forming a tamper-evident chain. On every load, the full chain is verified and tampered sessions are rejected before they reach the LLM context. This defends against the memory poisoning attacks described in OWASP ASI-06.
 
 ### Encrypted Database Storage
 
@@ -90,7 +90,7 @@ Outbound HTTP is deny-by-default. Only explicitly allowlisted hosts are reachabl
 | Tool output | Untrusted | `ScannedToolOutput`, injection scanning, sandbox |
 | Filesystem | Trusted-but-sandboxed | `SafeFilePath`, directory boundary enforcement |
 | Network | Hostile | Egress allowlist, DNS rebinding prevention, HTTPS only |
-| Stored data | Integrity-critical | SQLCipher encryption, HMAC signing |
+| Stored data | Integrity-critical | SQLCipher encryption, per-session HMAC event chains, global HMAC audit chain |
 | Channel peers | Local-only (TCP); pairing planned for remote channels | Local binding, pairing primitives available |
 
 ## Architecture
@@ -98,14 +98,14 @@ Outbound HTTP is deny-by-default. Only explicitly allowlisted hosts are reachabl
 Freebird is structured as a Rust workspace with strict crate boundaries:
 
 ```
-freebird-traits      Zero-dependency trait definitions (Provider, Channel, Tool, Memory, KnowledgeStore)
+freebird-traits      Zero-dependency trait definitions (Provider, Channel, Tool, Memory, KnowledgeStore, EventSink, AuditSink)
 freebird-types       Shared message types and domain objects
 freebird-security    Taint, safe types, capabilities, approval gates, secret guard, injection, audit, budgets, egress, auth
-freebird-runtime     Agent loop, session management, tool execution, token budgets
+freebird-runtime     Agent loop, session management, tool execution, event emission, audit integration
 freebird-providers   LLM integrations (Anthropic with streaming + tool use)
 freebird-channels    Transport integrations (TCP channel with JSON-line protocol)
 freebird-tools       Built-in tool implementations
-freebird-memory      SQLCipher-encrypted conversation + knowledge persistence with FTS5
+freebird-memory      SQLCipher-encrypted event-sourced conversations, knowledge store, audit sink (all FTS5-indexed)
 freebird-daemon      Binary entry point, config, lifecycle, TUI chat client
 ```
 
@@ -128,9 +128,22 @@ freebird-daemon      Binary entry point, config, lifecycle, TUI chat client
 
 Dependencies flow in one direction. `freebird-traits` and `freebird-types` depend on nothing internal. Security primitives live in `freebird-security` and are used everywhere — they aren't an afterthought bolted onto the runtime.
 
+### Event-Sourced Conversation Persistence
+
+Conversations are persisted as immutable event logs rather than mutable JSON blobs. Every action in the agentic loop — user message, assistant response, tool invocation, turn completion — is appended as a `ConversationEvent` to the encrypted database immediately as it occurs. This provides:
+
+- **Sub-turn crash recovery**: If the daemon crashes mid-turn, the partial state is recoverable by replaying the event log up to the last committed event
+- **Per-session HMAC chains**: Each event's HMAC covers the previous event's HMAC, forming a tamper-evident chain per session. On load, the entire chain is verified — a single tampered row causes the session to be rejected with `IntegrityViolation`
+- **Denormalized metadata**: Session listing and search operate against a `session_metadata` table maintained by triggers, avoiding full event replay for common operations
+- **FTS5 conversation search**: Event data is indexed via FTS5 triggers with porter stemmer tokenization, and search queries are escaped to prevent FTS5 syntax injection
+
+### Security Audit Sink
+
+Security audit events (tool executions, approval decisions, injection detections, session creation) are persisted to a separate `audit_events` table in the same encrypted database. The audit log uses a **global HMAC chain** (not per-session) — every event links to the previous via HMAC, making the entire audit trail tamper-evident and verifiable via `AuditSink::verify_chain()`.
+
 ## Status
 
-The core system is functional: daemon with TCP channel, Anthropic provider (streaming + tool use), 16 built-in tools, and all security layers described above are wired and enforced. Persistent storage uses SQLCipher-encrypted SQLite with FTS5 knowledge search.
+The core system is functional: daemon with TCP channel, Anthropic provider (streaming + tool use), 16 built-in tools, and all security layers described above are wired and enforced. Persistent storage uses SQLCipher-encrypted SQLite with event-sourced conversations, FTS5 search for both knowledge and conversations, and HMAC-chained audit logging.
 
 **Remaining gaps**: Session auth uses a default permissive capability grant (all capabilities scoped to sandbox). Channel pairing primitives exist but aren't enforced on the TCP channel (local-only). Multi-channel routing is stubbed pending additional transports.
 

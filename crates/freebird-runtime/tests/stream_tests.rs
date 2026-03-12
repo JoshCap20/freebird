@@ -512,6 +512,8 @@ fn make_stream_runtime(
         default_tools_config(),
         BudgetConfig::default(),
         None,
+        None,
+        None,
     )
 }
 
@@ -688,6 +690,8 @@ async fn test_streaming_fallback_on_stream_setup_failure() {
         default_tools_config(),
         BudgetConfig::default(),
         None,
+        None,
+        None,
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -723,6 +727,8 @@ async fn test_non_streaming_channel_uses_non_streaming_path() {
         },
         default_tools_config(),
         BudgetConfig::default(),
+        None,
+        None,
         None,
     );
 
@@ -811,6 +817,8 @@ async fn test_streaming_conversation_persisted() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
+        None,
+        None,
         None,
     );
 
@@ -974,6 +982,8 @@ async fn test_streaming_max_tool_rounds_exceeded() {
             ..BudgetConfig::default()
         },
         None,
+        None,
+        None,
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Loop forever").await;
@@ -1018,6 +1028,8 @@ async fn test_streaming_stop_sequence() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
+        None,
+        None,
         None,
     );
 
@@ -1111,6 +1123,8 @@ async fn test_non_streaming_provider_uses_complete_path() {
         default_tools_config(),
         BudgetConfig::default(),
         None,
+        None,
+        None,
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -1153,6 +1167,8 @@ async fn test_streaming_empty_done() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
+        None,
+        None,
         None,
     );
 

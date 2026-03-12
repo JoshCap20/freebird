@@ -176,10 +176,21 @@ pub struct MemoryConfig {
     /// PBKDF2 iteration count for key derivation. Default: 100,000.
     #[serde(default = "default_pbkdf2_iterations")]
     pub pbkdf2_iterations: u32,
+    /// Verify HMAC chain integrity when loading conversations. Default: true.
+    ///
+    /// When enabled, every `Memory::load()` call verifies the per-session HMAC
+    /// chain before replaying events. Tampered or corrupted events produce
+    /// `MemoryError::IntegrityViolation`. Disable only for recovery/debugging.
+    #[serde(default = "default_verify_on_load")]
+    pub verify_on_load: bool,
 }
 
 const fn default_pbkdf2_iterations() -> u32 {
     100_000
+}
+
+const fn default_verify_on_load() -> bool {
+    true
 }
 
 /// Knowledge retrieval behavior configuration.

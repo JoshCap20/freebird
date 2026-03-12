@@ -78,6 +78,8 @@ fn make_runtime(channel: MockChannel) -> AgentRuntime {
         },
         BudgetConfig::default(),
         None,
+        None,
+        None,
     )
 }
 
