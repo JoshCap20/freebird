@@ -20,6 +20,8 @@ use figment::Figment;
 use figment::providers::{Env, Format, Toml};
 use tracing_subscriber::EnvFilter;
 
+use secrecy::ExposeSecret as _;
+
 use freebird_channels::tcp::TcpChannel;
 use freebird_memory::sqlite::SqliteDb;
 use freebird_memory::sqlite_knowledge::SqliteKnowledgeStore;
@@ -417,10 +419,17 @@ fn init_sqlite(config: &AppConfig) -> Result<SqliteComponents> {
     let key =
         freebird_security::db_key::derive_key(&passphrase, &salt, config.memory.pbkdf2_iterations);
 
-    // Derive HMAC signing key from salt for event and audit chain integrity.
-    let signing_key_material = format!("freebird-audit-{}", hex::encode(&salt));
-    let signing_key =
-        ring::hmac::Key::new(ring::hmac::HMAC_SHA256, signing_key_material.as_bytes());
+    // Derive HMAC signing key from passphrase + salt for event and audit chain integrity.
+    // Uses HMAC-SHA256 with the passphrase as key and a domain-separated salt as message,
+    // ensuring the signing key cannot be reconstructed without the secret passphrase.
+    let signing_tag = ring::hmac::sign(
+        &ring::hmac::Key::new(
+            ring::hmac::HMAC_SHA256,
+            passphrase.expose_secret().as_bytes(),
+        ),
+        format!("freebird-event-signing|{}", hex::encode(&salt)).as_bytes(),
+    );
+    let signing_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, signing_tag.as_ref());
 
     let db =
         SqliteDb::open(&db_path, &key, signing_key).context("failed to open encrypted database")?;
