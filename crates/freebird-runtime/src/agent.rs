@@ -1655,48 +1655,13 @@ impl AgentRuntime {
     /// Errors are logged but never block the agent loop.
     async fn audit_no_session(&self, event: AuditEventType) {
         if let Some(sink) = &self.audit_sink {
-            let event_value = match serde_json::to_value(&event) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to serialize audit event");
-                    return;
-                }
-            };
-            let event_type = event_value
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let event_json = event_value.to_string();
-            if let Err(e) = sink.record(None, event_type, &event_json).await {
-                tracing::error!(error = %e, "audit sink recording failed");
-            }
+            emit_audit(sink.as_ref(), None, event).await;
         }
     }
 
     async fn audit(&self, session_id: &SessionId, event: AuditEventType) {
         if let Some(sink) = &self.audit_sink {
-            let event_value = match serde_json::to_value(&event) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to serialize audit event");
-                    return;
-                }
-            };
-            let event_type = event_value
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let event_json = event_value.to_string();
-            if let Err(e) = sink
-                .record(Some(session_id.as_str()), event_type, &event_json)
-                .await
-            {
-                tracing::error!(
-                    error = %e,
-                    %session_id,
-                    "audit sink recording failed"
-                );
-            }
+            emit_audit(sink.as_ref(), Some(session_id.as_str()), event).await;
         }
     }
 
@@ -2104,16 +2069,7 @@ impl AgentRuntime {
                 context: context.into(),
                 severity: Severity::Medium,
             };
-            if let Ok(event_value) = serde_json::to_value(&event) {
-                let event_type = event_value
-                    .get("type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                let event_json = event_value.to_string();
-                let _ = sink
-                    .record(Some(session_id.as_str()), event_type, &event_json)
-                    .await;
-            }
+            emit_audit(sink, Some(session_id.as_str()), event).await;
         }
     }
 
@@ -2153,6 +2109,29 @@ async fn send_stream_error(outbound: &mpsc::Sender<OutboundEvent>, sender_id: &s
         },
     )
     .await;
+}
+
+/// Serialize and record an audit event via an [`AuditSink`].
+///
+/// Extracts the serde `"type"` tag from the serialized [`AuditEventType`]
+/// for the `event_type` column, then records the full JSON. Errors are
+/// logged but never propagated — audit must not block the agent loop.
+pub async fn emit_audit(sink: &dyn AuditSink, session_id: Option<&str>, event: AuditEventType) {
+    let event_value = match serde_json::to_value(&event) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to serialize audit event — event lost");
+            return;
+        }
+    };
+    let event_type = event_value
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let event_json = event_value.to_string();
+    if let Err(e) = sink.record(session_id, event_type, &event_json).await {
+        tracing::error!(error = %e, "audit sink recording failed");
+    }
 }
 
 /// Join all `ContentBlock::Text` blocks in a message.

@@ -255,28 +255,13 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
 
 /// Emit an audit event to the sink, handling serialization errors gracefully.
 ///
-/// Logs a warning on failure rather than propagating — audit emission is
-/// non-fatal (availability over consistency for daemon lifecycle events).
+/// Delegates to the shared `emit_audit` helper in `freebird-runtime`.
 async fn emit_audit_event(
     sink: &dyn freebird_traits::audit::AuditSink,
     session_id: Option<&str>,
     event: &freebird_security::audit::AuditEventType,
 ) {
-    let event_json = match serde_json::to_string(event) {
-        Ok(json) => json,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to serialize audit event — event lost");
-            return;
-        }
-    };
-    // Extract the serde tag discriminator from the already-serialized JSON.
-    let event_type = serde_json::from_str::<serde_json::Value>(&event_json)
-        .ok()
-        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(String::from))
-        .unwrap_or_else(|| "unknown".to_owned());
-    if let Err(e) = sink.record(session_id, &event_type, &event_json).await {
-        tracing::warn!(error = %e, %event_type, "failed to record audit event");
-    }
+    freebird_runtime::agent::emit_audit(sink, session_id, event.clone()).await;
 }
 
 /// `freebird chat` — interactive client that connects to the daemon.

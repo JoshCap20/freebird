@@ -439,24 +439,7 @@ impl ToolExecutor {
     /// every call site is a single line.
     async fn audit_log(&self, session_id: &SessionId, event: AuditEventType) {
         if let Some(sink) = &self.audit_sink {
-            let event_value = match serde_json::to_value(&event) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to serialize audit event");
-                    return;
-                }
-            };
-            let event_type = event_value
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let event_json = event_value.to_string();
-            if let Err(e) = sink
-                .record(Some(session_id.as_str()), event_type, &event_json)
-                .await
-            {
-                tracing::warn!(error = %e, "audit log failed");
-            }
+            crate::agent::emit_audit(sink.as_ref(), Some(session_id.as_str()), event).await;
         }
     }
 
