@@ -148,7 +148,7 @@ impl FreebirdBuilder {
                     tools_config.sandbox_root.display()
                 )
             })
-            .map_err(CoreError::Database)?;
+            .map_err(|e| CoreError::Config(e.to_string()))?;
         util::merge_allow_dirs(&mut tools_config, self.extra_allow_dirs)
             .map_err(|e| CoreError::Config(e.to_string()))?;
 
