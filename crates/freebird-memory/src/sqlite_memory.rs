@@ -8,18 +8,16 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use chrono::Utc;
-use freebird_traits::event::ConversationEvent;
-use freebird_traits::id::{ModelId, SessionId};
-use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary};
-use freebird_traits::provider::ContentBlock;
-
 use crate::event::{
     StoredEvent, compute_event_hmac, replay_events_to_conversation, verify_event_chain,
 };
 use crate::helpers::rusqlite_to_io;
 use crate::sqlite::SqliteDb;
+use async_trait::async_trait;
+use chrono::Utc;
+use freebird_traits::event::ConversationEvent;
+use freebird_traits::id::{ModelId, SessionId};
+use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary};
 
 /// `SQLite`-backed memory backend.
 ///
@@ -284,11 +282,7 @@ fn upsert_session_metadata(
     let preview = conv
         .turns
         .first()
-        .and_then(|t| t.user_message.content.first())
-        .map(|block| match block {
-            ContentBlock::Text { text } => text.chars().take(100).collect(),
-            _ => String::new(),
-        })
+        .map(|t| crate::helpers::extract_message_preview(&t.user_message))
         .unwrap_or_default();
 
     #[allow(clippy::cast_possible_wrap)]

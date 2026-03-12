@@ -10,6 +10,21 @@ pub fn rusqlite_to_io(context: &str, e: &rusqlite::Error) -> MemoryError {
     MemoryError::Io(std::io::Error::other(format!("{context}: {e}")))
 }
 
+/// Extract a preview string (up to 100 chars) from the first text block of a message.
+///
+/// Shared by `conversation_to_summary`, `upsert_session_metadata`, and
+/// `update_session_metadata` to avoid duplicating the truncation logic.
+pub fn extract_message_preview(message: &Message) -> String {
+    message
+        .content
+        .first()
+        .and_then(|block| match block {
+            ContentBlock::Text { text } => Some(text.chars().take(100).collect()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 /// Build a [`SessionSummary`] from a [`Conversation`].
 ///
 /// Extracts a preview from the first user message (up to 100 chars).
@@ -17,11 +32,7 @@ pub fn conversation_to_summary(conv: &Conversation) -> SessionSummary {
     let preview = conv
         .turns
         .first()
-        .and_then(|t| t.user_message.content.first())
-        .map(|block| match block {
-            ContentBlock::Text { text } => text.chars().take(100).collect(),
-            _ => String::new(),
-        })
+        .map(|t| extract_message_preview(&t.user_message))
         .unwrap_or_default();
 
     SessionSummary {

@@ -3,8 +3,6 @@
 //! Provides functions to replay a sequence of [`ConversationEvent`]s into a
 //! [`Conversation`] struct, and to compute/verify HMAC chains on stored events.
 
-#![allow(clippy::significant_drop_tightening)]
-
 use chrono::{DateTime, Utc};
 use freebird_traits::event::ConversationEvent;
 use freebird_traits::id::{ModelId, ProviderId, SessionId};

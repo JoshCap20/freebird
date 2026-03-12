@@ -1258,39 +1258,20 @@ impl AgentRuntime {
                     )
                     .await;
 
-                    // Emit AssistantMessage for the intermediate response
-                    if current_turn.assistant_messages.len() > messages_before {
-                        if let Some(msg) = current_turn
-                            .assistant_messages
-                            .get(messages_before)
-                            .cloned()
-                        {
-                            self.emit_event(
-                                session_id,
-                                ConversationEvent::AssistantMessage {
-                                    turn_index,
-                                    message_index: messages_before,
-                                    message: msg,
-                                },
-                            )
-                            .await;
-                        }
-                    }
-
-                    // Emit ToolInvoked for each new tool invocation
-                    for idx in invocations_before..current_turn.tool_invocations.len() {
-                        if let Some(inv) = current_turn.tool_invocations.get(idx).cloned() {
-                            self.emit_event(
-                                session_id,
-                                ConversationEvent::ToolInvoked {
-                                    turn_index,
-                                    invocation_index: idx,
-                                    invocation: inv,
-                                },
-                            )
-                            .await;
-                        }
-                    }
+                    self.emit_new_assistant_message(
+                        session_id,
+                        &current_turn,
+                        turn_index,
+                        messages_before,
+                    )
+                    .await;
+                    self.emit_new_tool_invocations(
+                        session_id,
+                        &current_turn,
+                        turn_index,
+                        invocations_before,
+                    )
+                    .await;
                 }
                 StopReason::EndTurn | StopReason::StopSequence => {
                     let messages_before = current_turn.assistant_messages.len();
@@ -1304,34 +1285,15 @@ impl AgentRuntime {
                     )
                     .await;
 
-                    // Emit final AssistantMessage
-                    if current_turn.assistant_messages.len() > messages_before {
-                        if let Some(msg) = current_turn
-                            .assistant_messages
-                            .get(messages_before)
-                            .cloned()
-                        {
-                            self.emit_event(
-                                session_id,
-                                ConversationEvent::AssistantMessage {
-                                    turn_index,
-                                    message_index: messages_before,
-                                    message: msg,
-                                },
-                            )
-                            .await;
-                        }
-                    }
-
-                    // Emit TurnCompleted
-                    self.emit_event(
+                    self.emit_new_assistant_message(
                         session_id,
-                        ConversationEvent::TurnCompleted {
-                            turn_index,
-                            completed_at: current_turn.completed_at.unwrap_or_else(Utc::now),
-                        },
+                        &current_turn,
+                        turn_index,
+                        messages_before,
                     )
                     .await;
+                    self.emit_turn_completed(session_id, &current_turn, turn_index)
+                        .await;
 
                     return current_turn;
                 }
@@ -1347,34 +1309,15 @@ impl AgentRuntime {
                     )
                     .await;
 
-                    // Emit AssistantMessage for truncated response
-                    if current_turn.assistant_messages.len() > messages_before {
-                        if let Some(msg) = current_turn
-                            .assistant_messages
-                            .get(messages_before)
-                            .cloned()
-                        {
-                            self.emit_event(
-                                session_id,
-                                ConversationEvent::AssistantMessage {
-                                    turn_index,
-                                    message_index: messages_before,
-                                    message: msg,
-                                },
-                            )
-                            .await;
-                        }
-                    }
-
-                    // Emit TurnCompleted
-                    self.emit_event(
+                    self.emit_new_assistant_message(
                         session_id,
-                        ConversationEvent::TurnCompleted {
-                            turn_index,
-                            completed_at: current_turn.completed_at.unwrap_or_else(Utc::now),
-                        },
+                        &current_turn,
+                        turn_index,
+                        messages_before,
                     )
                     .await;
+                    self.emit_turn_completed(session_id, &current_turn, turn_index)
+                        .await;
 
                     return current_turn;
                 }
@@ -1384,15 +1327,8 @@ impl AgentRuntime {
         self.log_max_rounds_exceeded(session_id, &mut current_turn, sender_id, outbound)
             .await;
 
-        // Emit TurnCompleted for max-rounds-exceeded case
-        self.emit_event(
-            session_id,
-            ConversationEvent::TurnCompleted {
-                turn_index,
-                completed_at: current_turn.completed_at.unwrap_or_else(Utc::now),
-            },
-        )
-        .await;
+        self.emit_turn_completed(session_id, &current_turn, turn_index)
+            .await;
 
         current_turn
     }
@@ -1748,6 +1684,64 @@ impl AgentRuntime {
         }
     }
 
+    /// Emit an `AssistantMessage` event if a new message was appended to the turn.
+    async fn emit_new_assistant_message(
+        &self,
+        session_id: &SessionId,
+        turn: &Turn,
+        turn_index: usize,
+        messages_before: usize,
+    ) {
+        if turn.assistant_messages.len() > messages_before {
+            if let Some(msg) = turn.assistant_messages.get(messages_before).cloned() {
+                self.emit_event(
+                    session_id,
+                    ConversationEvent::AssistantMessage {
+                        turn_index,
+                        message_index: messages_before,
+                        message: msg,
+                    },
+                )
+                .await;
+            }
+        }
+    }
+
+    /// Emit `ToolInvoked` events for all new tool invocations since `start_index`.
+    async fn emit_new_tool_invocations(
+        &self,
+        session_id: &SessionId,
+        turn: &Turn,
+        turn_index: usize,
+        start_index: usize,
+    ) {
+        for idx in start_index..turn.tool_invocations.len() {
+            if let Some(inv) = turn.tool_invocations.get(idx).cloned() {
+                self.emit_event(
+                    session_id,
+                    ConversationEvent::ToolInvoked {
+                        turn_index,
+                        invocation_index: idx,
+                        invocation: inv,
+                    },
+                )
+                .await;
+            }
+        }
+    }
+
+    /// Emit a `TurnCompleted` event.
+    async fn emit_turn_completed(&self, session_id: &SessionId, turn: &Turn, turn_index: usize) {
+        self.emit_event(
+            session_id,
+            ConversationEvent::TurnCompleted {
+                turn_index,
+                completed_at: turn.completed_at.unwrap_or_else(Utc::now),
+            },
+        )
+        .await;
+    }
+
     /// Log and audit a model output injection detection.
     async fn audit_model_injection(&self, session_id: &SessionId) {
         tracing::warn!("injection detected in model output, blocking delivery");
@@ -1917,37 +1911,20 @@ impl AgentRuntime {
                     )
                     .await;
 
-                    // Emit events for streaming tool-use round
-                    if current_turn.assistant_messages.len() > messages_before {
-                        if let Some(msg) = current_turn
-                            .assistant_messages
-                            .get(messages_before)
-                            .cloned()
-                        {
-                            self.emit_event(
-                                session_id,
-                                ConversationEvent::AssistantMessage {
-                                    turn_index,
-                                    message_index: messages_before,
-                                    message: msg,
-                                },
-                            )
-                            .await;
-                        }
-                    }
-                    for idx in invocations_before..current_turn.tool_invocations.len() {
-                        if let Some(inv) = current_turn.tool_invocations.get(idx).cloned() {
-                            self.emit_event(
-                                session_id,
-                                ConversationEvent::ToolInvoked {
-                                    turn_index,
-                                    invocation_index: idx,
-                                    invocation: inv,
-                                },
-                            )
-                            .await;
-                        }
-                    }
+                    self.emit_new_assistant_message(
+                        session_id,
+                        &current_turn,
+                        turn_index,
+                        messages_before,
+                    )
+                    .await;
+                    self.emit_new_tool_invocations(
+                        session_id,
+                        &current_turn,
+                        turn_index,
+                        invocations_before,
+                    )
+                    .await;
                 }
                 StopReason::EndTurn | StopReason::StopSequence => {
                     let msg = accumulator.into_message();
@@ -1965,14 +1942,8 @@ impl AgentRuntime {
                         },
                     )
                     .await;
-                    self.emit_event(
-                        session_id,
-                        ConversationEvent::TurnCompleted {
-                            turn_index,
-                            completed_at: current_turn.completed_at.unwrap_or_else(Utc::now),
-                        },
-                    )
-                    .await;
+                    self.emit_turn_completed(session_id, &current_turn, turn_index)
+                        .await;
 
                     return current_turn;
                 }
@@ -2000,14 +1971,8 @@ impl AgentRuntime {
                         },
                     )
                     .await;
-                    self.emit_event(
-                        session_id,
-                        ConversationEvent::TurnCompleted {
-                            turn_index,
-                            completed_at: current_turn.completed_at.unwrap_or_else(Utc::now),
-                        },
-                    )
-                    .await;
+                    self.emit_turn_completed(session_id, &current_turn, turn_index)
+                        .await;
 
                     return current_turn;
                 }
@@ -2017,14 +1982,8 @@ impl AgentRuntime {
         self.log_max_rounds_exceeded(session_id, &mut current_turn, sender_id, outbound)
             .await;
 
-        self.emit_event(
-            session_id,
-            ConversationEvent::TurnCompleted {
-                turn_index,
-                completed_at: current_turn.completed_at.unwrap_or_else(Utc::now),
-            },
-        )
-        .await;
+        self.emit_turn_completed(session_id, &current_turn, turn_index)
+            .await;
 
         current_turn
     }

@@ -137,7 +137,7 @@ fn update_session_metadata(
         }
         ConversationEvent::TurnStarted { user_message, .. } => {
             // Extract preview from first user message
-            let preview = extract_preview(user_message);
+            let preview = extract_message_preview(user_message);
             conn.execute(
                 "UPDATE session_metadata \
                  SET turn_count = turn_count + 1, updated_at = ?2, \
@@ -162,20 +162,7 @@ fn update_session_metadata(
     Ok(())
 }
 
-/// Extract a preview string (up to 100 chars) from a message.
-fn extract_preview(message: &freebird_traits::provider::Message) -> String {
-    use freebird_traits::provider::ContentBlock;
-    message
-        .content
-        .first()
-        .and_then(|block| match block {
-            ContentBlock::Text { text } => Some(text.chars().take(100).collect()),
-            _ => None,
-        })
-        .unwrap_or_default()
-}
-
-use crate::helpers::{OptionalExt as _, rusqlite_to_io};
+use crate::helpers::{OptionalExt as _, extract_message_preview, rusqlite_to_io};
 
 #[cfg(test)]
 #[allow(
