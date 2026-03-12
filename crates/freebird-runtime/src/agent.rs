@@ -92,6 +92,9 @@ pub struct AgentRuntime {
     /// Token and tool-round budget limits (ASI08). Used to create a
     /// per-session `TokenBudget` when a new session starts.
     budget_config: BudgetConfig,
+    /// Default session TTL in hours. Used to set expiration on capability
+    /// grants when per-session auth is not yet wired up.
+    default_session_ttl_hours: u64,
     audit: Option<AuditLogger>,
     event_sink: Option<Arc<dyn EventSink>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
@@ -116,6 +119,7 @@ impl AgentRuntime {
         config: RuntimeConfig,
         tools_config: ToolsConfig,
         budget_config: BudgetConfig,
+        default_session_ttl_hours: u64,
         audit: Option<AuditLogger>,
         event_sink: Option<Arc<dyn EventSink>>,
         audit_sink: Option<Arc<dyn AuditSink>>,
@@ -131,6 +135,7 @@ impl AgentRuntime {
             config,
             tools_config,
             budget_config,
+            default_session_ttl_hours,
             audit,
             event_sink,
             audit_sink,
@@ -140,11 +145,19 @@ impl AgentRuntime {
 
     /// Create a default [`CapabilityGrant`] for a new session.
     ///
-    /// Grants all capabilities scoped to the configured sandbox root.
-    /// Returns `Err` if the sandbox root cannot be canonicalized.
+    /// Grants all capabilities scoped to the configured sandbox root with a
+    /// time-limited expiration based on `default_session_ttl_hours`. Logs a
+    /// warning because this is a permissive fallback — per-session auth
+    /// should scope grants from the authenticated credential.
     fn create_default_grant(
         &self,
     ) -> Result<CapabilityGrant, freebird_security::error::SecurityError> {
+        tracing::warn!(
+            ttl_hours = self.default_session_ttl_hours,
+            "using permissive default capability grant — per-session auth not yet wired"
+        );
+        let expires_at = Utc::now()
+            + chrono::Duration::hours(i64::try_from(self.default_session_ttl_hours).unwrap_or(24));
         CapabilityGrant::new(
             [
                 Capability::FileRead,
@@ -159,7 +172,7 @@ impl AgentRuntime {
             .into_iter()
             .collect(),
             self.tools_config.sandbox_root.clone(),
-            None,
+            Some(expires_at),
         )
     }
 
@@ -1037,6 +1050,7 @@ impl AgentRuntime {
             BudgetResource::ToolRoundsPerTurn => {
                 budget.set_max_tool_rounds_per_turn(u32::try_from(new_limit).unwrap_or(u32::MAX));
             }
+            BudgetResource::CostPerSession => budget.set_max_cost_microdollars(new_limit),
         }
     }
 
@@ -2284,6 +2298,7 @@ mod tests {
                 edit: EditConfig::default(),
             },
             BudgetConfig::default(),
+            24, // default_session_ttl_hours
             None,
             None,
             None,

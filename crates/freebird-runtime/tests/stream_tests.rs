@@ -511,6 +511,7 @@ fn make_stream_runtime(
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
+        24, // default_session_ttl_hours
         None,
         None,
         None,
@@ -689,6 +690,7 @@ async fn test_streaming_fallback_on_stream_setup_failure() {
         },
         default_tools_config(),
         BudgetConfig::default(),
+        24, // default_session_ttl_hours
         None,
         None,
         None,
@@ -727,6 +729,7 @@ async fn test_non_streaming_channel_uses_non_streaming_path() {
         },
         default_tools_config(),
         BudgetConfig::default(),
+        24, // default_session_ttl_hours
         None,
         None,
         None,
@@ -817,6 +820,7 @@ async fn test_streaming_conversation_persisted() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
+        24, // default_session_ttl_hours
         None,
         None,
         None,
@@ -981,6 +985,7 @@ async fn test_streaming_max_tool_rounds_exceeded() {
             max_tool_rounds_per_turn: 1,
             ..BudgetConfig::default()
         },
+        24, // default_session_ttl_hours
         None,
         None,
         None,
@@ -1028,6 +1033,7 @@ async fn test_streaming_stop_sequence() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
+        24, // default_session_ttl_hours
         None,
         None,
         None,
@@ -1122,6 +1128,7 @@ async fn test_non_streaming_provider_uses_complete_path() {
         },
         default_tools_config(),
         BudgetConfig::default(),
+        24, // default_session_ttl_hours
         None,
         None,
         None,
@@ -1167,6 +1174,7 @@ async fn test_streaming_empty_done() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
+        24, // default_session_ttl_hours
         None,
         None,
         None,

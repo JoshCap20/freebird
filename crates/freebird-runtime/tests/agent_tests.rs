@@ -77,6 +77,7 @@ fn make_runtime(channel: MockChannel) -> AgentRuntime {
             edit: EditConfig::default(),
         },
         BudgetConfig::default(),
+        24, // default_session_ttl_hours
         None,
         None,
         None,

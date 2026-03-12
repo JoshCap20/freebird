@@ -247,6 +247,14 @@ pub struct BudgetConfig {
     pub max_tokens_per_request: u64,
     /// Maximum tool rounds in a single agentic turn.
     pub max_tool_rounds_per_turn: u32,
+    /// Maximum cost per session in microdollars (1 microdollar = $0.000001).
+    /// Default: 5,000,000 = $5.00.
+    #[serde(default = "default_max_cost_microdollars")]
+    pub max_cost_microdollars: u64,
+}
+
+const fn default_max_cost_microdollars() -> u64 {
+    5_000_000 // $5.00
 }
 
 impl Default for BudgetConfig {
@@ -255,6 +263,7 @@ impl Default for BudgetConfig {
             max_tokens_per_session: 500_000,
             max_tokens_per_request: 32_768,
             max_tool_rounds_per_turn: 10,
+            max_cost_microdollars: default_max_cost_microdollars(),
         }
     }
 }
@@ -274,6 +283,10 @@ pub struct SecurityConfig {
     /// Prevents LLM flooding attacks. Default: 5.
     #[serde(default = "default_max_pending_consent")]
     pub max_pending_consent_requests: usize,
+    /// Default session TTL in hours. Sessions expire after this duration
+    /// unless a more specific TTL is provided. Default: 24 hours.
+    #[serde(default = "default_session_ttl_hours")]
+    pub default_session_ttl_hours: u64,
     /// Network egress policy. Controls which hosts the agent can contact.
     #[serde(default)]
     pub egress: EgressConfig,
@@ -445,6 +458,10 @@ const fn default_injection_tool_output_response() -> InjectionResponse {
 
 const fn default_injection_prompt_timeout_secs() -> u64 {
     60
+}
+
+const fn default_session_ttl_hours() -> u64 {
+    24
 }
 
 const fn default_consent_timeout_secs() -> u64 {

@@ -304,6 +304,7 @@ mod tests {
             max_tokens_per_session: 1000,
             max_tokens_per_request: 200,
             max_tool_rounds_per_turn: 3,
+            max_cost_microdollars: 5_000_000,
         };
         mgr.set_budget(&id, freebird_security::budget::TokenBudget::new(&config))
             .await;

@@ -239,6 +239,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         config.runtime,
         tools_config,
         config.security.budgets,
+        config.security.default_session_ttl_hours,
         audit_logger,
         event_sink,
         audit_sink,
@@ -380,7 +381,8 @@ fn init_sqlite(config: &AppConfig) -> Result<SqliteComponents> {
     .context("failed to resolve database encryption key")?;
 
     let key =
-        freebird_security::db_key::derive_key(&passphrase, &salt, config.memory.pbkdf2_iterations);
+        freebird_security::db_key::derive_key(&passphrase, &salt, config.memory.pbkdf2_iterations)
+            .context("failed to derive database encryption key")?;
 
     // Derive HMAC signing key from passphrase + salt for event and audit chain integrity.
     // Uses HMAC-SHA256 with the passphrase as key and a domain-separated salt as message,
