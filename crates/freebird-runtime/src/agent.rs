@@ -256,7 +256,7 @@ impl AgentRuntime {
                                 }) if has_approval_gate => {
                                     if let Some(ref resp) = approval_responder {
                                         let response = if let Some(ref action_str) = budget_action {
-                                            match parse_budget_action(action_str) {
+                                            match freebird_security::approval::BudgetOverrideAction::from_wire(action_str) {
                                                 Some(action) => freebird_security::approval::ApprovalResponse::BudgetOverride { action },
                                                 None if approved => {
                                                     tracing::warn!(budget_action = %action_str, "unrecognized budget_action, falling back to Approved");
@@ -1841,14 +1841,6 @@ impl AgentRuntime {
             self.audit_model_injection(session_id).await;
         }
     }
-}
-
-/// Parse a budget action string from the wire protocol into a typed action.
-///
-/// Delegates to [`BudgetOverrideAction::from_wire`] — the single source of
-/// truth for wire format parsing.
-fn parse_budget_action(s: &str) -> Option<freebird_security::approval::BudgetOverrideAction> {
-    freebird_security::approval::BudgetOverrideAction::from_wire(s)
 }
 
 /// Send an outbound event, ignoring channel-closed errors.
