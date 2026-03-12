@@ -310,6 +310,7 @@ mod tests {
                 granted_capabilities: &self.capabilities,
                 allowed_directories: &[],
                 knowledge_store: None,
+                memory: None,
             }
         }
     }
@@ -813,6 +814,7 @@ mod tests {
             granted_capabilities: &caps,
             allowed_directories: &[],
             knowledge_store: None,
+            memory: None,
         };
         let ctx2 = ToolContext {
             session_id: &sid,
@@ -820,6 +822,7 @@ mod tests {
             granted_capabilities: &caps,
             allowed_directories: &[],
             knowledge_store: None,
+            memory: None,
         };
 
         let (out1, out2) = tokio::join!(

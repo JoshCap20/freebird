@@ -102,6 +102,8 @@ pub struct ToolContext<'a> {
     pub allowed_directories: &'a [PathBuf],
     /// Knowledge store for knowledge tools. `None` if not configured.
     pub knowledge_store: Option<&'a dyn crate::knowledge::KnowledgeStore>,
+    /// Memory backend for session recall tools. `None` if not configured.
+    pub memory: Option<&'a dyn crate::memory::Memory>,
 }
 
 impl std::fmt::Debug for ToolContext<'_> {
@@ -112,6 +114,7 @@ impl std::fmt::Debug for ToolContext<'_> {
             .field("granted_capabilities", &self.granted_capabilities)
             .field("allowed_directories", &self.allowed_directories)
             .field("knowledge_store", &self.knowledge_store.is_some())
+            .field("memory", &self.memory.is_some())
             .finish()
     }
 }
