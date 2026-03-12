@@ -1,7 +1,14 @@
 //! Shared helper functions for memory backends.
 
-use freebird_traits::memory::{Conversation, SessionSummary};
+use freebird_traits::memory::{Conversation, MemoryError, SessionSummary};
 use freebird_traits::provider::{ContentBlock, Message};
+
+/// Convert a `rusqlite::Error` into a `MemoryError::Io` with context.
+///
+/// Shared by all SQLite-backed modules (`sqlite_memory`, `sqlite_event`, `sqlite_audit`).
+pub fn rusqlite_to_io(context: &str, e: &rusqlite::Error) -> MemoryError {
+    MemoryError::Io(std::io::Error::other(format!("{context}: {e}")))
+}
 
 /// Build a [`SessionSummary`] from a [`Conversation`].
 ///

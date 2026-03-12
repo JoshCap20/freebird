@@ -30,12 +30,7 @@ impl SqliteAuditSink {
     }
 }
 
-/// Convert a `rusqlite::Error` to `MemoryError::Io`.
-fn io_err(context: &str, e: &rusqlite::Error) -> MemoryError {
-    MemoryError::Io(std::io::Error::other(format!("{context}: {e}")))
-}
-
-use crate::helpers::OptionalExt as _;
+use crate::helpers::{OptionalExt as _, rusqlite_to_io};
 
 #[async_trait]
 impl AuditSink for SqliteAuditSink {
@@ -72,7 +67,7 @@ impl AuditSink for SqliteAuditSink {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![next_seq, sid, etype, ejson, timestamp, prev_hmac, hmac_hex],
         )
-        .map_err(|e| io_err("insert audit event", &e))?;
+        .map_err(|e| rusqlite_to_io("insert audit event", &e))?;
 
         Ok(())
     }
@@ -86,7 +81,7 @@ impl AuditSink for SqliteAuditSink {
                  timestamp, previous_hmac, hmac \
                  FROM audit_events ORDER BY sequence ASC",
             )
-            .map_err(|e| io_err("prepare verify", &e))?;
+            .map_err(|e| rusqlite_to_io("prepare verify", &e))?;
 
         let mut expected_previous = String::new();
 
@@ -102,10 +97,10 @@ impl AuditSink for SqliteAuditSink {
                     hmac: row.get(6)?,
                 })
             })
-            .map_err(|e| io_err("query audit events", &e))?;
+            .map_err(|e| rusqlite_to_io("query audit events", &e))?;
 
         for row_result in rows {
-            let row = row_result.map_err(|e| io_err("read audit row", &e))?;
+            let row = row_result.map_err(|e| rusqlite_to_io("read audit row", &e))?;
 
             if row.previous_hmac != expected_previous {
                 return Err(MemoryError::IntegrityViolation {
@@ -151,7 +146,7 @@ fn get_next_audit_sequence(conn: &rusqlite::Connection) -> Result<(i64, String),
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
-        .map_err(|e| io_err("query last audit event", &e))?;
+        .map_err(|e| rusqlite_to_io("query last audit event", &e))?;
 
     match result {
         Some((last_seq, last_hmac)) => Ok((last_seq + 1, last_hmac)),

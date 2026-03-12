@@ -69,7 +69,7 @@ impl EventSink for SqliteEventSink {
                 sid, next_seq, event_type, event_json, timestamp, prev_hmac, hmac_hex
             ],
         )
-        .map_err(|e| io_err("insert event", &e))?;
+        .map_err(|e| rusqlite_to_io("insert event", &e))?;
 
         // Update session metadata
         update_session_metadata(&conn, &sid, &event, &timestamp)?;
@@ -93,7 +93,7 @@ fn get_next_sequence_and_hmac(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
-        .map_err(|e| io_err("query last event", &e))?;
+        .map_err(|e| rusqlite_to_io("query last event", &e))?;
 
     match result {
         Some((last_seq, last_hmac)) => Ok((last_seq + 1, last_hmac)),
@@ -120,7 +120,7 @@ fn update_session_metadata(
                  VALUES (?1, ?2, ?3, ?4, ?5, ?5, 0, '')",
                 rusqlite::params![session_id, system_prompt, model_id, provider_id, timestamp],
             )
-            .map_err(|e| io_err("insert session metadata", &e))?;
+            .map_err(|e| rusqlite_to_io("insert session metadata", &e))?;
         }
         ConversationEvent::SessionMetadataUpdated {
             system_prompt,
@@ -133,7 +133,7 @@ fn update_session_metadata(
                  WHERE session_id = ?1",
                 rusqlite::params![session_id, system_prompt, model_id, provider_id, timestamp],
             )
-            .map_err(|e| io_err("update session metadata", &e))?;
+            .map_err(|e| rusqlite_to_io("update session metadata", &e))?;
         }
         ConversationEvent::TurnStarted { user_message, .. } => {
             // Extract preview from first user message
@@ -145,7 +145,7 @@ fn update_session_metadata(
                  WHERE session_id = ?1",
                 rusqlite::params![session_id, timestamp, preview],
             )
-            .map_err(|e| io_err("update turn count", &e))?;
+            .map_err(|e| rusqlite_to_io("update turn count", &e))?;
         }
         ConversationEvent::TurnCompleted { .. }
         | ConversationEvent::AssistantMessage { .. }
@@ -155,7 +155,7 @@ fn update_session_metadata(
                 "UPDATE session_metadata SET updated_at = ?2 WHERE session_id = ?1",
                 rusqlite::params![session_id, timestamp],
             )
-            .map_err(|e| io_err("update timestamp", &e))?;
+            .map_err(|e| rusqlite_to_io("update timestamp", &e))?;
         }
     }
 
@@ -175,12 +175,7 @@ fn extract_preview(message: &freebird_traits::provider::Message) -> String {
         .unwrap_or_default()
 }
 
-/// Convert a `rusqlite::Error` to `MemoryError::Io`.
-fn io_err(context: &str, e: &rusqlite::Error) -> MemoryError {
-    MemoryError::Io(std::io::Error::other(format!("{context}: {e}")))
-}
-
-use crate::helpers::OptionalExt as _;
+use crate::helpers::{OptionalExt as _, rusqlite_to_io};
 
 #[cfg(test)]
 #[allow(

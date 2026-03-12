@@ -14,12 +14,12 @@ use ring::hmac;
 /// A stored event row with chain integrity metadata.
 #[derive(Debug, Clone)]
 pub struct StoredEvent {
-    pub session_id: String,
-    pub sequence: i64,
-    pub event: ConversationEvent,
-    pub timestamp: DateTime<Utc>,
-    pub previous_hmac: String,
-    pub hmac: String,
+    pub(crate) session_id: String,
+    pub(crate) sequence: i64,
+    pub(crate) event: ConversationEvent,
+    pub(crate) timestamp: DateTime<Utc>,
+    pub(crate) previous_hmac: String,
+    pub(crate) hmac: String,
 }
 
 /// Replay a sequence of events into a [`Conversation`].
@@ -215,48 +215,6 @@ pub fn verify_event_chain(events: &[StoredEvent], key: &hmac::Key) -> Result<(),
     }
 
     Ok(())
-}
-
-/// Extract text content from a conversation event for FTS indexing.
-///
-/// Returns the text content of messages, tool names, or metadata —
-/// anything useful for full-text search.
-#[must_use]
-pub fn event_search_text(event: &ConversationEvent) -> String {
-    match event {
-        ConversationEvent::SessionCreated { system_prompt, .. }
-        | ConversationEvent::SessionMetadataUpdated { system_prompt, .. } => {
-            system_prompt.as_deref().unwrap_or("").to_owned()
-        }
-        ConversationEvent::TurnStarted { user_message, .. } => {
-            extract_text_from_content(&user_message.content)
-        }
-        ConversationEvent::AssistantMessage { message, .. } => {
-            extract_text_from_content(&message.content)
-        }
-        ConversationEvent::ToolInvoked { invocation, .. } => {
-            let mut text = invocation.tool_name.clone();
-            if let Some(output) = &invocation.output {
-                text.push(' ');
-                text.push_str(output);
-            }
-            text
-        }
-        ConversationEvent::TurnCompleted { .. } => String::new(),
-    }
-}
-
-/// Extract text content from a list of content blocks.
-fn extract_text_from_content(blocks: &[freebird_traits::provider::ContentBlock]) -> String {
-    use freebird_traits::provider::ContentBlock;
-    blocks
-        .iter()
-        .filter_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 #[cfg(test)]
@@ -689,21 +647,6 @@ mod tests {
             .unwrap();
         assert_eq!(conv.turns.len(), 1);
         assert!(conv.turns[0].completed_at.is_none());
-    }
-
-    #[test]
-    fn test_event_search_text() {
-        let text = event_search_text(&ConversationEvent::TurnStarted {
-            turn_index: 0,
-            user_message: make_message(Role::User, "search for this"),
-        });
-        assert!(text.contains("search for this"));
-
-        let text = event_search_text(&ConversationEvent::TurnCompleted {
-            turn_index: 0,
-            completed_at: Utc::now(),
-        });
-        assert!(text.is_empty());
     }
 
     #[test]

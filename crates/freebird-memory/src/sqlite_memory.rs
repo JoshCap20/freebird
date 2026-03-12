@@ -82,7 +82,7 @@ impl Memory for SqliteMemory {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![sid, system_prompt, mid, pid, cat, uat, data],
         )
-        .map_err(|e| io_err("insert conversation", &e))?;
+        .map_err(|e| rusqlite_to_io("insert conversation", &e))?;
 
         // Upsert session_metadata for event-sourced queries
         let preview = conversation
@@ -107,7 +107,7 @@ impl Memory for SqliteMemory {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![sid, system_prompt, mid, pid, cat, uat, turn_count, preview],
         )
-        .map_err(|e| io_err("upsert session_metadata", &e))?;
+        .map_err(|e| rusqlite_to_io("upsert session_metadata", &e))?;
 
         Ok(())
     }
@@ -145,20 +145,20 @@ impl Memory for SqliteMemory {
                 "DELETE FROM conversations WHERE session_id = ?1",
                 rusqlite::params![sid],
             )
-            .map_err(|e| io_err("delete conversation", &e))?;
+            .map_err(|e| rusqlite_to_io("delete conversation", &e))?;
 
         let events_affected = conn
             .execute(
                 "DELETE FROM conversation_events WHERE session_id = ?1",
                 rusqlite::params![sid],
             )
-            .map_err(|e| io_err("delete events", &e))?;
+            .map_err(|e| rusqlite_to_io("delete events", &e))?;
 
         conn.execute(
             "DELETE FROM session_metadata WHERE session_id = ?1",
             rusqlite::params![sid],
         )
-        .map_err(|e| io_err("delete session_metadata", &e))?;
+        .map_err(|e| rusqlite_to_io("delete session_metadata", &e))?;
 
         if blob_affected == 0 && events_affected == 0 {
             return Err(MemoryError::NotFound {
@@ -212,7 +212,7 @@ fn load_events(
             "SELECT session_id, sequence, event_data, timestamp, previous_hmac, hmac \
              FROM conversation_events WHERE session_id = ?1 ORDER BY sequence ASC",
         )
-        .map_err(|e| io_err("prepare load events", &e))?;
+        .map_err(|e| rusqlite_to_io("prepare load events", &e))?;
 
     let rows = stmt
         .query_map(rusqlite::params![session_id], |row| {
@@ -227,11 +227,11 @@ fn load_events(
                 hmac: row.get(5)?,
             })
         })
-        .map_err(|e| io_err("query events", &e))?;
+        .map_err(|e| rusqlite_to_io("query events", &e))?;
 
     let mut events = Vec::new();
     for row_result in rows {
-        let row = row_result.map_err(|e| io_err("read event row", &e))?;
+        let row = row_result.map_err(|e| rusqlite_to_io("read event row", &e))?;
         let event = serde_json::from_str(&row.event_json)
             .map_err(|e| MemoryError::Serialization(format!("event JSON: {e}")))?;
         let timestamp = chrono::DateTime::parse_from_rfc3339(&row.timestamp_str)
@@ -259,7 +259,7 @@ fn list_from_metadata(
             "SELECT session_id, model_id, created_at, updated_at, turn_count, preview \
              FROM session_metadata ORDER BY updated_at DESC LIMIT ?1",
         )
-        .map_err(|e| io_err("prepare list metadata", &e))?;
+        .map_err(|e| rusqlite_to_io("prepare list metadata", &e))?;
 
     let rows = stmt
         .query_map(rusqlite::params![limit_i64(limit)], |row| {
@@ -272,11 +272,11 @@ fn list_from_metadata(
                 preview: row.get(5)?,
             })
         })
-        .map_err(|e| io_err("query metadata", &e))?;
+        .map_err(|e| rusqlite_to_io("query metadata", &e))?;
 
     let mut summaries = Vec::new();
     for row_result in rows {
-        let row = row_result.map_err(|e| io_err("read metadata row", &e))?;
+        let row = row_result.map_err(|e| rusqlite_to_io("read metadata row", &e))?;
         let created_at = chrono::DateTime::parse_from_rfc3339(&row.created_at)
             .map_err(|e| MemoryError::Serialization(format!("created_at: {e}")))?
             .to_utc();
@@ -319,7 +319,7 @@ fn search_fts(
              WHERE conversation_fts MATCH ?1 \
              ORDER BY m.updated_at DESC LIMIT ?2",
         )
-        .map_err(|e| io_err("prepare FTS search", &e))?;
+        .map_err(|e| rusqlite_to_io("prepare FTS search", &e))?;
 
     let rows = stmt
         .query_map(rusqlite::params![fts_query, limit_i64(limit)], |row| {
@@ -332,11 +332,11 @@ fn search_fts(
                 preview: row.get(5)?,
             })
         })
-        .map_err(|e| io_err("FTS query", &e))?;
+        .map_err(|e| rusqlite_to_io("FTS query", &e))?;
 
     let mut summaries = Vec::new();
     for row_result in rows {
-        let row = row_result.map_err(|e| io_err("read FTS row", &e))?;
+        let row = row_result.map_err(|e| rusqlite_to_io("read FTS row", &e))?;
         let created_at = chrono::DateTime::parse_from_rfc3339(&row.created_at)
             .map_err(|e| MemoryError::Serialization(format!("created_at: {e}")))?
             .to_utc();
@@ -373,7 +373,7 @@ fn load_from_blob(
             "SELECT session_id, system_prompt, model_id, provider_id, \
              created_at, updated_at, data FROM conversations WHERE session_id = ?1",
         )
-        .map_err(|e| io_err("prepare blob load", &e))?;
+        .map_err(|e| rusqlite_to_io("prepare blob load", &e))?;
 
     let conv_row = stmt
         .query_row(rusqlite::params![session_id], |row| {
@@ -388,7 +388,7 @@ fn load_from_blob(
             })
         })
         .optional()
-        .map_err(|e| io_err("query blob", &e))?;
+        .map_err(|e| rusqlite_to_io("query blob", &e))?;
 
     match conv_row {
         None => Ok(None),
@@ -437,7 +437,9 @@ fn query_conversations(
     sql: &str,
     params: impl rusqlite::Params,
 ) -> Result<Vec<ConversationRow>, MemoryError> {
-    let mut stmt = conn.prepare(sql).map_err(|e| io_err("prepare", &e))?;
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| rusqlite_to_io("prepare", &e))?;
     let rows = stmt
         .query_map(params, |row| {
             Ok(ConversationRow {
@@ -450,11 +452,11 @@ fn query_conversations(
                 data: row.get(6)?,
             })
         })
-        .map_err(|e| io_err("query", &e))?;
+        .map_err(|e| rusqlite_to_io("query", &e))?;
 
     let mut result = Vec::new();
     for row_result in rows {
-        result.push(row_result.map_err(|e| io_err("row", &e))?);
+        result.push(row_result.map_err(|e| rusqlite_to_io("row", &e))?);
     }
     Ok(result)
 }
@@ -483,12 +485,7 @@ fn row_to_conversation(row: ConversationRow) -> Result<Conversation, MemoryError
     })
 }
 
-/// Convert a `rusqlite::Error` to `MemoryError::Io`.
-fn io_err(context: &str, e: &rusqlite::Error) -> MemoryError {
-    MemoryError::Io(std::io::Error::other(format!("{context}: {e}")))
-}
-
-use crate::helpers::OptionalExt as _;
+use crate::helpers::{OptionalExt as _, rusqlite_to_io};
 
 #[cfg(test)]
 #[allow(
