@@ -1,0 +1,55 @@
+name: Feature Request
+description: Suggest a new feature or enhancement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature! Please describe the motivation and your proposed solution.
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Why do you want this feature? What problem does it solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution
+      description: Describe the feature you'd like. Include API sketches, config examples, or usage examples if applicable.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: What other approaches did you consider? Why is this proposal better?
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected Component
+      description: Which crate or area does this feature relate to?
+      options:
+        - freebird-traits (trait definitions)
+        - freebird-types (shared types, config)
+        - freebird-security (taint, capabilities, approval, audit)
+        - freebird-runtime (agent loop, tool executor)
+        - freebird-providers (LLM providers)
+        - freebird-channels (TCP, future channels)
+        - freebird-tools (built-in tools)
+        - freebird-memory (persistence, knowledge store)
+        - freebird-daemon (CLI, TUI, composition root)
+        - Documentation
+        - CI/CD
+        - Other
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Any other context, mockups, or references.

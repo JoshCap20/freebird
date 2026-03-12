@@ -1,0 +1,6 @@
+# Default owner for everything
+* @JoshCap20
+
+# Security-critical crates require explicit review
+/crates/freebird-security/ @JoshCap20
+/crates/freebird-runtime/src/tool_executor.rs @JoshCap20
