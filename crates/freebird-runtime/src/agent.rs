@@ -154,8 +154,15 @@ impl AgentRuntime {
             ttl_hours = self.default_session_ttl_hours,
             "using permissive default capability grant — per-session auth not yet wired"
         );
-        let expires_at = Utc::now()
-            + chrono::Duration::hours(i64::try_from(self.default_session_ttl_hours).unwrap_or(24));
+        let ttl_hours = i64::try_from(self.default_session_ttl_hours).map_err(|_| {
+            freebird_security::error::SecurityError::InvalidCredential {
+                reason: format!(
+                    "default_session_ttl_hours value {} exceeds maximum representable duration",
+                    self.default_session_ttl_hours
+                ),
+            }
+        })?;
+        let expires_at = Utc::now() + chrono::Duration::hours(ttl_hours);
         CapabilityGrant::new(
             [
                 Capability::FileRead,
