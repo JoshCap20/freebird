@@ -1,8 +1,13 @@
 //! `SQLite`-backed implementation of the [`Memory`] trait.
 //!
-//! Stores conversations in a `SQLCipher`-encrypted database, sharing the
-//! [`SqliteDb`] connection with the knowledge store. Turns are serialized
-//! as a JSON blob in the `data` column for simplicity.
+//! Supports two storage modes:
+//! - **Event-sourced** (new): loads from `conversation_events` table via event
+//!   replay, lists/searches via `session_metadata` and `conversation_fts`.
+//! - **Blob** (legacy): loads from `conversations` table as a JSON blob.
+//!
+//! On `load()`, events are tried first. If no events exist for a session,
+//! the legacy blob table is checked as a fallback. `save()` writes to both
+//! stores for backward compatibility during migration.
 
 #![allow(clippy::significant_drop_tightening)]
 
@@ -12,6 +17,7 @@ use async_trait::async_trait;
 use freebird_traits::id::{ModelId, ProviderId, SessionId};
 use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary, Turn};
 
+use crate::event::{StoredEvent, replay_events_to_conversation};
 use crate::helpers::conversation_to_summary;
 use crate::sqlite::SqliteDb;
 
@@ -45,32 +51,15 @@ impl Memory for SqliteMemory {
     async fn load(&self, session_id: &SessionId) -> Result<Option<Conversation>, MemoryError> {
         let sid = session_id.as_str().to_owned();
         let conn = self.db.conn().await;
-        let mut stmt = conn
-            .prepare(
-                "SELECT session_id, system_prompt, model_id, provider_id, \
-                 created_at, updated_at, data FROM conversations WHERE session_id = ?1",
-            )
-            .map_err(|e| io_err("prepare", &e))?;
 
-        let conv_row = stmt
-            .query_row(rusqlite::params![sid], |row| {
-                Ok(ConversationRow {
-                    session_id: row.get(0)?,
-                    system_prompt: row.get(1)?,
-                    model_id: row.get(2)?,
-                    provider_id: row.get(3)?,
-                    created_at: row.get(4)?,
-                    updated_at: row.get(5)?,
-                    data: row.get(6)?,
-                })
-            })
-            .optional()
-            .map_err(|e| io_err("query", &e))?;
-
-        match conv_row {
-            None => Ok(None),
-            Some(r) => Ok(Some(row_to_conversation(r)?)),
+        // Try event-sourced load first
+        let events = load_events(&conn, &sid)?;
+        if !events.is_empty() {
+            return replay_events_to_conversation(session_id, &events);
         }
+
+        // Fall back to legacy blob storage
+        load_from_blob(&conn, &sid)
     }
 
     async fn save(&self, conversation: &Conversation) -> Result<(), MemoryError> {
@@ -85,19 +74,54 @@ impl Memory for SqliteMemory {
         let uat = conversation.updated_at.to_rfc3339();
 
         let conn = self.db.conn().await;
+
+        // Write to legacy blob table (backward compat)
         conn.execute(
             "INSERT OR REPLACE INTO conversations \
              (session_id, system_prompt, model_id, provider_id, created_at, updated_at, data) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![sid, system_prompt, mid, pid, cat, uat, data],
         )
-        .map_err(|e| io_err("insert", &e))?;
+        .map_err(|e| io_err("insert conversation", &e))?;
+
+        // Upsert session_metadata for event-sourced queries
+        let preview = conversation
+            .turns
+            .first()
+            .and_then(|t| t.user_message.content.first())
+            .map(|block| match block {
+                freebird_traits::provider::ContentBlock::Text { text } => {
+                    text.chars().take(100).collect()
+                }
+                _ => String::new(),
+            })
+            .unwrap_or_default();
+
+        #[allow(clippy::cast_possible_wrap)]
+        let turn_count = conversation.turns.len() as i64;
+
+        conn.execute(
+            "INSERT OR REPLACE INTO session_metadata \
+             (session_id, system_prompt, model_id, provider_id, \
+              created_at, updated_at, turn_count, preview) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![sid, system_prompt, mid, pid, cat, uat, turn_count, preview],
+        )
+        .map_err(|e| io_err("upsert session_metadata", &e))?;
 
         Ok(())
     }
 
     async fn list_sessions(&self, limit: usize) -> Result<Vec<SessionSummary>, MemoryError> {
         let conn = self.db.conn().await;
+
+        // Try session_metadata first (covers both event-sourced and save()-synced sessions)
+        let summaries = list_from_metadata(&conn, limit)?;
+        if !summaries.is_empty() {
+            return Ok(summaries);
+        }
+
+        // Fall back to legacy blob table
         let rows = query_conversations(
             &conn,
             "SELECT session_id, system_prompt, model_id, provider_id, \
@@ -114,14 +138,29 @@ impl Memory for SqliteMemory {
     async fn delete(&self, session_id: &SessionId) -> Result<(), MemoryError> {
         let sid = session_id.as_str().to_owned();
         let conn = self.db.conn().await;
-        let affected = conn
+
+        // Delete from all tables
+        let blob_affected = conn
             .execute(
                 "DELETE FROM conversations WHERE session_id = ?1",
                 rusqlite::params![sid],
             )
-            .map_err(|e| io_err("delete", &e))?;
+            .map_err(|e| io_err("delete conversation", &e))?;
 
-        if affected == 0 {
+        let events_affected = conn
+            .execute(
+                "DELETE FROM conversation_events WHERE session_id = ?1",
+                rusqlite::params![sid],
+            )
+            .map_err(|e| io_err("delete events", &e))?;
+
+        conn.execute(
+            "DELETE FROM session_metadata WHERE session_id = ?1",
+            rusqlite::params![sid],
+        )
+        .map_err(|e| io_err("delete session_metadata", &e))?;
+
+        if blob_affected == 0 && events_affected == 0 {
             return Err(MemoryError::NotFound {
                 session_id: session_id.clone(),
             });
@@ -134,8 +173,16 @@ impl Memory for SqliteMemory {
             return Ok(Vec::new());
         }
 
-        let pattern = format!("%{}%", query.to_lowercase());
         let conn = self.db.conn().await;
+
+        // Try FTS5 search first
+        let fts_results = search_fts(&conn, query, limit)?;
+        if !fts_results.is_empty() {
+            return Ok(fts_results);
+        }
+
+        // Fall back to LIKE search on legacy blob table
+        let pattern = format!("%{}%", query.to_lowercase());
         let rows = query_conversations(
             &conn,
             "SELECT session_id, system_prompt, model_id, provider_id, \
@@ -151,7 +198,227 @@ impl Memory for SqliteMemory {
     }
 }
 
-/// Intermediate row representation for conversations.
+// ---------------------------------------------------------------------------
+// Event-sourced helpers
+// ---------------------------------------------------------------------------
+
+/// Load all events for a session, ordered by sequence.
+fn load_events(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> Result<Vec<StoredEvent>, MemoryError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT session_id, sequence, event_data, timestamp, previous_hmac, hmac \
+             FROM conversation_events WHERE session_id = ?1 ORDER BY sequence ASC",
+        )
+        .map_err(|e| io_err("prepare load events", &e))?;
+
+    let rows = stmt
+        .query_map(rusqlite::params![session_id], |row| {
+            let event_json: String = row.get(2)?;
+            let ts_str: String = row.get(3)?;
+            Ok(EventRow {
+                session_id: row.get(0)?,
+                sequence: row.get(1)?,
+                event_json,
+                timestamp_str: ts_str,
+                previous_hmac: row.get(4)?,
+                hmac: row.get(5)?,
+            })
+        })
+        .map_err(|e| io_err("query events", &e))?;
+
+    let mut events = Vec::new();
+    for row_result in rows {
+        let row = row_result.map_err(|e| io_err("read event row", &e))?;
+        let event = serde_json::from_str(&row.event_json)
+            .map_err(|e| MemoryError::Serialization(format!("event JSON: {e}")))?;
+        let timestamp = chrono::DateTime::parse_from_rfc3339(&row.timestamp_str)
+            .map_err(|e| MemoryError::Serialization(format!("event timestamp: {e}")))?
+            .to_utc();
+        events.push(StoredEvent {
+            session_id: row.session_id,
+            sequence: row.sequence,
+            event,
+            timestamp,
+            previous_hmac: row.previous_hmac,
+            hmac: row.hmac,
+        });
+    }
+    Ok(events)
+}
+
+/// List sessions from the `session_metadata` table.
+fn list_from_metadata(
+    conn: &rusqlite::Connection,
+    limit: usize,
+) -> Result<Vec<SessionSummary>, MemoryError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT session_id, model_id, created_at, updated_at, turn_count, preview \
+             FROM session_metadata ORDER BY updated_at DESC LIMIT ?1",
+        )
+        .map_err(|e| io_err("prepare list metadata", &e))?;
+
+    let rows = stmt
+        .query_map(rusqlite::params![limit_i64(limit)], |row| {
+            Ok(MetadataRow {
+                session_id: row.get(0)?,
+                model_id: row.get(1)?,
+                created_at: row.get(2)?,
+                updated_at: row.get(3)?,
+                turn_count: row.get(4)?,
+                preview: row.get(5)?,
+            })
+        })
+        .map_err(|e| io_err("query metadata", &e))?;
+
+    let mut summaries = Vec::new();
+    for row_result in rows {
+        let row = row_result.map_err(|e| io_err("read metadata row", &e))?;
+        let created_at = chrono::DateTime::parse_from_rfc3339(&row.created_at)
+            .map_err(|e| MemoryError::Serialization(format!("created_at: {e}")))?
+            .to_utc();
+        let updated_at = chrono::DateTime::parse_from_rfc3339(&row.updated_at)
+            .map_err(|e| MemoryError::Serialization(format!("updated_at: {e}")))?
+            .to_utc();
+
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let turn_count = row.turn_count as usize;
+
+        summaries.push(SessionSummary {
+            session_id: SessionId::from_string(row.session_id),
+            created_at,
+            updated_at,
+            turn_count,
+            model_id: ModelId::from_string(row.model_id),
+            preview: row.preview,
+        });
+    }
+    Ok(summaries)
+}
+
+/// Search using FTS5 on `conversation_fts`, joining to `session_metadata`.
+fn search_fts(
+    conn: &rusqlite::Connection,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<SessionSummary>, MemoryError> {
+    // FTS5 query — use simple prefix matching for user-friendliness
+    let fts_query = format!("{query}*");
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT m.session_id, m.model_id, m.created_at, m.updated_at, \
+                    m.turn_count, m.preview \
+             FROM conversation_fts f \
+             JOIN session_metadata m ON f.session_id = m.session_id \
+             WHERE conversation_fts MATCH ?1 \
+             ORDER BY m.updated_at DESC LIMIT ?2",
+        )
+        .map_err(|e| io_err("prepare FTS search", &e))?;
+
+    let rows = stmt
+        .query_map(rusqlite::params![fts_query, limit_i64(limit)], |row| {
+            Ok(MetadataRow {
+                session_id: row.get(0)?,
+                model_id: row.get(1)?,
+                created_at: row.get(2)?,
+                updated_at: row.get(3)?,
+                turn_count: row.get(4)?,
+                preview: row.get(5)?,
+            })
+        })
+        .map_err(|e| io_err("FTS query", &e))?;
+
+    let mut summaries = Vec::new();
+    for row_result in rows {
+        let row = row_result.map_err(|e| io_err("read FTS row", &e))?;
+        let created_at = chrono::DateTime::parse_from_rfc3339(&row.created_at)
+            .map_err(|e| MemoryError::Serialization(format!("created_at: {e}")))?
+            .to_utc();
+        let updated_at = chrono::DateTime::parse_from_rfc3339(&row.updated_at)
+            .map_err(|e| MemoryError::Serialization(format!("updated_at: {e}")))?
+            .to_utc();
+
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let turn_count = row.turn_count as usize;
+
+        summaries.push(SessionSummary {
+            session_id: SessionId::from_string(row.session_id),
+            created_at,
+            updated_at,
+            turn_count,
+            model_id: ModelId::from_string(row.model_id),
+            preview: row.preview,
+        });
+    }
+    Ok(summaries)
+}
+
+// ---------------------------------------------------------------------------
+// Legacy blob helpers
+// ---------------------------------------------------------------------------
+
+/// Load a conversation from the legacy `conversations` blob table.
+fn load_from_blob(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> Result<Option<Conversation>, MemoryError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT session_id, system_prompt, model_id, provider_id, \
+             created_at, updated_at, data FROM conversations WHERE session_id = ?1",
+        )
+        .map_err(|e| io_err("prepare blob load", &e))?;
+
+    let conv_row = stmt
+        .query_row(rusqlite::params![session_id], |row| {
+            Ok(ConversationRow {
+                session_id: row.get(0)?,
+                system_prompt: row.get(1)?,
+                model_id: row.get(2)?,
+                provider_id: row.get(3)?,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
+                data: row.get(6)?,
+            })
+        })
+        .optional()
+        .map_err(|e| io_err("query blob", &e))?;
+
+    match conv_row {
+        None => Ok(None),
+        Some(r) => Ok(Some(row_to_conversation(r)?)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+/// Intermediate row for events loaded from `conversation_events`.
+struct EventRow {
+    session_id: String,
+    sequence: i64,
+    event_json: String,
+    timestamp_str: String,
+    previous_hmac: String,
+    hmac: String,
+}
+
+/// Intermediate row for session metadata.
+struct MetadataRow {
+    session_id: String,
+    model_id: String,
+    created_at: String,
+    updated_at: String,
+    turn_count: i64,
+    preview: String,
+}
+
+/// Intermediate row representation for legacy conversations.
 struct ConversationRow {
     session_id: String,
     system_prompt: Option<String>,
@@ -421,5 +688,128 @@ mod tests {
 
         let results = mem.search("zebra", 10).await.unwrap();
         assert!(results.is_empty());
+    }
+
+    // --- Event-sourced load tests ---
+
+    #[tokio::test]
+    async fn test_load_from_events() {
+        use freebird_traits::event::{ConversationEvent, EventSink};
+
+        use crate::sqlite_event::SqliteEventSink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let key = SecretString::from("a".repeat(64));
+        let signing_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"test-signing-key");
+        let db = Arc::new(SqliteDb::open(&db_path, &key, signing_key).unwrap());
+
+        let event_sink = SqliteEventSink::new(Arc::clone(&db));
+        let memory = SqliteMemory::new(Arc::clone(&db));
+
+        let sid = SessionId::from_string("evt-session");
+
+        // Append events
+        event_sink
+            .append(
+                &sid,
+                ConversationEvent::SessionCreated {
+                    system_prompt: Some("test system".into()),
+                    model_id: "claude".into(),
+                    provider_id: "anthropic".into(),
+                },
+            )
+            .await
+            .unwrap();
+        event_sink
+            .append(
+                &sid,
+                ConversationEvent::TurnStarted {
+                    turn_index: 0,
+                    user_message: Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::Text {
+                            text: "hello from events".into(),
+                        }],
+                        timestamp: Utc::now(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        event_sink
+            .append(
+                &sid,
+                ConversationEvent::AssistantMessage {
+                    turn_index: 0,
+                    message_index: 0,
+                    message: Message {
+                        role: Role::Assistant,
+                        content: vec![ContentBlock::Text {
+                            text: "hi from assistant".into(),
+                        }],
+                        timestamp: Utc::now(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+
+        // Load via Memory trait — should replay from events
+        let loaded = memory.load(&sid).await.unwrap().unwrap();
+        assert_eq!(loaded.session_id.as_str(), "evt-session");
+        assert_eq!(loaded.system_prompt.as_deref(), Some("test system"));
+        assert_eq!(loaded.model_id.as_str(), "claude");
+        assert_eq!(loaded.turns.len(), 1);
+        assert_eq!(loaded.turns[0].assistant_messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_delete_removes_events_and_metadata() {
+        use freebird_traits::event::{ConversationEvent, EventSink};
+
+        use crate::sqlite_event::SqliteEventSink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let key = SecretString::from("a".repeat(64));
+        let signing_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"test-signing-key");
+        let db = Arc::new(SqliteDb::open(&db_path, &key, signing_key).unwrap());
+
+        let event_sink = SqliteEventSink::new(Arc::clone(&db));
+        let memory = SqliteMemory::new(Arc::clone(&db));
+
+        let sid = SessionId::from_string("del-session");
+        event_sink
+            .append(
+                &sid,
+                ConversationEvent::SessionCreated {
+                    system_prompt: None,
+                    model_id: "m".into(),
+                    provider_id: "p".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // Should exist
+        assert!(memory.load(&sid).await.unwrap().is_some());
+
+        // Delete
+        memory.delete(&sid).await.unwrap();
+
+        // Should be gone
+        assert!(memory.load(&sid).await.unwrap().is_none());
+
+        // Metadata should be gone too
+        let conn = db.conn().await;
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM session_metadata WHERE session_id = 'del-session'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }
