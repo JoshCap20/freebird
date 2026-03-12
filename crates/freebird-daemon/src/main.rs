@@ -207,6 +207,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         tools_config.allowed_directories.clone(),
         Some(approval_gate),
         knowledge_store,
+        Some(std::sync::Arc::clone(&memory)),
         secret_guard,
         config.security.injection.clone(),
     )
@@ -221,7 +222,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         channel,
         tool_executor,
         Some(approval_rx),
-        Box::new(memory),
+        memory,
         ks_for_runtime,
         config.knowledge,
         config.runtime,
@@ -429,7 +430,7 @@ fn enforce_security_minimums(mut config: AppConfig) -> AppConfig {
 
 /// Result of [`init_sqlite`]: memory backend, optional knowledge store, raw DB handle, and salt.
 type SqliteComponents = (
-    SqliteMemory,
+    std::sync::Arc<dyn freebird_traits::memory::Memory>,
     Option<std::sync::Arc<dyn freebird_traits::knowledge::KnowledgeStore>>,
     std::sync::Arc<freebird_memory::sqlite::SqliteDb>,
     Vec<u8>,
@@ -488,7 +489,10 @@ fn init_sqlite(config: &AppConfig) -> Result<SqliteComponents> {
 
     tracing::info!(path = %db_path.display(), "encrypted database opened");
 
-    let memory = SqliteMemory::new(Arc::clone(&db), config.memory.verify_on_load);
+    let memory: Arc<dyn freebird_traits::memory::Memory> = Arc::new(SqliteMemory::new(
+        Arc::clone(&db),
+        config.memory.verify_on_load,
+    ));
     let knowledge: Arc<dyn freebird_traits::knowledge::KnowledgeStore> =
         Arc::new(SqliteKnowledgeStore::new(Arc::clone(&db)));
 
