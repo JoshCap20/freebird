@@ -365,7 +365,7 @@ fn make_test_runtime(
     channel: MockChannel,
     provider: Arc<QueuedProvider>,
     tools: ToolExecutor,
-    memory: Box<dyn Memory>,
+    memory: Arc<dyn Memory>,
 ) -> AgentRuntime {
     AgentRuntime::new(
         make_registry(provider),
@@ -433,7 +433,7 @@ async fn test_single_turn_text_response() {
         channel,
         provider.clone(),
         make_tool_executor(vec![]),
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -453,7 +453,7 @@ async fn test_single_turn_max_tokens_appends_truncation_notice() {
         channel,
         provider,
         make_tool_executor(vec![]),
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -480,7 +480,7 @@ async fn test_single_turn_stop_sequence_delivers_response() {
         channel,
         provider,
         make_tool_executor(vec![]),
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -497,7 +497,7 @@ async fn test_single_turn_empty_response_skipped() {
         channel,
         provider,
         make_tool_executor(vec![]),
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
     );
 
     let events = without_status_events(
@@ -537,7 +537,7 @@ async fn test_tool_use_single_round() {
         channel,
         provider.clone(),
         make_tool_executor(vec![Box::new(mock_tool)]),
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
     );
 
     let events = without_status_events(
@@ -582,7 +582,7 @@ async fn test_tool_use_multi_round() {
         channel,
         provider.clone(),
         make_tool_executor(vec![Box::new(mock_tool)]),
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
     );
 
     let events = without_status_events(
@@ -607,7 +607,7 @@ async fn test_tool_use_unknown_tool_returns_error_to_provider() {
         channel,
         provider.clone(),
         make_tool_executor(vec![]), // no tools registered
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
     );
 
     let events = without_status_events(
@@ -640,7 +640,7 @@ async fn test_tool_use_execution_error() {
         channel,
         provider.clone(),
         make_tool_executor(vec![Box::new(mock_tool)]),
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
     );
 
     let events = without_status_events(
@@ -680,6 +680,7 @@ async fn test_tool_use_timeout() {
         None,
         None,
         None,
+        None,
         InjectionConfig::default(),
     )
     .unwrap();
@@ -689,7 +690,7 @@ async fn test_tool_use_timeout() {
         Box::new(channel),
         short_timeout_executor,
         None,
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
         None,
         KnowledgeConfig::default(),
         default_config(),
@@ -752,7 +753,7 @@ async fn test_tool_use_max_rounds_exceeded() {
         Box::new(channel),
         make_tool_executor(vec![Box::new(mock_tool)]),
         None,
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
         None,
         KnowledgeConfig::default(),
         config,
@@ -809,7 +810,7 @@ async fn test_tool_use_multiple_tools_per_round() {
         channel,
         provider.clone(),
         make_tool_executor(vec![Box::new(tool_a), Box::new(tool_b)]),
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
     );
 
     let events = without_status_events(
@@ -836,7 +837,7 @@ async fn test_conversation_saved_after_turn() {
         Box::new(channel),
         make_tool_executor(vec![]),
         None,
-        Box::new(ArcMemory(Arc::clone(&memory))),
+        Arc::clone(&memory) as Arc<dyn Memory>,
         None,
         KnowledgeConfig::default(),
         default_config(),
@@ -878,7 +879,7 @@ async fn test_tool_invocations_recorded_in_turn() {
         Box::new(channel),
         make_tool_executor(vec![Box::new(mock_tool)]),
         None,
-        Box::new(ArcMemory(Arc::clone(&memory))),
+        Arc::clone(&memory) as Arc<dyn Memory>,
         None,
         KnowledgeConfig::default(),
         default_config(),
@@ -910,28 +911,6 @@ async fn test_tool_invocations_recorded_in_turn() {
     assert!(turn.tool_invocations[0].duration_ms.is_some());
 }
 
-// Wrapper to allow Arc<InMemoryMemory> as Box<dyn Memory>
-struct ArcMemory(Arc<InMemoryMemory>);
-
-#[async_trait]
-impl Memory for ArcMemory {
-    async fn load(&self, session_id: &SessionId) -> Result<Option<Conversation>, MemoryError> {
-        self.0.load(session_id).await
-    }
-    async fn save(&self, conversation: &Conversation) -> Result<(), MemoryError> {
-        self.0.save(conversation).await
-    }
-    async fn list_sessions(&self, limit: usize) -> Result<Vec<SessionSummary>, MemoryError> {
-        self.0.list_sessions(limit).await
-    }
-    async fn delete(&self, session_id: &SessionId) -> Result<(), MemoryError> {
-        self.0.delete(session_id).await
-    }
-    async fn search(&self, query: &str, limit: usize) -> Result<Vec<SessionSummary>, MemoryError> {
-        self.0.search(query, limit).await
-    }
-}
-
 // ===========================================================================
 // Tests — Security
 // ===========================================================================
@@ -947,7 +926,7 @@ async fn test_injection_in_input_warns_and_proceeds() {
         channel,
         provider.clone(),
         make_tool_executor(vec![]),
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
     );
 
     let events = send_message_and_collect(
@@ -985,7 +964,7 @@ async fn test_clean_input_passes_validation() {
         channel,
         provider.clone(),
         make_tool_executor(vec![]),
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
     );
 
     let events = send_message_and_collect(
@@ -1029,7 +1008,7 @@ async fn test_tool_output_injection_replaced_with_error() {
         Box::new(channel),
         make_tool_executor(vec![Box::new(mock_tool)]),
         None,
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
         None,
         KnowledgeConfig::default(),
         default_config(),
@@ -1082,7 +1061,7 @@ async fn test_model_output_injection_blocks_delivery() {
         Box::new(channel),
         make_tool_executor(vec![]),
         None,
-        Box::new(ArcMemory(Arc::clone(&memory))),
+        Arc::clone(&memory) as Arc<dyn Memory>,
         None,
         KnowledgeConfig::default(),
         default_config(),
@@ -1131,7 +1110,7 @@ async fn test_truncated_response_injection_blocks_delivery() {
         Box::new(channel),
         make_tool_executor(vec![]),
         None,
-        Box::new(ArcMemory(Arc::clone(&memory))),
+        Arc::clone(&memory) as Arc<dyn Memory>,
         None,
         KnowledgeConfig::default(),
         default_config(),
@@ -1178,7 +1157,7 @@ async fn test_provider_error_sends_error_event() {
         channel,
         provider,
         make_tool_executor(vec![]),
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -1202,7 +1181,7 @@ async fn test_memory_load_error_sends_error_event() {
         Box::new(channel),
         make_tool_executor(vec![]),
         None,
-        Box::new(FailingMemory {
+        Arc::new(FailingMemory {
             fail_load: true,
             fail_save: false,
         }),
@@ -1241,7 +1220,7 @@ async fn test_memory_save_error_does_not_crash() {
         Box::new(channel),
         make_tool_executor(vec![]),
         None,
-        Box::new(FailingMemory {
+        Arc::new(FailingMemory {
             fail_load: false,
             fail_save: true,
         }),
@@ -1343,7 +1322,7 @@ async fn test_continuing_session_includes_history_in_request() {
         Box::new(channel),
         make_tool_executor(vec![]),
         None,
-        Box::new(PreloadedMemory::new(existing_conv)),
+        Arc::new(PreloadedMemory::new(existing_conv)),
         None,
         KnowledgeConfig::default(),
         default_config(),
@@ -1426,7 +1405,7 @@ async fn test_new_conversation_uses_config_values() {
         Box::new(channel),
         make_tool_executor(vec![]),
         None,
-        Box::new(ArcMemory(Arc::clone(&memory))),
+        Arc::clone(&memory) as Arc<dyn Memory>,
         None,
         KnowledgeConfig::default(),
         config,
@@ -1483,7 +1462,7 @@ async fn test_multi_turn_within_same_session() {
         Box::new(channel),
         make_tool_executor(vec![]),
         None,
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
         None,
         KnowledgeConfig::default(),
         default_config(),
@@ -1617,7 +1596,7 @@ async fn test_token_budget_per_request_exceeded() {
         Box::new(channel),
         make_tool_executor(vec![]),
         None,
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
         None,
         KnowledgeConfig::default(),
         default_config(),
@@ -1663,7 +1642,7 @@ async fn test_token_budget_per_session_exceeded() {
         Box::new(channel),
         make_tool_executor(vec![]),
         None,
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
         None,
         KnowledgeConfig::default(),
         default_config(),

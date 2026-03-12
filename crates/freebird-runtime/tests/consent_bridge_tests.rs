@@ -184,6 +184,7 @@ async fn test_consent_request_forwarded_to_channel() {
         Some(gate),
         None,
         None,
+        None,
         InjectionConfig::default(),
     )
     .expect("executor construction should succeed");
@@ -193,7 +194,7 @@ async fn test_consent_request_forwarded_to_channel() {
         Box::new(channel),
         executor,
         Some(approval_rx),
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
         None,
         KnowledgeConfig::default(),
         default_config(),
@@ -307,6 +308,7 @@ async fn test_consent_approved_executes_tool() {
         Some(gate),
         None,
         None,
+        None,
         InjectionConfig::default(),
     )
     .expect("executor construction should succeed");
@@ -316,7 +318,7 @@ async fn test_consent_approved_executes_tool() {
         Box::new(channel),
         executor,
         Some(approval_rx),
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
         None,
         KnowledgeConfig::default(),
         default_config(),
@@ -439,6 +441,7 @@ async fn test_consent_denied_returns_error_to_provider() {
         Some(gate),
         None,
         None,
+        None,
         InjectionConfig::default(),
     )
     .expect("executor construction should succeed");
@@ -448,7 +451,7 @@ async fn test_consent_denied_returns_error_to_provider() {
         Box::new(channel),
         executor,
         Some(approval_rx),
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
         None,
         KnowledgeConfig::default(),
         default_config(),
@@ -570,6 +573,7 @@ async fn test_consent_low_risk_no_prompt() {
         Some(gate),
         None,
         None,
+        None,
         InjectionConfig::default(),
     )
     .expect("executor construction should succeed");
@@ -579,7 +583,7 @@ async fn test_consent_low_risk_no_prompt() {
         Box::new(channel),
         executor,
         Some(approval_rx),
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
         None,
         KnowledgeConfig::default(),
         default_config(),
@@ -671,6 +675,7 @@ async fn test_consent_no_gate_executes_freely() {
         None,
         None,
         None,
+        None,
         InjectionConfig::default(),
     )
     .expect("executor construction should succeed");
@@ -680,7 +685,7 @@ async fn test_consent_no_gate_executes_freely() {
         Box::new(channel),
         executor,
         None, // no approval_rx
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
         None,
         KnowledgeConfig::default(),
         default_config(),
@@ -756,6 +761,7 @@ async fn test_consent_response_unknown_id_logged() {
         Some(gate),
         None,
         None,
+        None,
         InjectionConfig::default(),
     )
     .expect("executor construction should succeed");
@@ -765,7 +771,7 @@ async fn test_consent_response_unknown_id_logged() {
         Box::new(channel),
         executor,
         Some(approval_rx),
-        Box::new(InMemoryMemory::new()),
+        Arc::new(InMemoryMemory::new()),
         None,
         KnowledgeConfig::default(),
         default_config(),

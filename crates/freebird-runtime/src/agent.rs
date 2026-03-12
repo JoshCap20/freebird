@@ -84,7 +84,7 @@ pub struct AgentRuntime {
     /// Receives approval requests from the `ToolExecutor`'s `ApprovalGate`.
     /// Consumed by the approval-forwarder background task.
     approval_rx: Option<tokio::sync::mpsc::Receiver<ApprovalRequest>>,
-    memory: Box<dyn Memory>,
+    memory: Arc<dyn Memory>,
     knowledge_store: Option<Arc<dyn KnowledgeStore>>,
     knowledge_config: KnowledgeConfig,
     config: RuntimeConfig,
@@ -112,7 +112,7 @@ impl AgentRuntime {
         channel: Box<dyn Channel>,
         tool_executor: crate::tool_executor::ToolExecutor,
         approval_rx: Option<tokio::sync::mpsc::Receiver<ApprovalRequest>>,
-        memory: Box<dyn Memory>,
+        memory: Arc<dyn Memory>,
         knowledge_store: Option<Arc<dyn KnowledgeStore>>,
         knowledge_config: KnowledgeConfig,
         config: RuntimeConfig,
@@ -2280,11 +2280,12 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 InjectionConfig::default(),
             )
             .unwrap(),
             None,
-            Box::new(NullMemory),
+            Arc::new(NullMemory),
             None,
             config,
             RuntimeConfig {
