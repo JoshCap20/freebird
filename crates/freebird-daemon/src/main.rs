@@ -33,6 +33,7 @@ use freebird_types::config::AppConfig;
 
 mod chat;
 mod providers;
+mod replay;
 mod tools;
 mod ui;
 
