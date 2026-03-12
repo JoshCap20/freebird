@@ -306,17 +306,16 @@ fn truncate(s: &str, max_len: usize) -> &str {
 
 /// Extract text content from a Message's content blocks.
 fn message_text(msg: &freebird_traits::provider::Message) -> String {
-    msg.content
-        .iter()
-        .filter_map(|block| {
-            if let freebird_traits::provider::ContentBlock::Text { text } = block {
-                Some(text.as_str())
-            } else {
-                None
+    let mut result = String::new();
+    for block in &msg.content {
+        if let freebird_traits::provider::ContentBlock::Text { text } = block {
+            if !result.is_empty() {
+                result.push('\n');
             }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+            result.push_str(text);
+        }
+    }
+    result
 }
 
 #[async_trait]
