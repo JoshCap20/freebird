@@ -15,7 +15,9 @@ use freebird_traits::id::{ModelId, SessionId};
 use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary};
 use freebird_traits::provider::ContentBlock;
 
-use crate::event::{StoredEvent, compute_event_hmac, replay_events_to_conversation};
+use crate::event::{
+    StoredEvent, compute_event_hmac, replay_events_to_conversation, verify_event_chain,
+};
 use crate::helpers::rusqlite_to_io;
 use crate::sqlite::SqliteDb;
 
@@ -24,13 +26,17 @@ use crate::sqlite::SqliteDb;
 /// Thread-safe via [`Arc<SqliteDb>`] (async `Mutex` inside).
 pub struct SqliteMemory {
     db: Arc<SqliteDb>,
+    verify_on_load: bool,
 }
 
 impl SqliteMemory {
     /// Create a new [`SqliteMemory`] sharing the given database connection.
+    ///
+    /// When `verify_on_load` is true, every `load()` verifies the per-session
+    /// HMAC chain before replaying events.
     #[must_use]
-    pub const fn new(db: Arc<SqliteDb>) -> Self {
-        Self { db }
+    pub const fn new(db: Arc<SqliteDb>, verify_on_load: bool) -> Self {
+        Self { db, verify_on_load }
     }
 }
 
@@ -53,6 +59,10 @@ impl Memory for SqliteMemory {
         let events = load_events(&conn, &sid)?;
         if events.is_empty() {
             return Ok(None);
+        }
+
+        if self.verify_on_load {
+            verify_event_chain(&events, self.db.signing_key())?;
         }
 
         replay_events_to_conversation(session_id, &events)
@@ -479,7 +489,7 @@ mod tests {
         let key = SecretString::from("a".repeat(64));
         let signing_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"test-signing-key");
         let db = Arc::new(SqliteDb::open(&db_path, &key, signing_key).unwrap());
-        (dir, SqliteMemory::new(db))
+        (dir, SqliteMemory::new(db, true))
     }
 
     fn make_conversation(session_id: &str, user_text: &str) -> Conversation {
@@ -687,7 +697,7 @@ mod tests {
         let db = Arc::new(SqliteDb::open(&db_path, &key, signing_key).unwrap());
 
         let event_sink = SqliteEventSink::new(Arc::clone(&db));
-        let memory = SqliteMemory::new(Arc::clone(&db));
+        let memory = SqliteMemory::new(Arc::clone(&db), true);
 
         let sid = SessionId::from_string("evt-session");
 
@@ -759,7 +769,7 @@ mod tests {
         let db = Arc::new(SqliteDb::open(&db_path, &key, signing_key).unwrap());
 
         let event_sink = SqliteEventSink::new(Arc::clone(&db));
-        let memory = SqliteMemory::new(Arc::clone(&db));
+        let memory = SqliteMemory::new(Arc::clone(&db), true);
 
         let sid = SessionId::from_string("del-session");
         event_sink
@@ -831,7 +841,7 @@ mod tests {
         let db = Arc::new(SqliteDb::open(&db_path, &key, signing_key).unwrap());
 
         let event_sink = SqliteEventSink::new(Arc::clone(&db));
-        let memory = SqliteMemory::new(Arc::clone(&db));
+        let memory = SqliteMemory::new(Arc::clone(&db), true);
 
         let sid = SessionId::from_string("no-dup");
 
@@ -881,5 +891,118 @@ mod tests {
             .unwrap();
 
         assert_eq!(before, after, "save() should not duplicate events");
+    }
+
+    #[tokio::test]
+    async fn test_tampered_event_detected_on_load() {
+        use freebird_traits::event::{ConversationEvent, EventSink};
+
+        use crate::sqlite_event::SqliteEventSink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let key = SecretString::from("a".repeat(64));
+        let signing_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"test-signing-key");
+        let db = Arc::new(SqliteDb::open(&db_path, &key, signing_key).unwrap());
+
+        let event_sink = SqliteEventSink::new(Arc::clone(&db));
+        let memory = SqliteMemory::new(Arc::clone(&db), true);
+
+        let sid = SessionId::from_string("tamper-session");
+
+        // Write a valid event chain
+        event_sink
+            .append(
+                &sid,
+                ConversationEvent::SessionCreated {
+                    system_prompt: Some("test".into()),
+                    model_id: "m".into(),
+                    provider_id: "p".into(),
+                },
+            )
+            .await
+            .unwrap();
+        event_sink
+            .append(
+                &sid,
+                ConversationEvent::TurnStarted {
+                    turn_index: 0,
+                    user_message: Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::Text {
+                            text: "hello".into(),
+                        }],
+                        timestamp: Utc::now(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+
+        // Verify clean load works
+        assert!(memory.load(&sid).await.is_ok());
+
+        // Tamper with event data directly in the database (valid JSON, wrong content)
+        {
+            let conn = db.conn().await;
+            conn.execute(
+                "UPDATE conversation_events SET event_data = '{\"type\":\"turn_started\",\"turn_index\":0,\"user_message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"TAMPERED\"}],\"timestamp\":\"2025-01-01T00:00:00Z\"}}' WHERE session_id = 'tamper-session' AND sequence = 1",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Load should now fail with IntegrityViolation
+        let result = memory.load(&sid).await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), MemoryError::IntegrityViolation { .. }),
+            "tampered event should trigger IntegrityViolation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verification_disabled_skips_hmac_check() {
+        use freebird_traits::event::{ConversationEvent, EventSink};
+
+        use crate::sqlite_event::SqliteEventSink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let key = SecretString::from("a".repeat(64));
+        let signing_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"test-signing-key");
+        let db = Arc::new(SqliteDb::open(&db_path, &key, signing_key).unwrap());
+
+        let event_sink = SqliteEventSink::new(Arc::clone(&db));
+        let memory_no_verify = SqliteMemory::new(Arc::clone(&db), false);
+
+        let sid = SessionId::from_string("noverify-session");
+
+        event_sink
+            .append(
+                &sid,
+                ConversationEvent::SessionCreated {
+                    system_prompt: None,
+                    model_id: "m".into(),
+                    provider_id: "p".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // Tamper with the HMAC
+        {
+            let conn = db.conn().await;
+            conn.execute(
+                "UPDATE conversation_events SET hmac = 'deadbeef' WHERE session_id = 'noverify-session'",
+                [],
+            )
+            .unwrap();
+        }
+
+        // With verification disabled, load should succeed despite tampered HMAC
+        let result = memory_no_verify.load(&sid).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some());
     }
 }

@@ -400,7 +400,7 @@ fn init_sqlite(config: &AppConfig) -> Result<SqliteComponents> {
 
     tracing::info!(path = %db_path.display(), "encrypted database opened");
 
-    let memory = SqliteMemory::new(Arc::clone(&db));
+    let memory = SqliteMemory::new(Arc::clone(&db), config.memory.verify_on_load);
     let knowledge: Arc<dyn freebird_traits::knowledge::KnowledgeStore> =
         Arc::new(SqliteKnowledgeStore::new(Arc::clone(&db)));
 
