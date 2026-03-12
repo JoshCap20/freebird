@@ -1004,6 +1004,7 @@ impl AgentRuntime {
                         resource: resource_str,
                         used: used_val,
                         limit: limit_val,
+                        approved: true,
                     },
                 )
                 .await;
@@ -1022,6 +1023,7 @@ impl AgentRuntime {
                         resource: resource_str,
                         used: used_val,
                         limit: limit_val,
+                        approved: false,
                     },
                 )
                 .await;
