@@ -791,6 +791,14 @@ impl AgentRuntime {
                 )
                 .await;
 
+                // Record session creation in the security audit log
+                let grant = self.create_default_grant();
+                let capabilities: Vec<String> = grant
+                    .map(|g| g.capabilities().iter().map(|c| format!("{c:?}")).collect())
+                    .unwrap_or_default();
+                self.audit(session_id, AuditEventType::SessionStarted { capabilities })
+                    .await;
+
                 Some(Conversation {
                     session_id: session_id.clone(),
                     system_prompt: self.config.system_prompt.clone(),
