@@ -6,11 +6,13 @@
 //! 1. Tool lookup
 //! 2. Capability + expiration check via [`CapabilityGrant::check`]
 //! 3. Secret guard input check — flags sensitive file/command access (step 2.5)
-//! 4. Consent gate for high-risk tools (ASI09), with escalation from step 3
-//! 5. Audit logging
-//! 6. Execution with timeout
-//! 7. Secret guard output redaction — replaces detected secrets (step 5.5)
-//! 8. Injection scan on output via [`ScannedToolOutput::from_raw`]
+//! 4. Knowledge consent escalation — consent-gated kinds (system_config,
+//!    tool_capability, user_preference) are escalated to High risk (step 2.6)
+//! 5. Consent gate for high-risk tools (ASI09), with escalation from steps 3/4
+//! 6. Audit logging
+//! 7. Execution with timeout
+//! 8. Secret guard output redaction — replaces detected secrets (step 5.5)
+//! 9. Injection scan on output via [`ScannedToolOutput::from_raw`]
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -27,7 +29,7 @@ use freebird_security::error::Severity;
 use freebird_security::safe_types::ScannedToolOutput;
 use freebird_security::secret_guard::{SecretCheckResult, SecretGuard};
 use freebird_traits::id::SessionId;
-use freebird_traits::knowledge::KnowledgeStore;
+use freebird_traits::knowledge::{KnowledgeKind, KnowledgeStore};
 use freebird_traits::provider::ToolDefinition;
 use freebird_traits::tool::{
     Capability, RiskLevel, Tool, ToolContext, ToolInfo, ToolOutcome, ToolOutput,
@@ -317,7 +319,7 @@ impl ToolExecutor {
         }
 
         // 2.5. Secret guard — check tool input for sensitive patterns.
-        let effective_info = match self
+        let secret_guard_info = match self
             .check_secret_guard_input(tool_name, &input, tool.info(), session_id)
             .await
         {
@@ -326,9 +328,18 @@ impl ToolExecutor {
             SecretGuardInputResult::Blocked(output) => return output,
         };
 
+        // 2.6. Knowledge consent escalation — consent-gated kinds (system_config,
+        //      tool_capability, user_preference) are promoted to High risk so they
+        //      always pass through the consent gate, independent of the global
+        //      threshold. Secret-guard escalation takes precedence if both fire
+        //      (it escalates to Critical; knowledge escalation only reaches High).
+        let effective_info = secret_guard_info.or_else(|| {
+            self.check_knowledge_consent_escalation(tool_name, &input, tool.info())
+        });
+
         // 3. Consent gate for High/Critical risk tools (ASI09)
-        //    Uses effective_info (escalated to Critical by secret guard) if present,
-        //    otherwise falls back to the tool's declared info.
+        //    Uses effective_info (escalated by secret guard or knowledge consent
+        //    check) if present, otherwise falls back to the tool's declared info.
         let consent_info = effective_info.as_ref().unwrap_or_else(|| tool.info());
         if let Some(output) = self
             .check_consent(tool_name, consent_info, &input, session_id, sender_id)
@@ -715,6 +726,67 @@ impl ToolExecutor {
         } else {
             output
         }
+    }
+
+    /// Escalate consent-gated knowledge tool calls to `High` risk.
+    ///
+    /// The three mutable knowledge tools (`store_knowledge`, `update_knowledge`,
+    /// `delete_knowledge`) are declared `Medium` risk so that routine agent
+    /// writes (learned patterns, error resolutions, session insights) do not
+    /// require user approval. However, kinds that carry persistent configuration
+    /// or user-declared preferences (`system_config`, `tool_capability`,
+    /// `user_preference`) MUST go through the consent gate regardless of the
+    /// global threshold — they modify agent behaviour in ways the user should
+    /// explicitly authorise.
+    ///
+    /// This method inspects the raw tool input for a `"kind"` field and, if the
+    /// parsed kind returns `true` from [`KnowledgeKind::requires_consent`],
+    /// returns an escalated clone of `tool_info` with `risk_level = High`.
+    /// The escalated info is then passed to `check_consent` exactly like the
+    /// secret-guard escalation path, so no call site needs to know about it.
+    ///
+    /// For `delete_knowledge` the kind is not in the input (only an `id` is).
+    /// Deletion of consent-gated entries is handled by the tool itself at
+    /// execution time — this method returns `None` for that tool.
+    ///
+    /// Returns `Some(escalated_info)` if escalation is needed, `None` otherwise.
+    fn check_knowledge_consent_escalation(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        tool_info: &ToolInfo,
+    ) -> Option<ToolInfo> {
+        // Only the two tools that accept a `kind` field in their input need
+        // pre-execution escalation. `delete_knowledge` operates on an opaque
+        // ID so we cannot inspect the kind before fetching from the store.
+        // TODO: Should also gate delete_knowledge
+        if !matches!(tool_name, "store_knowledge" | "update_knowledge") {
+            return None;
+        }
+
+        // If the input has no `kind` field, or it cannot be parsed, we do not
+        // escalate — the tool's own validation will reject the call.
+        let kind_str = input.get("kind")?.as_str()?;
+        let json_quoted = format!("\"{kind_str}\"");
+        let kind: KnowledgeKind = serde_json::from_str(&json_quoted).ok()?;
+
+        if !kind.requires_consent() {
+            return None;
+        }
+
+        tracing::info!(
+            tool = %tool_name,
+            %kind_str,
+            "knowledge consent escalation: consent-gated kind requires approval"
+        );
+
+        let mut escalated = tool_info.clone();
+        escalated.risk_level = RiskLevel::High;
+        escalated.description = format!(
+            "{} [CONSENT REQUIRED: kind `{kind_str}` requires human approval]",
+            escalated.description
+        );
+        Some(escalated)
     }
 
     /// Check the secret guard for sensitive patterns in tool input.
@@ -2432,5 +2504,515 @@ mod tests {
             has_secret_blocked,
             "audit log should contain SecretAccessBlocked event, events: {events:?}"
         );
+    }
+
+    // ── Knowledge consent escalation tests ──────────────────────────
+
+    /// Helper: build a MockTool whose name matches a knowledge write tool,
+    /// with Medium risk (the real tools' declared level).
+    fn knowledge_write_tool(name: &str) -> MockTool {
+        MockTool::new(name, Capability::FileWrite)
+            .with_risk_level(RiskLevel::Medium)
+            .with_output("ok", ToolOutcome::Success)
+    }
+
+    /// Consent-gated kind on `store_knowledge` is escalated to High and
+    /// triggers the approval gate even when the global threshold is High.
+    #[tokio::test]
+    async fn test_knowledge_consent_escalation_store_gated_kind_triggers_gate() {
+        let (_tmp, path) = sandbox();
+        let (gate, mut rx) = ApprovalGate::new(RiskLevel::High, StdDuration::from_secs(60), 5);
+        let tool = knowledge_write_tool("store_knowledge");
+        let executor = Arc::new(
+            ToolExecutor::new(
+                vec![Box::new(tool)],
+                StdDuration::from_secs(5),
+                None,
+                vec![],
+                Some(gate),
+                None,
+                None,
+                InjectionConfig::default(),
+            )
+            .unwrap(),
+        );
+        let grant = grant_with_caps(&path, &[Capability::FileWrite]);
+        let sid = session_id();
+
+        let exec = Arc::clone(&executor);
+        let handle = tokio::spawn(async move {
+            exec.execute(
+                "store_knowledge",
+                serde_json::json!({"kind": "system_config", "content": "test"}),
+                &grant,
+                &sid,
+                "test-sender",
+            )
+            .await
+        });
+
+        // Gate must fire — approve it so the task completes.
+        let req = tokio::time::timeout(StdDuration::from_secs(2), rx.recv())
+            .await
+            .expect("consent request should arrive")
+            .expect("rx should not be closed");
+
+        match &req.category {
+            ApprovalCategory::Consent {
+                tool_name,
+                risk_level,
+                description,
+                ..
+            } => {
+                assert_eq!(tool_name, "store_knowledge");
+                assert_eq!(*risk_level, RiskLevel::High);
+                assert!(
+                    description.contains("CONSENT REQUIRED"),
+                    "description should mention CONSENT REQUIRED, got: {description}"
+                );
+                assert!(
+                    description.contains("system_config"),
+                    "description should name the kind, got: {description}"
+                );
+            }
+            other => panic!("expected Consent category, got {other:?}"),
+        }
+
+        executor
+            .approval_respond(&req.id, ApprovalResponse::Approved)
+            .await;
+        let output = handle.await.unwrap();
+        assert_eq!(output.outcome, ToolOutcome::Success);
+    }
+
+    /// Non-consent-gated kind on `store_knowledge` is NOT escalated and
+    /// passes through without triggering the gate.
+    #[tokio::test]
+    async fn test_knowledge_consent_escalation_store_non_gated_kind_no_gate() {
+        let (_tmp, path) = sandbox();
+        let (gate, mut rx) = ApprovalGate::new(RiskLevel::High, StdDuration::from_secs(60), 5);
+        let tool = knowledge_write_tool("store_knowledge");
+        let executor = ToolExecutor::new(
+            vec![Box::new(tool)],
+            StdDuration::from_secs(5),
+            None,
+            vec![],
+            Some(gate),
+            None,
+            None,
+            InjectionConfig::default(),
+        )
+        .unwrap();
+        let grant = grant_with_caps(&path, &[Capability::FileWrite]);
+
+        let output = executor
+            .execute(
+                "store_knowledge",
+                serde_json::json!({"kind": "learned_pattern", "content": "test"}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
+            .await;
+
+        assert_eq!(output.outcome, ToolOutcome::Success);
+        // No consent request should have been sent.
+        assert!(rx.try_recv().is_err(), "no gate should have fired");
+    }
+
+    /// `update_knowledge` with a consent-gated kind also triggers the gate.
+    #[tokio::test]
+    async fn test_knowledge_consent_escalation_update_gated_kind_triggers_gate() {
+        let (_tmp, path) = sandbox();
+        let (gate, mut rx) = ApprovalGate::new(RiskLevel::High, StdDuration::from_secs(60), 5);
+        let tool = knowledge_write_tool("update_knowledge");
+        let executor = Arc::new(
+            ToolExecutor::new(
+                vec![Box::new(tool)],
+                StdDuration::from_secs(5),
+                None,
+                vec![],
+                Some(gate),
+                None,
+                None,
+                InjectionConfig::default(),
+            )
+            .unwrap(),
+        );
+        let grant = grant_with_caps(&path, &[Capability::FileWrite]);
+        let sid = session_id();
+
+        let exec = Arc::clone(&executor);
+        let handle = tokio::spawn(async move {
+            exec.execute(
+                "update_knowledge",
+                serde_json::json!({"id": "abc", "kind": "user_preference", "content": "new"}),
+                &grant,
+                &sid,
+                "test-sender",
+            )
+            .await
+        });
+
+        let req = tokio::time::timeout(StdDuration::from_secs(2), rx.recv())
+            .await
+            .expect("consent request should arrive")
+            .expect("rx should not be closed");
+
+        match &req.category {
+            ApprovalCategory::Consent { tool_name, .. } => {
+                assert_eq!(tool_name, "update_knowledge");
+            }
+            other => panic!("expected Consent category, got {other:?}"),
+        }
+
+        executor
+            .approval_respond(&req.id, ApprovalResponse::Approved)
+            .await;
+        let output = handle.await.unwrap();
+        assert_eq!(output.outcome, ToolOutcome::Success);
+    }
+
+    /// `delete_knowledge` has no `kind` in its input — it must NOT be
+    /// escalated pre-execution (the kind is unknown until the store is queried).
+    #[tokio::test]
+    async fn test_knowledge_consent_escalation_delete_never_escalated() {
+        let (_tmp, path) = sandbox();
+        let (gate, mut rx) = ApprovalGate::new(RiskLevel::High, StdDuration::from_secs(60), 5);
+        // delete_knowledge uses FileDelete capability
+        let tool = MockTool::new("delete_knowledge", Capability::FileDelete)
+            .with_risk_level(RiskLevel::Medium)
+            .with_output("deleted", ToolOutcome::Success);
+        let executor = ToolExecutor::new(
+            vec![Box::new(tool)],
+            StdDuration::from_secs(5),
+            None,
+            vec![],
+            Some(gate),
+            None,
+            None,
+            InjectionConfig::default(),
+        )
+        .unwrap();
+        let grant = grant_with_caps(&path, &[Capability::FileDelete]);
+
+        let output = executor
+            .execute(
+                "delete_knowledge",
+                serde_json::json!({"id": "some-uuid"}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
+            .await;
+
+        assert_eq!(output.outcome, ToolOutcome::Success);
+        assert!(rx.try_recv().is_err(), "delete should not trigger the gate");
+    }
+
+    /// `search_knowledge` (read-only) is never escalated.
+    #[tokio::test]
+    async fn test_knowledge_consent_escalation_search_never_escalated() {
+        let (_tmp, path) = sandbox();
+        let (gate, mut rx) = ApprovalGate::new(RiskLevel::High, StdDuration::from_secs(60), 5);
+        let tool = MockTool::new("search_knowledge", Capability::FileRead)
+            .with_risk_level(RiskLevel::Low)
+            .with_output("[]", ToolOutcome::Success);
+        let executor = ToolExecutor::new(
+            vec![Box::new(tool)],
+            StdDuration::from_secs(5),
+            None,
+            vec![],
+            Some(gate),
+            None,
+            None,
+            InjectionConfig::default(),
+        )
+        .unwrap();
+        let grant = grant_with_caps(&path, &[Capability::FileRead]);
+
+        let output = executor
+            .execute(
+                "search_knowledge",
+                serde_json::json!({"query": "test", "kind": "system_config"}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
+            .await;
+
+        assert_eq!(output.outcome, ToolOutcome::Success);
+        assert!(rx.try_recv().is_err(), "search should not trigger the gate");
+    }
+
+    /// Missing or unrecognised `kind` field does not cause a panic or
+    /// spurious escalation — the call proceeds normally.
+    #[tokio::test]
+    async fn test_knowledge_consent_escalation_missing_kind_no_escalation() {
+        let (_tmp, path) = sandbox();
+        let (gate, mut rx) = ApprovalGate::new(RiskLevel::High, StdDuration::from_secs(60), 5);
+        let tool = knowledge_write_tool("store_knowledge");
+        let executor = ToolExecutor::new(
+            vec![Box::new(tool)],
+            StdDuration::from_secs(5),
+            None,
+            vec![],
+            Some(gate),
+            None,
+            None,
+            InjectionConfig::default(),
+        )
+        .unwrap();
+        let grant = grant_with_caps(&path, &[Capability::FileWrite]);
+
+        // No `kind` field at all — tool will reject it, but no gate should fire.
+        let output = executor
+            .execute(
+                "store_knowledge",
+                serde_json::json!({"content": "test"}),
+                &grant,
+                &session_id(),
+                "test-sender",
+            )
+            .await;
+
+        // MockTool returns Success regardless; the real tool would error.
+        // The important thing is no gate request was sent.
+        assert!(rx.try_recv().is_err(), "missing kind should not trigger gate");
+        // And the tool ran (outcome from MockTool).
+        assert_eq!(output.outcome, ToolOutcome::Success);
+    }
+
+    /// When secret-guard escalation and knowledge-consent escalation would
+    /// both fire, the secret-guard result takes precedence (Critical > High).
+    #[tokio::test]
+    async fn test_knowledge_consent_escalation_secret_guard_takes_precedence() {
+        let (_tmp, path) = sandbox();
+        let (gate, mut rx) = ApprovalGate::new(RiskLevel::High, StdDuration::from_secs(60), 5);
+        let tool = knowledge_write_tool("store_knowledge");
+        let executor = Arc::new(
+            ToolExecutor::new(
+                vec![Box::new(tool)],
+                StdDuration::from_secs(5),
+                None,
+                vec![],
+                Some(gate),
+                None,
+                Some(make_secret_guard()), // consent mode (escalate, not block)
+                InjectionConfig::default(),
+            )
+            .unwrap(),
+        );
+        let grant = grant_with_caps(&path, &[Capability::FileWrite]);
+        let sid = session_id();
+
+        // `.env` in the path triggers secret-guard escalation to Critical;
+        // `system_config` kind would escalate to High. Secret guard wins.
+        let exec = Arc::clone(&executor);
+        let handle = tokio::spawn(async move {
+            exec.execute(
+                "store_knowledge",
+                serde_json::json!({
+                    "kind": "system_config",
+                    "content": "test",
+                    "path": ".env"
+                }),
+                &grant,
+                &sid,
+                "test-sender",
+            )
+            .await
+        });
+
+        let req = tokio::time::timeout(StdDuration::from_secs(2), rx.recv())
+            .await
+            .expect("consent request should arrive")
+            .expect("rx should not be closed");
+
+        // Secret guard escalates to Critical and stamps "SECRET GUARD" in the
+        // description — that marker must be present.
+        match &req.category {
+            ApprovalCategory::Consent {
+                risk_level,
+                description,
+                ..
+            } => {
+                assert_eq!(
+                    *risk_level,
+                    RiskLevel::Critical,
+                    "secret guard should win with Critical"
+                );
+                assert!(
+                    description.contains("SECRET GUARD"),
+                    "description should contain SECRET GUARD marker, got: {description}"
+                );
+            }
+            other => panic!("expected Consent category, got {other:?}"),
+        }
+
+        executor
+            .approval_respond(&req.id, ApprovalResponse::Approved)
+            .await;
+        let _ = handle.await.unwrap();
+    }
+
+    /// Denying a consent-gated knowledge kind returns an error output and
+    /// the tool is never executed.
+    #[tokio::test]
+    async fn test_knowledge_consent_escalation_denial_blocks_execution() {
+        let (_tmp, path) = sandbox();
+        let (gate, mut rx) = ApprovalGate::new(RiskLevel::High, StdDuration::from_secs(60), 5);
+        let tool = knowledge_write_tool("store_knowledge");
+        let executed = tool.executed_flag();
+        let executor = Arc::new(
+            ToolExecutor::new(
+                vec![Box::new(tool)],
+                StdDuration::from_secs(5),
+                None,
+                vec![],
+                Some(gate),
+                None,
+                None,
+                InjectionConfig::default(),
+            )
+            .unwrap(),
+        );
+        let grant = grant_with_caps(&path, &[Capability::FileWrite]);
+        let sid = session_id();
+
+        let exec = Arc::clone(&executor);
+        let handle = tokio::spawn(async move {
+            exec.execute(
+                "store_knowledge",
+                serde_json::json!({"kind": "tool_capability", "content": "test"}),
+                &grant,
+                &sid,
+                "test-sender",
+            )
+            .await
+        });
+
+        let req = tokio::time::timeout(StdDuration::from_secs(2), rx.recv())
+            .await
+            .expect("consent request should arrive")
+            .expect("rx should not be closed");
+
+        executor
+            .approval_respond(
+                &req.id,
+                ApprovalResponse::Denied {
+                    reason: Some("not allowed".into()),
+                },
+            )
+            .await;
+
+        let output = handle.await.unwrap();
+        assert_eq!(output.outcome, ToolOutcome::Error);
+        assert!(
+            output.content.contains("Approval denied"),
+            "got: {}",
+            output.content
+        );
+        assert!(
+            !executed.load(Ordering::Relaxed),
+            "tool must not execute after denial"
+        );
+    }
+
+    /// All three consent-gated kinds trigger escalation on `store_knowledge`.
+    #[tokio::test]
+    async fn test_knowledge_consent_escalation_all_gated_kinds() {
+        for kind_str in ["system_config", "tool_capability", "user_preference"] {
+            let (_tmp, path) = sandbox();
+            let (gate, mut rx) =
+                ApprovalGate::new(RiskLevel::High, StdDuration::from_secs(60), 5);
+            let tool = knowledge_write_tool("store_knowledge");
+            let executor = Arc::new(
+                ToolExecutor::new(
+                    vec![Box::new(tool)],
+                    StdDuration::from_secs(5),
+                    None,
+                    vec![],
+                    Some(gate),
+                    None,
+                    None,
+                    InjectionConfig::default(),
+                )
+                .unwrap(),
+            );
+            let grant = grant_with_caps(&path, &[Capability::FileWrite]);
+            let sid = session_id();
+
+            let exec = Arc::clone(&executor);
+            let kind = kind_str.to_string();
+            let handle = tokio::spawn(async move {
+                exec.execute(
+                    "store_knowledge",
+                    serde_json::json!({"kind": kind, "content": "test"}),
+                    &grant,
+                    &sid,
+                    "test-sender",
+                )
+                .await
+            });
+
+            let req = tokio::time::timeout(StdDuration::from_secs(2), rx.recv())
+                .await
+                .unwrap_or_else(|_| panic!("no consent request for kind `{kind_str}`"))
+                .expect("rx should not be closed");
+
+            executor
+                .approval_respond(&req.id, ApprovalResponse::Approved)
+                .await;
+            let output = handle.await.unwrap();
+            assert_eq!(
+                output.outcome,
+                ToolOutcome::Success,
+                "kind `{kind_str}` should succeed after approval"
+            );
+        }
+    }
+
+    /// Non-consent-gated kinds do NOT trigger escalation on `store_knowledge`.
+    #[tokio::test]
+    async fn test_knowledge_consent_escalation_non_gated_kinds_no_gate() {
+        for kind_str in ["learned_pattern", "error_resolution", "session_insight"] {
+            let (_tmp, path) = sandbox();
+            let (gate, mut rx) =
+                ApprovalGate::new(RiskLevel::High, StdDuration::from_secs(60), 5);
+            let tool = knowledge_write_tool("store_knowledge");
+            let executor = ToolExecutor::new(
+                vec![Box::new(tool)],
+                StdDuration::from_secs(5),
+                None,
+                vec![],
+                Some(gate),
+                None,
+                None,
+                InjectionConfig::default(),
+            )
+            .unwrap();
+            let grant = grant_with_caps(&path, &[Capability::FileWrite]);
+
+            let output = executor
+                .execute(
+                    "store_knowledge",
+                    serde_json::json!({"kind": kind_str, "content": "test"}),
+                    &grant,
+                    &session_id(),
+                    "test-sender",
+                )
+                .await;
+
+            assert_eq!(
+                output.outcome,
+                ToolOutcome::Success,
+                "kind `{kind_str}` should not be gated"
+            );
+            assert!(
+                rx.try_recv().is_err(),
+                "kind `{kind_str}` should not trigger gate"
+            );
+        }
     }
 }
