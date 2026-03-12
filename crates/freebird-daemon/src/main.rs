@@ -32,11 +32,8 @@ use freebird_runtime::shutdown::ShutdownCoordinator;
 use freebird_security::secret_guard::SecretGuard;
 use freebird_types::config::AppConfig;
 
-mod chat;
 mod providers;
-mod replay;
 mod tools;
-mod ui;
 
 /// `Freebird` AI agent daemon.
 #[derive(Parser)]
@@ -309,7 +306,7 @@ async fn cmd_chat() -> Result<()> {
         eprintln!("Connected to {addr}");
     }
 
-    chat::run_chat(stream, is_tty).await
+    freebird_tui::chat::run_chat(stream, is_tty).await
 }
 
 /// `freebird status` — check if daemon is running by probing the TCP port.
@@ -339,7 +336,7 @@ async fn cmd_stop() -> Result<()> {
         name: "shutdown".into(),
         args: vec![],
     };
-    chat::send_client_message(&mut stream, &msg)
+    freebird_tui::chat::send_client_message(&mut stream, &msg)
         .await
         .context("sending shutdown command")?;
 
@@ -385,11 +382,11 @@ async fn cmd_replay(session_id: Option<String>, last: bool, json: bool) -> Resul
         .ok_or_else(|| anyhow::anyhow!("session `{sid}` not found"))?;
 
     if json {
-        let output =
-            replay::format_replay_json(&conversation).context("failed to serialize session")?;
+        let output = freebird_tui::replay::format_replay_json(&conversation)
+            .context("failed to serialize session")?;
         println!("{output}");
     } else {
-        let output = replay::format_replay(&conversation);
+        let output = freebird_tui::replay::format_replay(&conversation);
         print!("{output}");
     }
 

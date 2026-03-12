@@ -356,18 +356,14 @@ impl ConsentSelector {
     }
 
     fn budget_confirm(choice: BudgetChoice, info: &BudgetInfo, request_id: &str) -> ConsentAction {
-        use freebird_security::approval::BudgetOverrideAction;
-
+        // Wire format strings match freebird_security::approval::BudgetOverrideAction::to_wire()
         let (approved, budget_action) = match choice {
-            BudgetChoice::ApproveOnce => (true, Some(BudgetOverrideAction::ApproveOnce.to_wire())),
+            BudgetChoice::ApproveOnce => (true, Some("approve_once".to_string())),
             BudgetChoice::DoubleLimit => {
                 let doubled = info.current_limit.saturating_mul(2);
-                let action = BudgetOverrideAction::RaiseLimit { new_limit: doubled };
-                (true, Some(action.to_wire()))
+                (true, Some(format!("raise_limit:{doubled}")))
             }
-            BudgetChoice::DisableLimit => {
-                (true, Some(BudgetOverrideAction::DisableLimit.to_wire()))
-            }
+            BudgetChoice::DisableLimit => (true, Some("disable_limit".to_string())),
             BudgetChoice::Deny => (false, None),
         };
         ConsentAction::Confirmed {

@@ -19,6 +19,7 @@ freebird-providers = { path = "crates/freebird-providers" }
 freebird-channels = { path = "crates/freebird-channels" }
 freebird-tools = { path = "crates/freebird-tools" }
 freebird-memory = { path = "crates/freebird-memory" }
+freebird-tui = { path = "crates/freebird-tui" }
 
 # Async
 tokio = { version = "1", features = ["full"] }
