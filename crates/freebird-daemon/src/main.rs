@@ -137,6 +137,19 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         }
     }
 
+    // 6c. MIGRATION — one-time blob → event-sourced migration
+    {
+        let report = migrate::migrate_blob_to_events(&db)
+            .await
+            .context("blob-to-event migration failed")?;
+        if report.migrated > 0 {
+            tracing::info!(
+                migrated = report.migrated,
+                "blob → event-sourced migration complete"
+            );
+        }
+    }
+
     // 7. TOOLS — build registry before moving config.tools
     let tool_registry =
         tools::build_tool_registry(&config).context("failed to build tool registry")?;

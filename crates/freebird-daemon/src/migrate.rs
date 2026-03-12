@@ -155,6 +155,273 @@ pub async fn migrate_file_conversations(
     Ok(report)
 }
 
+/// Migrate existing blob conversations to event-sourced format.
+///
+/// For each session in the `conversations` table that has no events in
+/// `conversation_events`, emits `SessionCreated`, `TurnStarted`,
+/// `AssistantMessage`, `ToolInvoked`, and `TurnCompleted` events with
+/// HMAC chain integrity. Also upserts `session_metadata`.
+///
+/// Safe to run multiple times (idempotent).
+#[allow(clippy::too_many_lines)]
+pub async fn migrate_blob_to_events(db: &SqliteDb) -> Result<BlobMigrationReport> {
+    let conn = db.conn().await;
+
+    // Find sessions that have blob data but no events yet
+    let sessions: Vec<String> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.session_id FROM conversations c \
+                 LEFT JOIN conversation_events e ON c.session_id = e.session_id \
+                 WHERE e.session_id IS NULL \
+                 GROUP BY c.session_id",
+            )
+            .context("prepare blob migration query")?;
+
+        let rows = stmt
+            .query_map([], |row| row.get(0))
+            .context("query sessions for blob migration")?;
+
+        let mut sids = Vec::new();
+        for row in rows {
+            sids.push(row.context("read session_id")?);
+        }
+        sids
+    };
+
+    if sessions.is_empty() {
+        return Ok(BlobMigrationReport { migrated: 0 });
+    }
+
+    let mut migrated = 0;
+
+    for sid in &sessions {
+        // Load the blob
+        let row: Option<BlobRow> = conn
+            .query_row(
+                "SELECT session_id, system_prompt, model_id, provider_id, \
+                 created_at, updated_at, data FROM conversations WHERE session_id = ?1",
+                rusqlite::params![sid],
+                |row| {
+                    Ok(BlobRow {
+                        session_id: row.get(0)?,
+                        system_prompt: row.get(1)?,
+                        model_id: row.get(2)?,
+                        provider_id: row.get(3)?,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
+                        data: row.get(6)?,
+                    })
+                },
+            )
+            .optional()
+            .context("query blob conversation")?;
+
+        let Some(row) = row else { continue };
+
+        let turns: Vec<freebird_traits::memory::Turn> = match serde_json::from_str(&row.data) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(session_id = %row.session_id, error = %e, "failed to parse blob turns, skipping");
+                continue;
+            }
+        };
+
+        // Emit events for this session
+        let mut sequence: i64 = 0;
+        let mut prev_hmac = String::new();
+
+        // SessionCreated
+        let event = freebird_traits::event::ConversationEvent::SessionCreated {
+            system_prompt: row.system_prompt.clone(),
+            model_id: row.model_id.clone(),
+            provider_id: row.provider_id.clone(),
+        };
+        prev_hmac = insert_migration_event(
+            &conn,
+            &row.session_id,
+            sequence,
+            &event,
+            &row.created_at,
+            &prev_hmac,
+            db.signing_key(),
+        )?;
+        sequence += 1;
+
+        for (turn_idx, turn) in turns.iter().enumerate() {
+            // TurnStarted
+            let event = freebird_traits::event::ConversationEvent::TurnStarted {
+                turn_index: turn_idx,
+                user_message: turn.user_message.clone(),
+            };
+            prev_hmac = insert_migration_event(
+                &conn,
+                &row.session_id,
+                sequence,
+                &event,
+                &turn.started_at.to_rfc3339(),
+                &prev_hmac,
+                db.signing_key(),
+            )?;
+            sequence += 1;
+
+            // AssistantMessages
+            for (msg_idx, msg) in turn.assistant_messages.iter().enumerate() {
+                let event = freebird_traits::event::ConversationEvent::AssistantMessage {
+                    turn_index: turn_idx,
+                    message_index: msg_idx,
+                    message: msg.clone(),
+                };
+                prev_hmac = insert_migration_event(
+                    &conn,
+                    &row.session_id,
+                    sequence,
+                    &event,
+                    &msg.timestamp.to_rfc3339(),
+                    &prev_hmac,
+                    db.signing_key(),
+                )?;
+                sequence += 1;
+            }
+
+            // ToolInvocations
+            for (inv_idx, inv) in turn.tool_invocations.iter().enumerate() {
+                let event = freebird_traits::event::ConversationEvent::ToolInvoked {
+                    turn_index: turn_idx,
+                    invocation_index: inv_idx,
+                    invocation: inv.clone(),
+                };
+                let ts = turn.completed_at.unwrap_or(turn.started_at).to_rfc3339();
+                prev_hmac = insert_migration_event(
+                    &conn,
+                    &row.session_id,
+                    sequence,
+                    &event,
+                    &ts,
+                    &prev_hmac,
+                    db.signing_key(),
+                )?;
+                sequence += 1;
+            }
+
+            // TurnCompleted
+            if let Some(completed_at) = turn.completed_at {
+                let event = freebird_traits::event::ConversationEvent::TurnCompleted {
+                    turn_index: turn_idx,
+                    completed_at,
+                };
+                prev_hmac = insert_migration_event(
+                    &conn,
+                    &row.session_id,
+                    sequence,
+                    &event,
+                    &completed_at.to_rfc3339(),
+                    &prev_hmac,
+                    db.signing_key(),
+                )?;
+                sequence += 1;
+            }
+        }
+
+        // Upsert session_metadata
+        let preview = turns
+            .first()
+            .and_then(|t| t.user_message.content.first())
+            .map(|block| match block {
+                freebird_traits::provider::ContentBlock::Text { text } => {
+                    text.chars().take(100).collect()
+                }
+                _ => String::new(),
+            })
+            .unwrap_or_default();
+
+        #[allow(clippy::cast_possible_wrap)]
+        let turn_count = turns.len() as i64;
+
+        conn.execute(
+            "INSERT OR REPLACE INTO session_metadata \
+             (session_id, system_prompt, model_id, provider_id, \
+              created_at, updated_at, turn_count, preview) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                row.session_id,
+                row.system_prompt,
+                row.model_id,
+                row.provider_id,
+                row.created_at,
+                row.updated_at,
+                turn_count,
+                preview,
+            ],
+        )
+        .with_context(|| format!("upsert session_metadata for {}", row.session_id))?;
+
+        tracing::info!(session_id = %row.session_id, events = sequence, "migrated blob to events");
+        migrated += 1;
+    }
+    drop(conn);
+
+    Ok(BlobMigrationReport { migrated })
+}
+
+/// Insert a single migration event with HMAC chain.
+///
+/// Returns the computed HMAC for chaining.
+fn insert_migration_event(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    sequence: i64,
+    event: &freebird_traits::event::ConversationEvent,
+    timestamp: &str,
+    prev_hmac: &str,
+    signing_key: &ring::hmac::Key,
+) -> Result<String> {
+    let event_type = event.event_type().to_owned();
+    let event_json = serde_json::to_string(event).context("serialize migration event")?;
+
+    let hmac_hex = freebird_memory::event::compute_event_hmac(
+        session_id,
+        sequence,
+        event,
+        timestamp,
+        prev_hmac,
+        signing_key,
+    )
+    .context("compute event HMAC")?;
+
+    conn.execute(
+        "INSERT INTO conversation_events \
+         (session_id, sequence, event_type, event_data, timestamp, previous_hmac, hmac) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            session_id, sequence, event_type, event_json, timestamp, prev_hmac, hmac_hex
+        ],
+    )
+    .with_context(|| format!("insert migration event seq={sequence} for {session_id}"))?;
+
+    Ok(hmac_hex)
+}
+
+/// Summary of a blob-to-event migration run.
+#[derive(Debug)]
+pub struct BlobMigrationReport {
+    /// Number of sessions converted from blob to event format.
+    pub migrated: usize,
+}
+
+/// Intermediate row for blob migration.
+struct BlobRow {
+    session_id: String,
+    system_prompt: Option<String>,
+    model_id: String,
+    provider_id: String,
+    created_at: String,
+    updated_at: String,
+    data: String,
+}
+
+use rusqlite::OptionalExtension as _;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -453,5 +720,124 @@ mod tests {
         // Verify turns roundtrip
         let turns: Vec<Turn> = serde_json::from_str(&row.6).unwrap();
         assert_eq!(turns.len(), original.turns.len());
+    }
+
+    // --- Blob-to-event migration tests ---
+
+    /// Insert a blob conversation directly into the `conversations` table.
+    async fn insert_blob(db: &SqliteDb, conversation: &Conversation) {
+        let conn = db.conn().await;
+        let turns_json = serde_json::to_string(&conversation.turns).unwrap();
+        conn.execute(
+            "INSERT INTO conversations \
+             (session_id, system_prompt, model_id, provider_id, created_at, updated_at, data) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                conversation.session_id.as_str(),
+                conversation.system_prompt,
+                conversation.model_id.as_str(),
+                conversation.provider_id.as_str(),
+                conversation.created_at.to_rfc3339(),
+                conversation.updated_at.to_rfc3339(),
+                turns_json,
+            ],
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_blob_to_events_migrates_single_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(dir.path());
+        let conversation = make_conversation("blob-sess-1");
+        insert_blob(&db, &conversation).await;
+
+        let report = migrate_blob_to_events(&db).await.unwrap();
+        assert_eq!(report.migrated, 1);
+
+        // Verify events were created
+        let conn = db.conn().await;
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM conversation_events WHERE session_id = 'blob-sess-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // SessionCreated + TurnStarted + AssistantMessage + TurnCompleted = 4
+        assert_eq!(count, 4);
+
+        // Verify session_metadata was created
+        let preview: String = conn
+            .query_row(
+                "SELECT preview FROM session_metadata WHERE session_id = 'blob-sess-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(preview, "hello");
+    }
+
+    #[tokio::test]
+    async fn test_blob_to_events_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(dir.path());
+        let conversation = make_conversation("blob-idem");
+        insert_blob(&db, &conversation).await;
+
+        let r1 = migrate_blob_to_events(&db).await.unwrap();
+        assert_eq!(r1.migrated, 1);
+
+        // Second run should find no sessions to migrate (events already exist)
+        let r2 = migrate_blob_to_events(&db).await.unwrap();
+        assert_eq!(r2.migrated, 0);
+    }
+
+    #[tokio::test]
+    async fn test_blob_to_events_hmac_chain_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(dir.path());
+        let conversation = make_conversation("blob-hmac");
+        insert_blob(&db, &conversation).await;
+
+        migrate_blob_to_events(&db).await.unwrap();
+
+        // Verify the HMAC chain using the event module's verification
+        let conn = db.conn().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT session_id, sequence, event_data, timestamp, previous_hmac, hmac \
+                 FROM conversation_events WHERE session_id = 'blob-hmac' ORDER BY sequence",
+            )
+            .unwrap();
+        let rows: Vec<(String, i64, String, String, String, String)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        // Verify chain linkage
+        for i in 1..rows.len() {
+            assert_eq!(rows[i].4, rows[i - 1].5, "HMAC chain broken at seq {i}");
+        }
+        assert_eq!(rows[0].4, "", "First event should have empty previous_hmac");
+    }
+
+    #[tokio::test]
+    async fn test_blob_to_events_no_blobs_returns_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(dir.path());
+
+        let report = migrate_blob_to_events(&db).await.unwrap();
+        assert_eq!(report.migrated, 0);
     }
 }
