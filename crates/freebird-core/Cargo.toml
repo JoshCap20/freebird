@@ -1,0 +1,35 @@
+[package]
+name = "freebird-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+license.workspace = true
+description = "Freebird core — composition root and builder for wiring subsystems"
+
+[dependencies]
+freebird-traits = { workspace = true }
+freebird-types = { workspace = true }
+freebird-security = { workspace = true }
+freebird-runtime = { workspace = true }
+freebird-providers = { workspace = true }
+freebird-channels = { workspace = true }
+freebird-tools = { workspace = true }
+freebird-memory = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+figment = { workspace = true }
+secrecy = { workspace = true }
+home = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+ring = { workspace = true }
+hex = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

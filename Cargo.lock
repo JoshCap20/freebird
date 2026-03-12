@@ -410,6 +410,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "freebird-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "figment",
+ "freebird-channels",
+ "freebird-memory",
+ "freebird-providers",
+ "freebird-runtime",
+ "freebird-security",
+ "freebird-tools",
+ "freebird-traits",
+ "freebird-types",
+ "hex",
+ "home",
+ "reqwest",
+ "ring",
+ "secrecy",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "freebird-daemon"
 version = "0.1.0"
 dependencies = [
