@@ -682,6 +682,7 @@ async fn test_tool_use_timeout() {
         None,
         None,
         InjectionConfig::default(),
+        None,
     )
     .unwrap();
 

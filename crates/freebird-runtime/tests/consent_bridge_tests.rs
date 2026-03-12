@@ -186,6 +186,7 @@ async fn test_consent_request_forwarded_to_channel() {
         None,
         None,
         InjectionConfig::default(),
+        None,
     )
     .expect("executor construction should succeed");
 
@@ -310,6 +311,7 @@ async fn test_consent_approved_executes_tool() {
         None,
         None,
         InjectionConfig::default(),
+        None,
     )
     .expect("executor construction should succeed");
 
@@ -443,6 +445,7 @@ async fn test_consent_denied_returns_error_to_provider() {
         None,
         None,
         InjectionConfig::default(),
+        None,
     )
     .expect("executor construction should succeed");
 
@@ -575,6 +578,7 @@ async fn test_consent_low_risk_no_prompt() {
         None,
         None,
         InjectionConfig::default(),
+        None,
     )
     .expect("executor construction should succeed");
 
@@ -677,6 +681,7 @@ async fn test_consent_no_gate_executes_freely() {
         None,
         None,
         InjectionConfig::default(),
+        None,
     )
     .expect("executor construction should succeed");
 
@@ -763,6 +768,7 @@ async fn test_consent_response_unknown_id_logged() {
         None,
         None,
         InjectionConfig::default(),
+        None,
     )
     .expect("executor construction should succeed");
 

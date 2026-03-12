@@ -193,6 +193,7 @@ impl FreebirdBuilder {
             Some(Arc::clone(&memory)),
             secret_guard,
             config.security.injection.clone(),
+            None,
         )
         .context("failed to construct ToolExecutor (duplicate tool names?)")
         .map_err(CoreError::ToolRegistry)?;

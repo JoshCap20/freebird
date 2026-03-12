@@ -2282,6 +2282,7 @@ mod tests {
                 None,
                 None,
                 InjectionConfig::default(),
+                None,
             )
             .unwrap(),
             None,
