@@ -369,6 +369,29 @@ impl InputEditor {
         }
     }
 
+    /// Insert arbitrary text at the cursor, handling embedded newlines.
+    ///
+    /// Used by bracketed paste — the entire pasted content is inserted into
+    /// the buffer without triggering submit. Control characters (other than
+    /// newlines) are filtered out. `\r\n` sequences are treated as a single
+    /// newline to handle Windows-style line endings.
+    pub fn insert_text(&mut self, text: &str) {
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\r' {
+                // Consume a following \n if present (CRLF → single newline).
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                self.insert_newline();
+            } else if ch == '\n' {
+                self.insert_newline();
+            } else if !ch.is_control() {
+                self.insert_char(ch);
+            }
+        }
+    }
+
     fn insert_char(&mut self, ch: char) {
         if let Some(line) = self.lines.get_mut(self.cursor_row) {
             let byte_idx = char_to_byte_index(line, self.cursor_col);
@@ -752,6 +775,53 @@ mod tests {
             output.contains("\x1b[9G") || output.contains("\x1b[8G"),
             "cursor should wrap to column 8 on 20-col terminal, got: {output:?}"
         );
+    }
+
+    #[test]
+    fn insert_text_single_line() {
+        let mut editor = InputEditor::new(80);
+        editor.insert_text("hello world");
+        assert_eq!(editor.content(), "hello world");
+        assert_eq!(editor.cursor_col, 11);
+        assert_eq!(editor.lines.len(), 1);
+    }
+
+    #[test]
+    fn insert_text_multiline() {
+        let mut editor = InputEditor::new(80);
+        editor.insert_text("line1\nline2\nline3");
+        assert_eq!(editor.lines.len(), 3);
+        assert_eq!(editor.lines[0], "line1");
+        assert_eq!(editor.lines[1], "line2");
+        assert_eq!(editor.lines[2], "line3");
+        assert_eq!(editor.cursor_row, 2);
+        assert_eq!(editor.cursor_col, 5);
+    }
+
+    #[test]
+    fn insert_text_crlf_treated_as_single_newline() {
+        let mut editor = InputEditor::new(80);
+        editor.insert_text("line1\r\nline2\r\nline3");
+        assert_eq!(editor.lines.len(), 3);
+        assert_eq!(editor.lines[0], "line1");
+        assert_eq!(editor.lines[1], "line2");
+        assert_eq!(editor.lines[2], "line3");
+    }
+
+    #[test]
+    fn insert_text_bare_cr_treated_as_newline() {
+        let mut editor = InputEditor::new(80);
+        editor.insert_text("a\rb");
+        assert_eq!(editor.lines.len(), 2);
+        assert_eq!(editor.lines[0], "a");
+        assert_eq!(editor.lines[1], "b");
+    }
+
+    #[test]
+    fn insert_text_filters_control_chars() {
+        let mut editor = InputEditor::new(80);
+        editor.insert_text("hello\x00\x07world");
+        assert_eq!(editor.content(), "helloworld");
     }
 
     #[test]

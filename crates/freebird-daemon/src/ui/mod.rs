@@ -19,7 +19,7 @@ use std::io::{self, Write};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use crossterm::event::{Event, EventStream, KeyEvent};
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyEvent};
 use crossterm::terminal;
 use crossterm::{cursor, execute};
 use futures::StreamExt;
@@ -97,12 +97,15 @@ impl TtyChat {
         let original_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             let _ = terminal::disable_raw_mode();
-            let _ = execute!(io::stdout(), cursor::Show);
+            let _ = execute!(io::stdout(), DisableBracketedPaste, cursor::Show);
             original_hook(info);
         }));
 
         // Enable raw mode for full key control.
         terminal::enable_raw_mode().context("failed to enable raw mode")?;
+        // Enable bracketed paste so multi-line pastes arrive as a single
+        // Event::Paste(String) instead of individual KeyEvent per character.
+        execute!(io::stdout(), EnableBracketedPaste).context("failed to enable bracketed paste")?;
 
         let result = {
             let mut chat = Self::new()?;
@@ -111,7 +114,7 @@ impl TtyChat {
 
         // Always restore terminal state.
         let _ = terminal::disable_raw_mode();
-        let _ = execute!(io::stdout(), cursor::Show);
+        let _ = execute!(io::stdout(), DisableBracketedPaste, cursor::Show);
 
         result
     }
@@ -147,6 +150,10 @@ impl TtyChat {
                                 LoopControl::Continue => {}
                                 LoopControl::Exit => break,
                             }
+                        }
+                        Event::Paste(data) if self.consent.is_none() => {
+                            self.input.insert_text(&data);
+                            self.input.render(&mut self.writer)?;
                         }
                         Event::Resize(width, _height) => {
                             self.input.set_term_width(width);
