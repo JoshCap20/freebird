@@ -24,6 +24,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 /// Determines the metadata shown to the user and the UX treatment:
 /// - `Consent` → "CONSENT REQUIRED" (action-driven, yellow)
 /// - `SecurityWarning` → "SECURITY WARNING" (threat-driven, amber)
+/// - `BudgetExceeded` → "BUDGET EXCEEDED" (resource-driven, yellow)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ApprovalCategory {
@@ -46,6 +47,17 @@ pub enum ApprovalCategory {
         content_preview: String,
         /// Where the detection occurred (e.g., `user_input`, `tool:read_file`).
         source: String,
+    },
+    /// Budget-driven: a token or tool-round limit has been reached.
+    /// The user decides whether to allow the operation to continue
+    /// beyond the configured limit.
+    BudgetExceeded {
+        /// Which budget resource was exceeded (e.g., `tokens_per_request`).
+        resource: String,
+        /// How much was used (or attempted).
+        used: u64,
+        /// The configured limit that was exceeded.
+        limit: u64,
     },
 }
 
@@ -248,6 +260,32 @@ impl ApprovalGate {
         self.request_approval(category, sender_id).await
     }
 
+    /// Request approval for a budget limit exceeded event.
+    ///
+    /// Always sends the request — the caller has already determined that
+    /// a limit was exceeded. If approved, the caller should force-commit
+    /// the usage or allow the round to proceed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApprovalError`] if the user denies, the request expires,
+    /// the rate limit is hit, or the channel is closed.
+    pub async fn check_budget(
+        &self,
+        resource: String,
+        used: u64,
+        limit: u64,
+        sender_id: &str,
+    ) -> Result<(), ApprovalError> {
+        let category = ApprovalCategory::BudgetExceeded {
+            resource,
+            used,
+            limit,
+        };
+
+        self.request_approval(category, sender_id).await
+    }
+
     /// Request approval for a security warning (injection detection, etc.).
     ///
     /// Always sends the request (no threshold check) — the decision to
@@ -323,6 +361,9 @@ impl ApprovalCategory {
             Self::Consent { tool_name, .. } => format!("tool `{tool_name}`"),
             Self::SecurityWarning { threat_type, .. } => {
                 format!("security warning ({threat_type})")
+            }
+            Self::BudgetExceeded { resource, .. } => {
+                format!("budget `{resource}`")
             }
         }
     }
@@ -408,8 +449,8 @@ mod tests {
                 assert_eq!(tool_name, "write_file");
                 assert_eq!(*risk_level, RiskLevel::Medium);
             }
-            ApprovalCategory::SecurityWarning { .. } => {
-                panic!("expected Consent, got SecurityWarning")
+            other => {
+                panic!("expected Consent, got {other:?}")
             }
         }
 
@@ -566,7 +607,7 @@ mod tests {
                 assert_eq!(detected_pattern, "ignore previous");
                 assert_eq!(source, "user_input");
             }
-            ApprovalCategory::Consent { .. } => panic!("expected SecurityWarning, got Consent"),
+            other => panic!("expected SecurityWarning, got {other:?}"),
         }
 
         let _ = gate.respond(&req.id, ApprovalResponse::Approved).await;
@@ -627,6 +668,13 @@ mod tests {
             warning.context_label(),
             "security warning (injection_input)"
         );
+
+        let budget = ApprovalCategory::BudgetExceeded {
+            resource: "tokens_per_request".into(),
+            used: 36000,
+            limit: 32768,
+        };
+        assert_eq!(budget.context_label(), "budget `tokens_per_request`");
     }
 
     // ── Cleanup and edge cases ─────────────────────────────────────
@@ -857,5 +905,113 @@ mod tests {
 
         let closed = ApprovalError::ChannelClosed;
         assert_eq!(closed.to_string(), "approval channel closed");
+    }
+
+    // ── Budget exceeded approval ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_budget_exceeded_approved() {
+        let (gate, mut rx) = ApprovalGate::new(RiskLevel::High, Duration::from_secs(60), 5);
+        let gate = Arc::new(gate);
+
+        let gate_clone = Arc::clone(&gate);
+        let handle = tokio::spawn(async move {
+            gate_clone
+                .check_budget("tokens_per_request".into(), 36000, 32768, "test-sender")
+                .await
+        });
+
+        let req = rx.recv().await.unwrap();
+        match &req.category {
+            ApprovalCategory::BudgetExceeded {
+                resource,
+                used,
+                limit,
+            } => {
+                assert_eq!(resource, "tokens_per_request");
+                assert_eq!(*used, 36000);
+                assert_eq!(*limit, 32768);
+            }
+            other => panic!("expected BudgetExceeded, got {other:?}"),
+        }
+
+        let _ = gate.respond(&req.id, ApprovalResponse::Approved).await;
+        assert!(handle.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_budget_exceeded_denied() {
+        let (gate, mut rx) = ApprovalGate::new(RiskLevel::High, Duration::from_secs(60), 5);
+        let gate = Arc::new(gate);
+
+        let gate_clone = Arc::clone(&gate);
+        let handle = tokio::spawn(async move {
+            gate_clone
+                .check_budget("tokens_per_session".into(), 600_000, 500_000, "test-sender")
+                .await
+        });
+
+        let req = rx.recv().await.unwrap();
+        let _ = gate
+            .respond(
+                &req.id,
+                ApprovalResponse::Denied {
+                    reason: Some("too expensive".into()),
+                },
+            )
+            .await;
+
+        let err = handle.await.unwrap().unwrap_err();
+        match err {
+            ApprovalError::Denied { context, reason } => {
+                assert!(context.contains("tokens_per_session"));
+                assert_eq!(reason, "too expensive");
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_budget_exceeded_timeout() {
+        let ttl = Duration::from_secs(5);
+        let (gate, _rx) = ApprovalGate::new(RiskLevel::High, ttl, 5);
+
+        let result = gate
+            .check_budget("tool_rounds_per_turn".into(), 10, 10, "test-sender")
+            .await;
+
+        match result.unwrap_err() {
+            ApprovalError::Expired {
+                context,
+                timeout_secs,
+            } => {
+                assert!(context.contains("tool_rounds_per_turn"));
+                assert_eq!(timeout_secs, 5);
+            }
+            other => panic!("expected Expired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_budget_exceeded_context_label() {
+        let budget = ApprovalCategory::BudgetExceeded {
+            resource: "tokens_per_request".into(),
+            used: 36000,
+            limit: 32768,
+        };
+        assert_eq!(budget.context_label(), "budget `tokens_per_request`");
+    }
+
+    #[test]
+    fn test_budget_exceeded_serde_roundtrip() {
+        let budget = ApprovalCategory::BudgetExceeded {
+            resource: "tokens_per_session".into(),
+            used: 600_000,
+            limit: 500_000,
+        };
+        let json = serde_json::to_string(&budget).unwrap();
+        assert!(json.contains(r#""kind":"budget_exceeded""#));
+        let back: ApprovalCategory = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, budget);
     }
 }

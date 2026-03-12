@@ -139,6 +139,15 @@ impl TokenBudget {
     pub const fn max_tool_rounds(&self) -> u32 {
         self.max_tool_rounds_per_turn
     }
+
+    /// Record token usage unconditionally, bypassing per-request and
+    /// per-session limits. Used after the user explicitly approves a
+    /// budget-exceeded approval request.
+    pub fn force_record_usage(&self, usage: &TokenUsage) {
+        let request_tokens = u64::from(usage.input_tokens) + u64::from(usage.output_tokens);
+        self.tokens_used
+            .fetch_add(request_tokens, Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]
@@ -459,5 +468,37 @@ mod tests {
             err.to_string(),
             "budget exceeded for `tokens_per_session`: used 600000, limit 500000"
         );
+    }
+
+    // ── force_record_usage tests ──────────────────────────────────
+
+    #[test]
+    fn force_record_usage_bypasses_per_request_limit() {
+        let budget = TokenBudget::new(&small_config());
+        // 250 exceeds per-request limit of 200 — normal record would fail.
+        let big_usage = usage(150, 100);
+        assert!(budget.record_usage(&big_usage).is_err());
+        assert_eq!(budget.tokens_used(), 0);
+
+        // Force bypasses the limit.
+        budget.force_record_usage(&big_usage);
+        assert_eq!(budget.tokens_used(), 250);
+    }
+
+    #[test]
+    fn force_record_usage_bypasses_session_limit() {
+        let budget = TokenBudget::new(&small_config());
+        // Fill to 900.
+        for _ in 0..9 {
+            budget.record_usage(&usage(50, 50)).unwrap();
+        }
+        // 200 more would exceed 1000 session limit.
+        let over_usage = usage(100, 100);
+        assert!(budget.record_usage(&over_usage).is_err());
+        assert_eq!(budget.tokens_used(), 900);
+
+        // Force bypasses the limit.
+        budget.force_record_usage(&over_usage);
+        assert_eq!(budget.tokens_used(), 1100);
     }
 }

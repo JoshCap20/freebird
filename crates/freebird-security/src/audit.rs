@@ -114,6 +114,9 @@ pub enum AuditEventType {
         resource: String,
         used: u64,
         limit: u64,
+        /// Whether the user approved the budget override (`true`) or
+        /// it was denied/expired (`false`).
+        approved: bool,
     },
     SecretAccessBlocked {
         tool_name: String,
@@ -905,6 +908,7 @@ mod tests {
                 resource: "tokens_per_session".into(),
                 used: 600_000,
                 limit: 500_000,
+                approved: false,
             },
         ];
 
@@ -1359,6 +1363,7 @@ mod tests {
                 resource: "tokens_per_session".into(),
                 used: 600_000,
                 limit: 500_000,
+                approved: false,
             },
         ];
 

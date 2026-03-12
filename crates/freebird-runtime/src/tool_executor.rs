@@ -238,6 +238,29 @@ impl ToolExecutor {
         }
     }
 
+    /// Request user approval for a budget limit exceeded event.
+    ///
+    /// Returns `Ok(())` if the user approves (caller should force-commit usage),
+    /// or an `ApprovalError` if denied, expired, or no gate is configured.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApprovalError`] if the user denies, the request expires,
+    /// the rate limit is hit, the channel is closed, or no gate is configured.
+    pub async fn check_budget_approval(
+        &self,
+        resource: String,
+        used: u64,
+        limit: u64,
+        sender_id: &str,
+    ) -> Result<(), ApprovalError> {
+        if let Some(gate) = &self.approval_gate {
+            gate.check_budget(resource, used, limit, sender_id).await
+        } else {
+            Err(ApprovalError::ChannelClosed)
+        }
+    }
+
     /// Execute a tool by name. This is the ONLY entry point for tool execution.
     ///
     /// Enforces the mandatory security sequence from CLAUDE.md §11.2:
@@ -1770,7 +1793,7 @@ mod tests {
         let req = rx.recv().await.unwrap();
         match &req.category {
             ApprovalCategory::Consent { tool_name, .. } => assert_eq!(tool_name, "shell"),
-            ApprovalCategory::SecurityWarning { .. } => panic!("expected Consent category"),
+            other => panic!("expected Consent category, got {other:?}"),
         }
         executor
             .approval_respond(&req.id, ApprovalResponse::Approved)
@@ -2083,7 +2106,7 @@ mod tests {
             freebird_security::approval::ApprovalCategory::Consent { action_summary, .. } => {
                 action_summary
             }
-            ApprovalCategory::SecurityWarning { .. } => panic!("expected Consent category"),
+            other => panic!("expected Consent category, got {other:?}"),
         };
         assert!(
             action_summary.len() < 1000,
@@ -2148,7 +2171,7 @@ mod tests {
         // Should not have panicked, and should be truncated
         let action_summary = match &request.category {
             ApprovalCategory::Consent { action_summary, .. } => action_summary.clone(),
-            ApprovalCategory::SecurityWarning { .. } => panic!("expected Consent category"),
+            other => panic!("expected Consent category, got {other:?}"),
         };
         assert!(
             action_summary.contains("bytes total"),
@@ -2274,7 +2297,7 @@ mod tests {
                     "description should mention SECRET GUARD, got: {description}",
                 );
             }
-            ApprovalCategory::SecurityWarning { .. } => panic!("expected Consent category"),
+            other => panic!("expected Consent category, got {other:?}"),
         }
 
         // Deny the consent to let the task complete
