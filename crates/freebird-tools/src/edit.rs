@@ -692,7 +692,7 @@ fn language_for_path(path: &Path) -> Option<tree_sitter::Language> {
 
 /// Walk the tree collecting ERROR and MISSING nodes via depth-first traversal.
 fn collect_syntax_errors(tree: &tree_sitter::Tree) -> Vec<SyntaxError> {
-    let mut errors = Vec::new();
+    let mut errors = Vec::with_capacity(MAX_SYNTAX_ERRORS);
     let mut cursor = tree.walk();
 
     loop {
@@ -749,10 +749,17 @@ fn validate_syntax(path: &Path, content: &str) -> Result<(), ToolError> {
         return Ok(());
     }
 
+    let error_count = errors.len();
     let mut msg = String::from("Edit rejected — syntax errors detected (file not modified):\n");
     for err in &errors {
         let _ = writeln!(msg, "  line {}:{} — {}", err.line, err.column, err.kind);
     }
+
+    tracing::debug!(
+        path = %path.display(),
+        error_count,
+        "syntax validation rejected edit"
+    );
 
     Err(ToolError::ExecutionFailed {
         tool: SearchReplaceEditTool::NAME.into(),
@@ -2163,6 +2170,14 @@ mod tests {
                     prop_assert_eq!(actual, Some(sl.text),
                         "offset {} len {} doesn't match", sl.byte_offset, sl.text.len());
                 }
+            }
+
+            /// validate_syntax never panics on arbitrary input.
+            #[test]
+            fn validate_syntax_never_panics(content in "\\PC{0,2000}") {
+                let path = Path::new("test.rs");
+                // Must not panic — may return Ok or Err, both are fine
+                let _ = validate_syntax(path, &content);
             }
         }
     }
