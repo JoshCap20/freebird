@@ -116,7 +116,15 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
             freebird_memory::sqlite_audit::SqliteAuditSink::new(std::sync::Arc::clone(&db)),
         ));
 
-    // 6b. EMIT DaemonStarted audit event
+    // 6b. VERIFY AUDIT CHAIN — detect tampering between restarts (ASI06, #111)
+    if let Some(ref sink) = audit_sink {
+        sink.verify_chain().await.with_context(
+            || "audit chain integrity check failed — the audit log may have been tampered with",
+        )?;
+        tracing::info!("audit chain integrity verified");
+    }
+
+    // 6c. EMIT DaemonStarted audit event
     if let Some(ref sink) = audit_sink {
         let event = freebird_security::audit::AuditEventType::DaemonStarted {
             version: env!("CARGO_PKG_VERSION").to_string(),
