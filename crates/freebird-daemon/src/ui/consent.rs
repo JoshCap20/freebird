@@ -64,8 +64,6 @@ impl BudgetChoice {
 /// Budget info passed when creating a budget-mode consent selector.
 #[derive(Debug, Clone)]
 pub struct BudgetInfo {
-    /// The budget resource name (e.g., `"tokens_per_request"`).
-    pub resource: String,
     /// The current limit value.
     pub current_limit: u64,
 }
@@ -438,10 +436,7 @@ mod tests {
             request_id.to_string(),
             "test_tool".to_string(),
             &future,
-            BudgetInfo {
-                resource: "tokens_per_request".to_string(),
-                current_limit,
-            },
+            BudgetInfo { current_limit },
         )
         .unwrap()
     }
@@ -480,7 +475,6 @@ mod tests {
     fn test_new_budget_returns_none_for_expired() {
         let past = (Utc::now() - Duration::minutes(1)).to_rfc3339();
         let info = BudgetInfo {
-            resource: "tokens_per_request".to_string(),
             current_limit: 32768,
         };
         assert!(

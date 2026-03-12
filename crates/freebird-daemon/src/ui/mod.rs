@@ -591,7 +591,6 @@ impl TtyChat {
                     action_summary: summary,
                     risk_level: RISK_LEVEL_BUDGET_EXCEEDED.into(),
                     budget_info: Some(consent::BudgetInfo {
-                        resource,
                         current_limit: limit,
                     }),
                 }

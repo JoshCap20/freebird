@@ -321,6 +321,7 @@ impl ApprovalGate {
         limit: u64,
         sender_id: &str,
     ) -> Result<BudgetOverrideAction, ApprovalError> {
+        let context = format!("budget:{resource}");
         let category = ApprovalCategory::BudgetExceeded {
             resource,
             used,
@@ -330,8 +331,12 @@ impl ApprovalGate {
         match self.request_approval_raw(category, sender_id).await? {
             ApprovalResponse::Approved => Ok(BudgetOverrideAction::ApproveOnce),
             ApprovalResponse::BudgetOverride { action } => Ok(action),
-            // Denied is already handled as Err by request_approval_raw
-            ApprovalResponse::Denied { .. } => unreachable!(),
+            // Denied is already converted to Err by request_approval_raw,
+            // but handle defensively in case the contract changes.
+            ApprovalResponse::Denied { reason } => Err(ApprovalError::Denied {
+                context,
+                reason: reason.unwrap_or_else(|| "user denied".into()),
+            }),
         }
     }
 
