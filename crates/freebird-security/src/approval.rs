@@ -1158,6 +1158,34 @@ mod tests {
     }
 
     #[test]
+    fn test_budget_override_wire_roundtrip() {
+        let cases = vec![
+            (BudgetOverrideAction::ApproveOnce, "approve_once"),
+            (
+                BudgetOverrideAction::RaiseLimit { new_limit: 65536 },
+                "raise_limit:65536",
+            ),
+            (BudgetOverrideAction::DisableLimit, "disable_limit"),
+        ];
+        for (action, expected_wire) in cases {
+            let wire = action.to_wire();
+            assert_eq!(wire, expected_wire);
+            let parsed = BudgetOverrideAction::from_wire(&wire).unwrap();
+            assert_eq!(parsed, action);
+        }
+    }
+
+    #[test]
+    fn test_budget_override_from_wire_rejects_invalid() {
+        assert!(BudgetOverrideAction::from_wire("").is_none());
+        assert!(BudgetOverrideAction::from_wire("unknown").is_none());
+        assert!(BudgetOverrideAction::from_wire("raise_limit:").is_none());
+        assert!(BudgetOverrideAction::from_wire("raise_limit:0").is_none());
+        assert!(BudgetOverrideAction::from_wire("raise_limit:abc").is_none());
+        assert!(BudgetOverrideAction::from_wire("raise_limit:-1").is_none());
+    }
+
+    #[test]
     fn test_budget_override_action_serde_roundtrip() {
         let actions = vec![
             BudgetOverrideAction::ApproveOnce,

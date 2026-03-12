@@ -258,7 +258,10 @@ impl AgentRuntime {
                                         let response = if let Some(ref action_str) = budget_action {
                                             match parse_budget_action(action_str) {
                                                 Some(action) => freebird_security::approval::ApprovalResponse::BudgetOverride { action },
-                                                None if approved => freebird_security::approval::ApprovalResponse::Approved,
+                                                None if approved => {
+                                                    tracing::warn!(budget_action = %action_str, "unrecognized budget_action, falling back to Approved");
+                                                    freebird_security::approval::ApprovalResponse::Approved
+                                                }
                                                 None => freebird_security::approval::ApprovalResponse::Denied { reason },
                                             }
                                         } else if approved {
