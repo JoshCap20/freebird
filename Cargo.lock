@@ -443,30 +443,18 @@ name = "freebird-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chrono",
  "clap",
  "figment",
- "freebird-channels",
- "freebird-memory",
- "freebird-providers",
+ "freebird-core",
  "freebird-runtime",
  "freebird-security",
- "freebird-tools",
  "freebird-traits",
  "freebird-tui",
  "freebird-types",
- "hex",
- "home",
- "reqwest",
- "ring",
- "rusqlite",
- "secrecy",
- "serde_json",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]

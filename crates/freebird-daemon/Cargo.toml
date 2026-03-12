@@ -5,37 +5,25 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 license.workspace = true
-description = "Freebird daemon binary — the composition root"
+description = "Freebird daemon binary — thin shell over freebird-core"
 
 [[bin]]
 name = "freebird"
 path = "src/main.rs"
 
 [dependencies]
+freebird-core = { workspace = true }
+freebird-tui = { workspace = true }
 freebird-traits = { workspace = true }
 freebird-types = { workspace = true }
 freebird-runtime = { workspace = true }
-freebird-providers = { workspace = true }
-freebird-channels = { workspace = true }
-freebird-memory = { workspace = true }
 freebird-security = { workspace = true }
-freebird-tools = { workspace = true }
-freebird-tui = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-figment = { workspace = true }
 anyhow = { workspace = true }
-secrecy = { workspace = true }
-home = { workspace = true }
 clap = { workspace = true }
-reqwest = { workspace = true }
-serde_json = { workspace = true }
-chrono = { workspace = true }
-rusqlite = { workspace = true }
-uuid = { workspace = true }
-ring = { workspace = true }
-hex = { workspace = true }
 
 [dev-dependencies]
+figment = { workspace = true }
 tempfile = { workspace = true }
