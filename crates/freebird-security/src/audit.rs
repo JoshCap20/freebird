@@ -1,14 +1,11 @@
-//! Tamper-evident, hash-chained audit logging types and helpers.
+//! Security audit event types.
 //!
-//! Domain event types ([`AuditEventType`]), chain metadata ([`AuditEntry`],
-//! [`AuditLine`]), and HMAC helper functions used by the `AuditSink`
-//! implementation in `freebird-memory`.
+//! Domain event types ([`AuditEventType`]) and supporting enums used by the
+//! `AuditSink` trait and its implementations.
 
-use chrono::{DateTime, Utc};
-use ring::hmac;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{SecurityError, Severity};
+use crate::error::Severity;
 
 // ── Domain event types ──────────────────────────────────────────────
 
@@ -150,124 +147,6 @@ pub enum AuditEventType {
     DaemonShutdown {
         reason: String,
     },
-}
-
-// ── Chain metadata types ────────────────────────────────────────────
-
-/// Chain metadata wrapping a domain event.
-///
-/// `sequence` + `timestamp` + `previous_hash` form the tamper-evident chain.
-///
-/// Fields are `pub(crate)` to prevent external crates from constructing
-/// entries that bypass the `AuditSink` chain integrity invariants
-/// (CLAUDE.md §3.2, §30).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuditEntry {
-    pub(crate) sequence: u64,
-    pub(crate) session_id: String,
-    pub(crate) event: AuditEventType,
-    pub(crate) timestamp: DateTime<Utc>,
-    pub(crate) previous_hash: String,
-}
-
-impl AuditEntry {
-    /// Sequence number of this entry in the log (0-indexed).
-    #[must_use]
-    pub const fn sequence(&self) -> u64 {
-        self.sequence
-    }
-
-    /// Session that generated this event.
-    #[must_use]
-    pub fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
-    /// The domain event.
-    #[must_use]
-    pub const fn event(&self) -> &AuditEventType {
-        &self.event
-    }
-
-    /// When this event was recorded.
-    #[must_use]
-    pub const fn timestamp(&self) -> DateTime<Utc> {
-        self.timestamp
-    }
-}
-
-/// The on-disk format: entry + its HMAC.
-///
-/// One `AuditLine` = one row in the audit log.
-///
-/// Fields are `pub(crate)` — external crates read entries via accessor
-/// methods, never construct `AuditLine` directly.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuditLine {
-    pub(crate) entry: AuditEntry,
-    pub(crate) hmac: String,
-}
-
-impl AuditLine {
-    /// The audit entry.
-    #[must_use]
-    pub const fn entry(&self) -> &AuditEntry {
-        &self.entry
-    }
-
-    /// The HMAC-SHA256 hex string for this entry.
-    #[must_use]
-    pub fn hmac(&self) -> &str {
-        &self.hmac
-    }
-}
-
-// ── HMAC helpers ────────────────────────────────────────────────────
-
-/// Compute the HMAC-SHA256 of an `AuditEntry`, returning a hex-encoded string.
-///
-/// # Errors
-///
-/// Returns `SecurityError::AuditWriteFailed` if the entry cannot be serialized.
-pub fn compute_hmac(entry: &AuditEntry, key: &hmac::Key) -> Result<String, SecurityError> {
-    let json = serde_json::to_string(entry).map_err(|e| SecurityError::AuditWriteFailed {
-        reason: format!("entry serialization failed: {e}"),
-    })?;
-    let tag = hmac::sign(key, json.as_bytes());
-    Ok(hex::encode(tag.as_ref()))
-}
-
-/// Verify that an `AuditEntry`'s HMAC matches the expected hex-encoded value.
-///
-/// Uses `ring::hmac::verify` which performs constant-time comparison internally,
-/// avoiding timing oracle attacks.
-///
-/// Returns `AuditCorruption` with `line: 0` as a placeholder — callers must
-/// override the line number via `.map_err()` to provide the actual position.
-///
-/// # Errors
-///
-/// Returns `SecurityError::AuditCorruption` if the HMAC does not match or
-/// the entry cannot be serialized for verification.
-pub fn verify_entry_hmac(
-    entry: &AuditEntry,
-    key: &hmac::Key,
-    expected_hex: &str,
-) -> Result<(), SecurityError> {
-    let json = serde_json::to_string(entry).map_err(|e| SecurityError::AuditCorruption {
-        line: 0, // Caller overrides with actual line number.
-        reason: format!("entry serialization failed during verification: {e}"),
-    })?;
-    let expected_bytes = hex::decode(expected_hex).map_err(|_| SecurityError::AuditCorruption {
-        line: 0, // Caller overrides with actual line number.
-        reason: "invalid HMAC hex encoding".into(),
-    })?;
-    hmac::verify(key, json.as_bytes(), &expected_bytes).map_err(|_| {
-        SecurityError::AuditCorruption {
-            line: 0, // Caller overrides with actual line number.
-            reason: "HMAC mismatch — entry has been modified".into(),
-        }
-    })
 }
 
 #[cfg(test)]
