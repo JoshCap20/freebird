@@ -61,7 +61,14 @@ impl AuditSink for SqliteAuditSink {
             self.db.signing_key(),
         );
 
-        conn.execute(
+        // Insert event + update tail metadata atomically. If the process
+        // crashes between the two, verify_chain() would false-positive on
+        // tail truncation. A transaction ensures both succeed or neither does.
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| rusqlite_to_io("begin audit transaction", &e))?;
+
+        tx.execute(
             "INSERT INTO audit_events \
              (sequence, session_id, event_type, event_data, timestamp, previous_hmac, hmac) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -69,12 +76,14 @@ impl AuditSink for SqliteAuditSink {
         )
         .map_err(|e| rusqlite_to_io("insert audit event", &e))?;
 
-        // Update tail truncation metadata
-        conn.execute(
+        tx.execute(
             "UPDATE audit_metadata SET expected_next_sequence = ?1, last_hmac = ?2 WHERE id = 1",
             rusqlite::params![next_seq + 1, hmac_hex],
         )
         .map_err(|e| rusqlite_to_io("update audit metadata", &e))?;
+
+        tx.commit()
+            .map_err(|e| rusqlite_to_io("commit audit transaction", &e))?;
 
         Ok(())
     }
