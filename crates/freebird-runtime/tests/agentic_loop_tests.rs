@@ -1733,20 +1733,17 @@ async fn test_capability_denial_propagates_to_provider() {
         text_response("I understand the tool was denied"),
     ]));
 
-    // MockTool requiring ShellExecute capability.
-    let shell_tool = MockTool::new(
-        "dangerous_shell",
-        vec![Ok(ToolOutput {
-            content: "this should never execute".into(),
-            outcome: ToolOutcome::Success,
-            metadata: None,
-        })],
-    );
-    // Override the required capability to ShellExecute.
-    let mut shell_info = shell_tool.info().clone();
-    shell_info.required_capability = Capability::ShellExecute;
+    // Construct a tool requiring ShellExecute — the grant only has FileRead,
+    // so execution should be denied.
     let restricted_shell_tool = CapabilityRestrictedMockTool {
-        info: shell_info,
+        info: ToolInfo {
+            name: "dangerous_shell".into(),
+            description: "Test tool requiring ShellExecute".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+            required_capability: Capability::ShellExecute,
+            risk_level: RiskLevel::Critical,
+            side_effects: SideEffects::HasSideEffects,
+        },
         outputs: TokioMutex::new(VecDeque::from(vec![Ok(ToolOutput {
             content: "this should never execute".into(),
             outcome: ToolOutcome::Success,

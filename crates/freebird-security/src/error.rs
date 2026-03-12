@@ -61,10 +61,6 @@ pub enum SecurityError {
     #[error("egress request body too large: {actual} bytes exceeds {max} byte limit")]
     EgressBodyTooLarge { actual: usize, max: usize },
 
-    // ── Capability revocation ─────────────────────────────────────
-    #[error("capability grant revoked for session `{session_id}`")]
-    GrantRevoked { session_id: String },
-
     // ── Context poisoning ────────────────────────────────────────
     #[error("context poisoning attempt detected: pattern `{pattern}`")]
     ContextPoisoningAttempt { pattern: String },

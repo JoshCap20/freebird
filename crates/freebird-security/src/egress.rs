@@ -238,6 +238,8 @@ impl EgressRateLimiter {
     /// effectively unlimited.
     #[must_use]
     pub fn new(limit: u32) -> Self {
+        // u32→usize is always safe: usize ≥ 32 bits on all supported platforms.
+        #[allow(clippy::cast_possible_truncation)]
         let size = limit as usize;
         let mut timestamps = Vec::with_capacity(size);
         for _ in 0..size {
@@ -255,6 +257,12 @@ impl EgressRateLimiter {
     /// Uses a 60-second sliding window. The oldest timestamp in the circular buffer
     /// is compared against the current time; if it is less than 60 seconds old, the
     /// window is full and the request is rejected.
+    ///
+    /// **Concurrency note**: Under high contention, a small number of extra
+    /// requests (up to the number of concurrent callers) may pass the check
+    /// before the window is fully recorded. This is an inherent trade-off of
+    /// the lock-free atomic design — acceptable for egress rate limiting where
+    /// occasional overshoot is tolerable.
     ///
     /// # Errors
     ///
