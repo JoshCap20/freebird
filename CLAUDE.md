@@ -54,7 +54,9 @@ freebird/
 │   ├── freebird-channels/           # Channel implementations (TCP, etc.)
 │   ├── freebird-tools/              # Built-in tool implementations
 │   ├── freebird-memory/             # Event-sourced conversations, knowledge store, audit sink (all SQLCipher-encrypted)
-│   └── freebird-daemon/             # Binary — thin composition root
+│   ├── freebird-core/               # Composition root — FreebirdBuilder, config, database init, provider/tool registry wiring
+│   ├── freebird-tui/                # Terminal UI — interactive chat client, replay formatter, consent widgets (no security/runtime deps)
+│   └── freebird-daemon/             # Binary — thin shell over freebird-core (CLI parsing, signals, logging)
 ```
 
 ### Dependency DAG (Strict — Enforced by Cargo)
@@ -73,7 +75,10 @@ freebird-channels        (depends on: freebird-traits, freebird-types, freebird-
 freebird-tools           (depends on: freebird-traits, freebird-types, freebird-security)
 freebird-memory          (depends on: freebird-traits, freebird-types)
     ↑
-freebird-daemon          (depends on: ALL — composition root)
+freebird-core            (depends on: ALL impl crates — composition root, FreebirdBuilder)
+freebird-tui             (depends on: freebird-traits, freebird-types — lightweight, no security/runtime deps)
+    ↑
+freebird-daemon          (depends on: core, tui, traits, types, security, runtime — thin binary shell)
 ```
 
 **Critical rules**:
@@ -739,15 +744,19 @@ See `deny.toml` for configuration.
 
 ## 18. Daemon Lifecycle
 
-`freebird-daemon/src/main.rs` is a **thin composition root**. It loads config, initializes logging, builds channels/providers/memory, constructs `AgentRuntime`, and calls `runtime.run(channels)`.
+`freebird-daemon/src/main.rs` is a **thin binary shell** over `freebird-core`. It handles CLI parsing (`clap`), logging setup (`tracing-subscriber`), signal handling (`ShutdownCoordinator`), and daemon lifecycle audit events (`DaemonStarted`/`DaemonShutdown`). All subsystem composition — config loading, database init, provider/tool registry wiring, approval gates, secret guard — is delegated to `FreebirdBuilder` in `freebird-core`.
 
 **Subcommands**: `serve` (start daemon), `chat` (interactive client), `status` (probe daemon), `stop` (graceful shutdown), `replay` (session trace — see below).
 
-**`freebird replay`**: Replays a past session as a human-readable trace or JSON. Accepts a session ID or `--last` for the most recent session. Uses `--json` for machine-consumable output. Opens the encrypted database directly (no running daemon required). See `crates/freebird-daemon/src/replay.rs`.
+**`freebird replay`**: Replays a past session as a human-readable trace or JSON. Accepts a session ID or `--last` for the most recent session. Uses `--json` for machine-consumable output. Opens the encrypted database directly (no running daemon required). Formatting lives in `crates/freebird-tui/src/replay.rs`.
+
+**`freebird-core`**: Provides `FreebirdBuilder` (builder pattern for constructing `FreebirdApp`), `PassphraseStrategy` / `ChannelStrategy` enums, `DatabaseComponents`, config loading/validation/enforcement, provider/tool registry builders, knowledge bootstrapping, and `CoreError` (thiserror enum). See `crates/freebird-core/src/builder.rs`.
+
+**`freebird-tui`**: Contains all terminal UI code — interactive chat client (`chat.rs`), replay formatters (`replay.rs`), and the `ui/` module (consent widgets, input editor, output rendering, spinner, status bar, theme, tab completion). Depends only on `freebird-traits` and `freebird-types` — no security, runtime, or memory dependencies.
 
 **Graceful shutdown**: `ShutdownCoordinator` listens for SIGINT/SIGTERM, cancels via `CancellationToken`, drains in-flight requests within a configurable timeout.
 
-See `crates/freebird-daemon/src/main.rs` and `crates/freebird-runtime/src/shutdown.rs`.
+See `crates/freebird-daemon/src/main.rs`, `crates/freebird-core/src/builder.rs`, and `crates/freebird-runtime/src/shutdown.rs`.
 
 ---
 

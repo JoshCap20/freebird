@@ -106,7 +106,9 @@ freebird-providers   LLM integrations (Anthropic with streaming + tool use)
 freebird-channels    Transport integrations (TCP channel with JSON-line protocol)
 freebird-tools       Built-in tool implementations
 freebird-memory      SQLCipher-encrypted event-sourced conversations, knowledge store, audit sink (all FTS5-indexed)
-freebird-daemon      Binary entry point, config, lifecycle, TUI chat client
+freebird-core        Composition root — FreebirdBuilder, config loading/validation, database init, provider/tool registry wiring
+freebird-tui         Terminal UI — interactive chat client, replay formatter, consent widgets
+freebird-daemon      Thin binary shell — CLI parsing, signal handling, logging, lifecycle audit events
 ```
 
 ### Built-in Tools
