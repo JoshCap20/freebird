@@ -13,6 +13,17 @@
 use freebird_traits::memory::Conversation;
 use freebird_traits::provider::{ContentBlock, Message, Role};
 
+/// Truncate a string to at most `max_chars` characters, appending "..." if truncated.
+/// Unlike byte slicing (`&s[..n]`), this is safe for multi-byte UTF-8.
+fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        return s.to_owned();
+    }
+    let truncated: String = s.chars().take(max_chars.saturating_sub(3)).collect();
+    format!("{truncated}...")
+}
+
 /// Collapse tool outputs from old turns into compact summaries.
 ///
 /// Walks the flat `messages` list (produced by `conversation_to_messages()`)
@@ -113,8 +124,6 @@ fn summarize_tool_output(
     output: &str,
     is_error: bool,
 ) -> String {
-    let error_prefix = if is_error { "ERROR " } else { "" };
-
     let summary = match tool_name {
         "read_file" => summarize_read_file(input, output),
         "file_viewer" => summarize_file_viewer(input, output),
@@ -123,8 +132,8 @@ fn summarize_tool_output(
         "search_replace_edit" => summarize_edit(input),
         "write_file" => summarize_write_file(input),
         "list_directory" => summarize_list_dir(input),
-        "shell" => summarize_shell(input, output),
-        "bash_exec" => summarize_bash(input, output),
+        "shell" => summarize_shell_or_bash("shell", input, output),
+        "bash_exec" => summarize_shell_or_bash("bash", input, output),
         "repo_map" => "[repo_map: generated overview]".into(),
         "cargo_verify" => summarize_cargo_verify(input, output),
         "http_request" => summarize_http(input, output),
@@ -132,9 +141,9 @@ fn summarize_tool_output(
     };
 
     if is_error {
-        // Insert error prefix after the opening bracket
+        // Insert "ERROR " prefix after the opening bracket
         if let Some(rest) = summary.strip_prefix('[') {
-            return format!("[{error_prefix}{rest}");
+            return format!("[ERROR {rest}");
         }
     }
 
@@ -191,27 +200,11 @@ fn summarize_list_dir(input: Option<&serde_json::Value>) -> String {
     format!("[listed {path}]")
 }
 
-fn summarize_shell(input: Option<&serde_json::Value>, output: &str) -> String {
+fn summarize_shell_or_bash(label: &str, input: Option<&serde_json::Value>, output: &str) -> String {
     let command = extract_str(input, "command").unwrap_or("?");
-    // Truncate command display to 40 chars
-    let display_cmd = if command.len() > 40 {
-        format!("{}...", &command[..37])
-    } else {
-        command.to_owned()
-    };
+    let display_cmd = truncate_with_ellipsis(command, 40);
     let exit_code = extract_exit_code(output);
-    format!("[shell '{display_cmd}': exit {exit_code}]")
-}
-
-fn summarize_bash(input: Option<&serde_json::Value>, output: &str) -> String {
-    let command = extract_str(input, "command").unwrap_or("?");
-    let display_cmd = if command.len() > 40 {
-        format!("{}...", &command[..37])
-    } else {
-        command.to_owned()
-    };
-    let exit_code = extract_exit_code(output);
-    format!("[bash '{display_cmd}': exit {exit_code}]")
+    format!("[{label} '{display_cmd}': exit {exit_code}]")
 }
 
 fn summarize_cargo_verify(input: Option<&serde_json::Value>, output: &str) -> String {
@@ -227,12 +220,7 @@ fn summarize_cargo_verify(input: Option<&serde_json::Value>, output: &str) -> St
 fn summarize_http(input: Option<&serde_json::Value>, output: &str) -> String {
     let method = extract_str(input, "method").unwrap_or("GET");
     let url = extract_str(input, "url").unwrap_or("?");
-    // Truncate URL to 50 chars
-    let display_url = if url.len() > 50 {
-        format!("{}...", &url[..47])
-    } else {
-        url.to_owned()
-    };
+    let display_url = truncate_with_ellipsis(url, 50);
     let status = extract_http_status(output);
     format!("[http {method} {display_url}: {status}]")
 }
@@ -242,7 +230,7 @@ fn summarize_http(input: Option<&serde_json::Value>, output: &str) -> String {
 fn extract_exit_code(output: &str) -> &str {
     // Look for the last line that might contain exit code info
     for line in output.lines().rev() {
-        let lower = line.to_lowercase();
+        let lower = line.to_ascii_lowercase();
         if lower.contains("exit code") || lower.contains("exit status") {
             // Try to find the number at the end
             if let Some(num) = line.split_whitespace().last() {
@@ -885,5 +873,125 @@ mod tests {
             "long command should be truncated: {summary}"
         );
         assert!(summary.len() < 100, "summary should be compact");
+    }
+
+    #[test]
+    fn test_multibyte_utf8_command_no_panic() {
+        // Commands with multi-byte UTF-8 characters must not panic during truncation
+        let summary = summarize_tool_output(
+            "shell",
+            Some(
+                &serde_json::json!({"command": "echo '日本語のテストコマンドで長い文字列を作成する' && echo done"}),
+            ),
+            "Exit code: 0",
+            false,
+        );
+        assert!(
+            summary.starts_with("[shell '"),
+            "should produce valid summary: {summary}"
+        );
+    }
+
+    #[test]
+    fn test_multibyte_utf8_url_no_panic() {
+        let summary = summarize_tool_output(
+            "http_request",
+            Some(
+                &serde_json::json!({"method": "GET", "url": "https://example.com/путь/к/ресурсу/который/очень/длинный"}),
+            ),
+            "Status: 200",
+            false,
+        );
+        assert!(
+            summary.starts_with("[http GET "),
+            "should produce valid summary: {summary}"
+        );
+    }
+
+    #[test]
+    fn test_collapsed_summary_format_file_viewer() {
+        let summary = summarize_tool_output(
+            "file_viewer",
+            Some(&serde_json::json!({"path": "src/lib.rs", "start_line": 10})),
+            "pub mod agent;\npub mod history;\npub mod observation;\n",
+            false,
+        );
+        assert_eq!(summary, "[viewed src/lib.rs: lines 10-12]");
+    }
+
+    #[test]
+    fn test_collapsed_summary_format_write_file() {
+        let summary = summarize_tool_output(
+            "write_file",
+            Some(&serde_json::json!({"path": "output.txt"})),
+            "File written successfully",
+            false,
+        );
+        assert_eq!(summary, "[wrote output.txt]");
+    }
+
+    #[test]
+    fn test_collapsed_summary_format_list_directory() {
+        let summary = summarize_tool_output(
+            "list_directory",
+            Some(&serde_json::json!({"path": "src/"})),
+            "agent.rs\nhistory.rs\nlib.rs\n",
+            false,
+        );
+        assert_eq!(summary, "[listed src/]");
+    }
+
+    #[test]
+    fn test_collapsed_summary_format_cargo_verify() {
+        let summary = summarize_tool_output(
+            "cargo_verify",
+            Some(&serde_json::json!({"subcommand": "clippy"})),
+            "Checking freebird v0.1.0\nFinished dev",
+            false,
+        );
+        assert_eq!(summary, "[cargo_verify 'clippy': ok]");
+
+        let failed = summarize_tool_output(
+            "cargo_verify",
+            Some(&serde_json::json!({"subcommand": "test"})),
+            "running 5 tests\nerror[E0308]: mismatched types\nFAILED",
+            false,
+        );
+        assert_eq!(failed, "[cargo_verify 'test': failed]");
+    }
+
+    #[test]
+    fn test_collapsed_summary_format_http_request() {
+        let summary = summarize_tool_output(
+            "http_request",
+            Some(&serde_json::json!({"method": "POST", "url": "https://api.example.com/data"})),
+            "Status: 201 Created\n{\"id\": 42}",
+            false,
+        );
+        assert_eq!(
+            summary,
+            "[http POST https://api.example.com/data: Status: 201 Created]"
+        );
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_ascii() {
+        assert_eq!(truncate_with_ellipsis("short", 10), "short");
+        assert_eq!(truncate_with_ellipsis("exactly ten", 11), "exactly ten");
+        assert_eq!(
+            truncate_with_ellipsis("this is a long string", 10),
+            "this is..."
+        );
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis_multibyte() {
+        // Each CJK character is 3 bytes in UTF-8
+        let cjk = "日本語テスト";
+        assert_eq!(cjk.len(), 18); // 6 chars * 3 bytes
+        let truncated = truncate_with_ellipsis(cjk, 5);
+        assert_eq!(truncated, "日本...");
+        // Verify no panic and valid UTF-8
+        assert!(truncated.is_char_boundary(truncated.len()));
     }
 }
