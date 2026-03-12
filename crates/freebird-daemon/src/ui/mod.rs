@@ -64,6 +64,15 @@ pub struct TtyChat {
     consent: Option<ConsentSelector>,
 }
 
+/// Parsed approval category info for display and selector construction.
+struct ApprovalCategoryInfo {
+    display_name: String,
+    action_summary: String,
+    risk_level: String,
+    /// Budget info (resource name + limit), only set for `budget_exceeded`.
+    budget_info: Option<consent::BudgetInfo>,
+}
+
 impl TtyChat {
     /// Create a new TUI chat session.
     fn new() -> Result<Self> {
@@ -178,7 +187,7 @@ impl TtyChat {
                             if let Some(msg) = Self::consent_action_to_message(sel.auto_deny("timeout")) {
                                 crate::chat::send_client_message(&mut socket_write, &msg).await?;
                             }
-                            ConsentSelector::clear(&mut self.writer)?;
+                            sel.clear(&mut self.writer)?;
                             sel.render_outcome(&mut self.writer, false)?;
                             self.input.render(&mut self.writer)?;
                         }
@@ -204,7 +213,7 @@ impl TtyChat {
                     // Temporarily take the selector to avoid borrow conflict
                     // with save_input_area (which borrows &mut self).
                     if let Some(sel) = self.consent.take() {
-                        ConsentSelector::clear(&mut self.writer)?;
+                        sel.clear(&mut self.writer)?;
                         sel.render(&mut self.writer)?;
                         self.consent = Some(sel);
                     }
@@ -213,17 +222,18 @@ impl TtyChat {
                     request_id,
                     approved,
                     reason,
+                    budget_action,
                 } => {
                     // Clear selector lines and show a collapsed outcome summary.
                     if let Some(sel) = self.consent.take() {
-                        ConsentSelector::clear(&mut self.writer)?;
+                        sel.clear(&mut self.writer)?;
                         sel.render_outcome(&mut self.writer, approved)?;
                     }
                     let msg = ClientMessage::ApprovalResponse {
                         request_id,
                         approved,
                         reason,
-                        budget_action: None,
+                        budget_action,
                     };
                     crate::chat::send_client_message(socket_write, &msg).await?;
                     self.input.render(&mut self.writer)?;
@@ -359,35 +369,65 @@ impl TtyChat {
                 category_json,
                 expires_at,
             } => {
-                // Stop the spinner — the tool is paused awaiting approval.
-                if self.spinner.is_active() {
-                    self.spinner.pause(&mut self.writer)?;
-                }
-                // If there's already a pending approval, auto-deny it.
-                if let Some(prev) = self.consent.take() {
-                    pending_send = Self::consent_action_to_message(prev.auto_deny("superseded"));
-                }
-                self.save_input_area()?;
-                // Parse category_json to extract display info for
-                // polymorphic rendering (Consent vs SecurityWarning).
-                let (display_name, action_summary, risk_level) =
-                    Self::parse_approval_category(&category_json);
-                self.render_consent_header(&display_name, &action_summary, &risk_level)?;
-                // Create the interactive selector (falls back to text hint if expired/unparseable).
-                if let Some(sel) =
-                    ConsentSelector::new(request_id.clone(), display_name.clone(), &expires_at)
-                {
-                    sel.render(&mut self.writer)?;
-                    self.consent = Some(sel);
-                } else {
-                    // Expired or unparseable — show the old text-based hint as fallback.
-                    self.render_consent_fallback(&request_id)?;
-                    self.input.render(&mut self.writer)?;
-                }
+                pending_send =
+                    self.handle_approval_request(&request_id, &category_json, &expires_at)?;
             }
         }
 
         Ok(pending_send)
+    }
+
+    /// Handle an incoming `ApprovalRequest` server message.
+    ///
+    /// Returns an optional `ClientMessage` for auto-denying a superseded request.
+    fn handle_approval_request(
+        &mut self,
+        request_id: &str,
+        category_json: &str,
+        expires_at: &str,
+    ) -> Result<Option<ClientMessage>> {
+        // Stop the spinner — the tool is paused awaiting approval.
+        if self.spinner.is_active() {
+            self.spinner.pause(&mut self.writer)?;
+        }
+        // If there's already a pending approval, auto-deny it.
+        let superseded = self
+            .consent
+            .take()
+            .and_then(|prev| Self::consent_action_to_message(prev.auto_deny("superseded")));
+
+        self.save_input_area()?;
+        let cat_info = Self::parse_approval_category(category_json);
+        self.render_consent_header(
+            &cat_info.display_name,
+            &cat_info.action_summary,
+            &cat_info.risk_level,
+        )?;
+
+        // Create the interactive selector — budget mode for budget
+        // requests, standard mode for everything else.
+        let maybe_sel = if let Some(budget_info) = cat_info.budget_info {
+            ConsentSelector::new_budget(
+                request_id.to_string(),
+                cat_info.display_name.clone(),
+                expires_at,
+                budget_info,
+            )
+        } else {
+            ConsentSelector::new(
+                request_id.to_string(),
+                cat_info.display_name.clone(),
+                expires_at,
+            )
+        };
+        if let Some(sel) = maybe_sel {
+            sel.render(&mut self.writer)?;
+            self.consent = Some(sel);
+        } else {
+            self.render_consent_fallback(request_id)?;
+            self.input.render(&mut self.writer)?;
+        }
+        Ok(superseded)
     }
 
     /// Render the approval request header with polymorphic styling.
@@ -481,19 +521,22 @@ impl TtyChat {
     }
 
     /// Parse `category_json` into display fields for the approval header.
-    ///
-    /// Returns `(header_label, action_summary, risk_info)`.
-    fn parse_approval_category(category_json: &str) -> (String, String, String) {
-        // Use serde_json::Value to parse without needing serde derive.
+    fn parse_approval_category(category_json: &str) -> ApprovalCategoryInfo {
+        // Use `serde_json::Value` to parse without needing serde derive.
         let Ok(val) = serde_json::from_str::<serde_json::Value>(category_json) else {
-            return ("approval".into(), category_json.to_string(), "—".into());
+            return ApprovalCategoryInfo {
+                display_name: "approval".into(),
+                action_summary: category_json.to_string(),
+                risk_level: "\u{2014}".into(),
+                budget_info: None,
+            };
         };
 
         let kind = val.get("kind").and_then(|v| v.as_str()).unwrap_or("");
         let str_field = |key: &str| {
             val.get(key)
                 .and_then(|v| v.as_str())
-                .unwrap_or("—")
+                .unwrap_or("\u{2014}")
                 .to_string()
         };
 
@@ -502,7 +545,12 @@ impl TtyChat {
                 let tool_name = str_field("tool_name");
                 let risk_level = str_field("risk_level");
                 let action_summary = str_field("action_summary");
-                (tool_name, action_summary, risk_level)
+                ApprovalCategoryInfo {
+                    display_name: tool_name,
+                    action_summary,
+                    risk_level,
+                    budget_info: None,
+                }
             }
             "security_warning" => {
                 let threat_type = str_field("threat_type");
@@ -512,14 +560,18 @@ impl TtyChat {
 
                 let header = format!("security: {threat_type} ({source})");
                 let summary = format!("Pattern: {detected_pattern} \u{2014} {content_preview}");
-                // Truncate summary to 200 chars for display.
                 let summary = if summary.chars().count() > 200 {
                     let truncated: String = summary.chars().take(197).collect();
                     format!("{truncated}...")
                 } else {
                     summary
                 };
-                (header, summary, RISK_LEVEL_SECURITY_WARNING.into())
+                ApprovalCategoryInfo {
+                    display_name: header,
+                    action_summary: summary,
+                    risk_level: RISK_LEVEL_SECURITY_WARNING.into(),
+                    budget_info: None,
+                }
             }
             "budget_exceeded" => {
                 let resource = str_field("resource");
@@ -534,9 +586,22 @@ impl TtyChat {
 
                 let header = format!("budget: {resource}");
                 let summary = format!("Used {used}, limit {limit} \u{2014} approve to continue");
-                (header, summary, RISK_LEVEL_BUDGET_EXCEEDED.into())
+                ApprovalCategoryInfo {
+                    display_name: header,
+                    action_summary: summary,
+                    risk_level: RISK_LEVEL_BUDGET_EXCEEDED.into(),
+                    budget_info: Some(consent::BudgetInfo {
+                        resource,
+                        current_limit: limit,
+                    }),
+                }
             }
-            _ => ("approval".into(), category_json.to_string(), "—".into()),
+            _ => ApprovalCategoryInfo {
+                display_name: "approval".into(),
+                action_summary: category_json.to_string(),
+                risk_level: "\u{2014}".into(),
+                budget_info: None,
+            },
         }
     }
 
@@ -548,13 +613,14 @@ impl TtyChat {
             request_id,
             approved,
             reason,
+            budget_action,
         } = action
         {
             Some(ClientMessage::ApprovalResponse {
                 request_id,
                 approved,
                 reason,
-                budget_action: None,
+                budget_action,
             })
         } else {
             None

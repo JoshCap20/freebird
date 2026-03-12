@@ -30,6 +30,58 @@ impl ConsentChoice {
     }
 }
 
+/// Budget-specific approval choices (4 options instead of 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BudgetChoice {
+    ApproveOnce,
+    DoubleLimit,
+    DisableLimit,
+    Deny,
+}
+
+impl BudgetChoice {
+    /// Move to the next option (wraps around).
+    const fn next(self) -> Self {
+        match self {
+            Self::ApproveOnce => Self::DoubleLimit,
+            Self::DoubleLimit => Self::DisableLimit,
+            Self::DisableLimit => Self::Deny,
+            Self::Deny => Self::ApproveOnce,
+        }
+    }
+
+    /// Move to the previous option (wraps around).
+    const fn prev(self) -> Self {
+        match self {
+            Self::ApproveOnce => Self::Deny,
+            Self::DoubleLimit => Self::ApproveOnce,
+            Self::DisableLimit => Self::DoubleLimit,
+            Self::Deny => Self::DisableLimit,
+        }
+    }
+}
+
+/// Budget info passed when creating a budget-mode consent selector.
+#[derive(Debug, Clone)]
+pub struct BudgetInfo {
+    /// The budget resource name (e.g., `"tokens_per_request"`).
+    pub resource: String,
+    /// The current limit value.
+    pub current_limit: u64,
+}
+
+/// Which mode the selector is in.
+#[derive(Debug, Clone)]
+enum SelectorMode {
+    /// Standard 2-option (Approve / Deny).
+    Standard(ConsentChoice),
+    /// Budget 4-option (Approve once / Double limit / Disable limit / Deny).
+    Budget {
+        choice: BudgetChoice,
+        info: BudgetInfo,
+    },
+}
+
 /// Result of handling a key event in consent mode.
 #[derive(Debug)]
 #[must_use]
@@ -39,6 +91,8 @@ pub enum ConsentAction {
         request_id: String,
         approved: bool,
         reason: Option<String>,
+        /// Budget override action string, if this was a budget approval.
+        budget_action: Option<String>,
     },
     /// Selection changed — redraw the selector.
     Redraw,
@@ -46,27 +100,31 @@ pub enum ConsentAction {
     None,
 }
 
-/// Number of terminal lines occupied by the selector (Approve + Deny).
-const SELECTOR_LINES: u16 = 2;
+/// Number of terminal lines for the standard 2-option selector.
+const STANDARD_SELECTOR_LINES: u16 = 2;
+
+/// Number of terminal lines for the budget 4-option selector.
+const BUDGET_SELECTOR_LINES: u16 = 4;
 
 /// Interactive consent selector widget.
 ///
-/// Renders a two-option selector (Approve / Deny) and handles keyboard
-/// navigation. The widget does NOT send messages itself — it returns
-/// [`ConsentAction`] and the caller (`TtyChat`) sends the response.
+/// Renders either a two-option selector (Approve / Deny) or a four-option
+/// budget selector (Approve once / Double limit / Disable limit / Deny).
+/// The widget does NOT send messages itself — it returns [`ConsentAction`]
+/// and the caller (`TtyChat`) sends the response.
 pub struct ConsentSelector {
     /// The pending consent request ID.
     request_id: String,
     /// Tool name for outcome display after confirmation.
     tool_name: String,
-    /// Currently highlighted choice.
-    choice: ConsentChoice,
+    /// Selector mode (standard or budget).
+    mode: SelectorMode,
     /// When this request expires.
     expires_at: DateTime<Utc>,
 }
 
 impl ConsentSelector {
-    /// Create a new consent selector from a received `ApprovalRequest`.
+    /// Create a new standard (2-option) consent selector.
     ///
     /// `expires_at_str` is the RFC 3339 timestamp from the server.
     /// Returns `None` if the timestamp is unparseable or already expired.
@@ -79,7 +137,32 @@ impl ConsentSelector {
         Some(Self {
             request_id,
             tool_name,
-            choice: ConsentChoice::Approve,
+            mode: SelectorMode::Standard(ConsentChoice::Approve),
+            expires_at,
+        })
+    }
+
+    /// Create a budget-mode (4-option) consent selector.
+    ///
+    /// Returns `None` if the timestamp is unparseable or already expired.
+    #[must_use]
+    pub fn new_budget(
+        request_id: String,
+        tool_name: String,
+        expires_at_str: &str,
+        budget_info: BudgetInfo,
+    ) -> Option<Self> {
+        let expires_at = expires_at_str.parse::<DateTime<Utc>>().ok()?;
+        if expires_at <= Utc::now() {
+            return None;
+        }
+        Some(Self {
+            request_id,
+            tool_name,
+            mode: SelectorMode::Budget {
+                choice: BudgetChoice::ApproveOnce,
+                info: budget_info,
+            },
             expires_at,
         })
     }
@@ -88,62 +171,71 @@ impl ConsentSelector {
     pub fn handle_key(&mut self, key: KeyEvent) -> ConsentAction {
         // Ctrl+C → deny immediately
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            return self.confirm(false, None);
+            return self.confirm_deny(None);
         }
 
-        match key.code {
-            // Navigation: toggle selection
-            KeyCode::Up | KeyCode::Down | KeyCode::Tab => {
-                self.choice = self.choice.toggle();
-                ConsentAction::Redraw
+        match &mut self.mode {
+            SelectorMode::Standard(choice) => {
+                Self::handle_key_standard(key, choice, &self.request_id)
             }
-            // Confirm current selection
-            KeyCode::Enter => {
-                let approved = self.choice == ConsentChoice::Approve;
-                self.confirm(approved, None)
+            SelectorMode::Budget { choice, info } => {
+                Self::handle_key_budget(key, choice, info, &self.request_id)
             }
-            // Immediate approve shortcuts
-            KeyCode::Char('y' | 'a') => self.confirm(true, None),
-            // Immediate deny shortcuts / Escape → deny
-            KeyCode::Char('n' | 'd') | KeyCode::Esc => self.confirm(false, None),
-            // Everything else is ignored
-            _ => ConsentAction::None,
         }
     }
 
     /// Render the selector widget.
-    ///
-    /// Outputs two lines:
-    /// ```text
-    ///   > Approve [y]    ← selected (bold cyan)
-    ///     Deny [n]       ← unselected (grey)
-    /// ```
     pub fn render<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
-        // Approve line
-        self.render_option(w, ConsentChoice::Approve, "Approve", "[y]")?;
-        writeln!(w)?;
-        // Deny line
-        self.render_option(w, ConsentChoice::Deny, "Deny", "[n]")?;
-        writeln!(w)?;
+        match &self.mode {
+            SelectorMode::Standard(choice) => {
+                Self::render_line(w, *choice == ConsentChoice::Approve, "Approve", "[y]")?;
+                writeln!(w)?;
+                Self::render_line(w, *choice == ConsentChoice::Deny, "Deny", "[n]")?;
+                writeln!(w)?;
+            }
+            SelectorMode::Budget { choice, info } => {
+                let doubled = info.current_limit.saturating_mul(2);
+                let doubled_label = format!("Double limit to {doubled}");
+
+                Self::render_line(
+                    w,
+                    *choice == BudgetChoice::ApproveOnce,
+                    "Approve once",
+                    "[1]",
+                )?;
+                writeln!(w)?;
+                Self::render_line(
+                    w,
+                    *choice == BudgetChoice::DoubleLimit,
+                    &doubled_label,
+                    "[2]",
+                )?;
+                writeln!(w)?;
+                Self::render_line(
+                    w,
+                    *choice == BudgetChoice::DisableLimit,
+                    "Disable limit",
+                    "[3]",
+                )?;
+                writeln!(w)?;
+                Self::render_line(w, *choice == BudgetChoice::Deny, "Deny", "[n]")?;
+                writeln!(w)?;
+            }
+        }
         w.flush()
     }
 
     /// Erase the selector lines from the terminal.
     ///
-    /// Moves cursor up past the two selector lines and clears from there down.
+    /// Moves cursor up past the selector lines and clears from there down.
     /// Call this before re-rendering or when dismissing the selector.
-    pub fn clear<W: Write>(w: &mut W) -> std::io::Result<()> {
-        queue!(w, MoveUp(SELECTOR_LINES), Clear(ClearType::FromCursorDown))?;
+    pub fn clear<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
+        let lines = self.selector_lines();
+        queue!(w, MoveUp(lines), Clear(ClearType::FromCursorDown))?;
         w.flush()
     }
 
     /// Render a one-line summary after the user confirms or the request expires.
-    ///
-    /// Example output:
-    /// ```text
-    ///   ✓ Approved: http_request
-    ///   ✗ Denied: http_request
-    /// ```
     pub fn render_outcome<W: Write>(&self, w: &mut W, approved: bool) -> std::io::Result<()> {
         if approved {
             queue!(
@@ -177,27 +269,118 @@ impl ConsentSelector {
             request_id: self.request_id.clone(),
             approved: false,
             reason: Some(reason.to_string()),
+            budget_action: None,
         }
     }
 
     // ── Private helpers ──────────────────────────────────────────────────
 
-    fn confirm(&self, approved: bool, reason: Option<String>) -> ConsentAction {
-        ConsentAction::Confirmed {
-            request_id: self.request_id.clone(),
-            approved,
-            reason,
+    /// Number of terminal lines occupied by this selector.
+    const fn selector_lines(&self) -> u16 {
+        match &self.mode {
+            SelectorMode::Standard(_) => STANDARD_SELECTOR_LINES,
+            SelectorMode::Budget { .. } => BUDGET_SELECTOR_LINES,
         }
     }
 
-    fn render_option<W: Write>(
-        &self,
+    fn confirm_deny(&self, reason: Option<String>) -> ConsentAction {
+        ConsentAction::Confirmed {
+            request_id: self.request_id.clone(),
+            approved: false,
+            reason,
+            budget_action: None,
+        }
+    }
+
+    fn handle_key_standard(
+        key: KeyEvent,
+        choice: &mut ConsentChoice,
+        request_id: &str,
+    ) -> ConsentAction {
+        match key.code {
+            KeyCode::Up | KeyCode::Down | KeyCode::Tab => {
+                *choice = choice.toggle();
+                ConsentAction::Redraw
+            }
+            KeyCode::Enter => {
+                let approved = *choice == ConsentChoice::Approve;
+                ConsentAction::Confirmed {
+                    request_id: request_id.to_string(),
+                    approved,
+                    reason: None,
+                    budget_action: None,
+                }
+            }
+            KeyCode::Char('y' | 'a') => ConsentAction::Confirmed {
+                request_id: request_id.to_string(),
+                approved: true,
+                reason: None,
+                budget_action: None,
+            },
+            KeyCode::Char('n' | 'd') | KeyCode::Esc => ConsentAction::Confirmed {
+                request_id: request_id.to_string(),
+                approved: false,
+                reason: None,
+                budget_action: None,
+            },
+            _ => ConsentAction::None,
+        }
+    }
+
+    fn handle_key_budget(
+        key: KeyEvent,
+        choice: &mut BudgetChoice,
+        info: &BudgetInfo,
+        request_id: &str,
+    ) -> ConsentAction {
+        match key.code {
+            KeyCode::Down | KeyCode::Tab => {
+                *choice = choice.next();
+                ConsentAction::Redraw
+            }
+            KeyCode::Up => {
+                *choice = choice.prev();
+                ConsentAction::Redraw
+            }
+            KeyCode::Enter => Self::budget_confirm(*choice, info, request_id),
+            KeyCode::Char('y' | '1') => {
+                Self::budget_confirm(BudgetChoice::ApproveOnce, info, request_id)
+            }
+            KeyCode::Char('2') => Self::budget_confirm(BudgetChoice::DoubleLimit, info, request_id),
+            KeyCode::Char('3') => {
+                Self::budget_confirm(BudgetChoice::DisableLimit, info, request_id)
+            }
+            KeyCode::Char('n') | KeyCode::Esc => {
+                Self::budget_confirm(BudgetChoice::Deny, info, request_id)
+            }
+            _ => ConsentAction::None,
+        }
+    }
+
+    fn budget_confirm(choice: BudgetChoice, info: &BudgetInfo, request_id: &str) -> ConsentAction {
+        let (approved, budget_action) = match choice {
+            BudgetChoice::ApproveOnce => (true, Some("approve_once".to_string())),
+            BudgetChoice::DoubleLimit => {
+                let doubled = info.current_limit.saturating_mul(2);
+                (true, Some(format!("raise_limit:{doubled}")))
+            }
+            BudgetChoice::DisableLimit => (true, Some("disable_limit".to_string())),
+            BudgetChoice::Deny => (false, None),
+        };
+        ConsentAction::Confirmed {
+            request_id: request_id.to_string(),
+            approved,
+            reason: None,
+            budget_action,
+        }
+    }
+
+    fn render_line<W: Write>(
         w: &mut W,
-        option: ConsentChoice,
+        selected: bool,
         label: &str,
         hint: &str,
     ) -> std::io::Result<()> {
-        let selected = self.choice == option;
         if selected {
             queue!(
                 w,
@@ -242,10 +425,25 @@ mod tests {
         }
     }
 
-    /// Helper to create a selector with a future expiry.
+    /// Helper to create a standard selector with a future expiry.
     fn make_selector(request_id: &str) -> ConsentSelector {
         let future = (Utc::now() + Duration::minutes(5)).to_rfc3339();
         ConsentSelector::new(request_id.to_string(), "test_tool".to_string(), &future).unwrap()
+    }
+
+    /// Helper to create a budget selector with a future expiry.
+    fn make_budget_selector(request_id: &str, current_limit: u64) -> ConsentSelector {
+        let future = (Utc::now() + Duration::minutes(5)).to_rfc3339();
+        ConsentSelector::new_budget(
+            request_id.to_string(),
+            "test_tool".to_string(),
+            &future,
+            BudgetInfo {
+                resource: "tokens_per_request".to_string(),
+                current_limit,
+            },
+        )
+        .unwrap()
     }
 
     // ── Construction tests ───────────────────────────────────────────
@@ -259,7 +457,10 @@ mod tests {
     #[test]
     fn test_new_returns_some_for_valid_timestamp() {
         let sel = make_selector("req-1");
-        assert_eq!(sel.choice, ConsentChoice::Approve);
+        assert!(matches!(
+            sel.mode,
+            SelectorMode::Standard(ConsentChoice::Approve)
+        ));
     }
 
     #[test]
@@ -269,28 +470,59 @@ mod tests {
         );
     }
 
-    // ── Navigation tests ─────────────────────────────────────────────
+    #[test]
+    fn test_new_budget_returns_some_for_valid_timestamp() {
+        let sel = make_budget_selector("req-1", 32768);
+        assert!(matches!(sel.mode, SelectorMode::Budget { .. }));
+    }
+
+    #[test]
+    fn test_new_budget_returns_none_for_expired() {
+        let past = (Utc::now() - Duration::minutes(1)).to_rfc3339();
+        let info = BudgetInfo {
+            resource: "tokens_per_request".to_string(),
+            current_limit: 32768,
+        };
+        assert!(
+            ConsentSelector::new_budget("req-1".to_string(), "tool".to_string(), &past, info)
+                .is_none()
+        );
+    }
+
+    // ── Standard navigation tests ────────────────────────────────────
 
     #[test]
     fn test_toggle_choice() {
         let mut sel = make_selector("req-1");
-        assert_eq!(sel.choice, ConsentChoice::Approve);
+        assert!(matches!(
+            sel.mode,
+            SelectorMode::Standard(ConsentChoice::Approve)
+        ));
 
         let action = sel.handle_key(key(KeyCode::Down));
         assert!(matches!(action, ConsentAction::Redraw));
-        assert_eq!(sel.choice, ConsentChoice::Deny);
+        assert!(matches!(
+            sel.mode,
+            SelectorMode::Standard(ConsentChoice::Deny)
+        ));
 
         let action = sel.handle_key(key(KeyCode::Up));
         assert!(matches!(action, ConsentAction::Redraw));
-        assert_eq!(sel.choice, ConsentChoice::Approve);
+        assert!(matches!(
+            sel.mode,
+            SelectorMode::Standard(ConsentChoice::Approve)
+        ));
 
         // Tab also toggles
         let action = sel.handle_key(key(KeyCode::Tab));
         assert!(matches!(action, ConsentAction::Redraw));
-        assert_eq!(sel.choice, ConsentChoice::Deny);
+        assert!(matches!(
+            sel.mode,
+            SelectorMode::Standard(ConsentChoice::Deny)
+        ));
     }
 
-    // ── Confirm tests ────────────────────────────────────────────────
+    // ── Standard confirm tests ───────────────────────────────────────
 
     #[test]
     fn test_enter_confirms_approve() {
@@ -298,10 +530,14 @@ mod tests {
         let action = sel.handle_key(key(KeyCode::Enter));
         match action {
             ConsentAction::Confirmed {
-                approved, reason, ..
+                approved,
+                reason,
+                budget_action,
+                ..
             } => {
                 assert!(approved);
                 assert!(reason.is_none());
+                assert!(budget_action.is_none());
             }
             _ => panic!("expected Confirmed"),
         }
@@ -323,7 +559,7 @@ mod tests {
         }
     }
 
-    // ── Shortcut key tests ───────────────────────────────────────────
+    // ── Standard shortcut key tests ──────────────────────────────────
 
     #[test]
     fn test_y_key_immediately_approves() {
@@ -401,17 +637,13 @@ mod tests {
 
     #[test]
     fn test_is_expired() {
-        // Can't construct via new() (it rejects expired), so test via a future
-        // expiry and check the inverse.
         let sel = make_selector("req-1");
         assert!(!sel.is_expired());
 
-        // For actual expiry, we construct one that expires in the past by
-        // building the struct directly (testing internal state).
         let expired_sel = ConsentSelector {
             request_id: "req-expired".to_string(),
             tool_name: "test_tool".to_string(),
-            choice: ConsentChoice::Approve,
+            mode: SelectorMode::Standard(ConsentChoice::Approve),
             expires_at: Utc::now() - Duration::seconds(1),
         };
         assert!(expired_sel.is_expired());
@@ -428,10 +660,12 @@ mod tests {
                 request_id,
                 approved,
                 reason,
+                budget_action,
             } => {
                 assert_eq!(request_id, "req-42");
                 assert!(!approved);
                 assert_eq!(reason.as_deref(), Some("timeout"));
+                assert!(budget_action.is_none());
             }
             _ => panic!("expected Confirmed"),
         }
@@ -446,7 +680,6 @@ mod tests {
         sel.render(&mut buf).unwrap();
         let output = String::from_utf8_lossy(&buf);
         assert!(output.contains("> Approve [y]"), "got: {output}");
-        // Deny should not have the `>` indicator
         assert!(
             !output.contains("> Deny"),
             "Deny should not be selected, got: {output}"
@@ -488,7 +721,7 @@ mod tests {
         assert!(output.contains("Denied: test_tool"), "got: {output}");
     }
 
-    // ── Unrelated key tests ──────────────────────────────────────────
+    // ── Standard unrelated key tests ─────────────────────────────────
 
     #[test]
     fn test_unrelated_keys_produce_none() {
@@ -505,8 +738,10 @@ mod tests {
             sel.handle_key(key(KeyCode::F(1))),
             ConsentAction::None
         ));
-        // Choice should be unchanged
-        assert_eq!(sel.choice, ConsentChoice::Approve);
+        assert!(matches!(
+            sel.mode,
+            SelectorMode::Standard(ConsentChoice::Approve)
+        ));
     }
 
     // ── Request ID preservation ──────────────────────────────────────
@@ -521,5 +756,202 @@ mod tests {
             }
             _ => panic!("expected Confirmed"),
         }
+    }
+
+    // ── Budget mode tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_budget_navigation_wraps() {
+        let mut sel = make_budget_selector("req-1", 32768);
+
+        // Down cycles: ApproveOnce → DoubleLimit → DisableLimit → Deny → ApproveOnce
+        for expected in [
+            BudgetChoice::DoubleLimit,
+            BudgetChoice::DisableLimit,
+            BudgetChoice::Deny,
+            BudgetChoice::ApproveOnce,
+        ] {
+            let action = sel.handle_key(key(KeyCode::Down));
+            assert!(matches!(action, ConsentAction::Redraw));
+            match &sel.mode {
+                SelectorMode::Budget { choice, .. } => assert_eq!(*choice, expected),
+                SelectorMode::Standard(_) => panic!("expected Budget mode"),
+            }
+        }
+
+        // Up goes backwards
+        let _ = sel.handle_key(key(KeyCode::Up));
+        match &sel.mode {
+            SelectorMode::Budget { choice, .. } => assert_eq!(*choice, BudgetChoice::Deny),
+            SelectorMode::Standard(_) => panic!("expected Budget mode"),
+        }
+    }
+
+    #[test]
+    fn test_budget_key_1_approves_once() {
+        let mut sel = make_budget_selector("req-1", 32768);
+        let action = sel.handle_key(key(KeyCode::Char('1')));
+        match action {
+            ConsentAction::Confirmed {
+                approved,
+                budget_action,
+                ..
+            } => {
+                assert!(approved);
+                assert_eq!(budget_action.as_deref(), Some("approve_once"));
+            }
+            _ => panic!("expected Confirmed"),
+        }
+    }
+
+    #[test]
+    fn test_budget_key_y_approves_once() {
+        let mut sel = make_budget_selector("req-1", 32768);
+        let action = sel.handle_key(key(KeyCode::Char('y')));
+        match action {
+            ConsentAction::Confirmed {
+                approved,
+                budget_action,
+                ..
+            } => {
+                assert!(approved);
+                assert_eq!(budget_action.as_deref(), Some("approve_once"));
+            }
+            _ => panic!("expected Confirmed"),
+        }
+    }
+
+    #[test]
+    fn test_budget_key_2_doubles_limit() {
+        let mut sel = make_budget_selector("req-1", 32768);
+        let action = sel.handle_key(key(KeyCode::Char('2')));
+        match action {
+            ConsentAction::Confirmed {
+                approved,
+                budget_action,
+                ..
+            } => {
+                assert!(approved);
+                assert_eq!(budget_action.as_deref(), Some("raise_limit:65536"));
+            }
+            _ => panic!("expected Confirmed"),
+        }
+    }
+
+    #[test]
+    fn test_budget_key_3_disables_limit() {
+        let mut sel = make_budget_selector("req-1", 32768);
+        let action = sel.handle_key(key(KeyCode::Char('3')));
+        match action {
+            ConsentAction::Confirmed {
+                approved,
+                budget_action,
+                ..
+            } => {
+                assert!(approved);
+                assert_eq!(budget_action.as_deref(), Some("disable_limit"));
+            }
+            _ => panic!("expected Confirmed"),
+        }
+    }
+
+    #[test]
+    fn test_budget_key_n_denies() {
+        let mut sel = make_budget_selector("req-1", 32768);
+        let action = sel.handle_key(key(KeyCode::Char('n')));
+        match action {
+            ConsentAction::Confirmed {
+                approved,
+                budget_action,
+                ..
+            } => {
+                assert!(!approved);
+                assert!(budget_action.is_none());
+            }
+            _ => panic!("expected Confirmed"),
+        }
+    }
+
+    #[test]
+    fn test_budget_enter_confirms_current_selection() {
+        let mut sel = make_budget_selector("req-1", 32768);
+        // Move to DoubleLimit
+        let _ = sel.handle_key(key(KeyCode::Down));
+        let action = sel.handle_key(key(KeyCode::Enter));
+        match action {
+            ConsentAction::Confirmed {
+                approved,
+                budget_action,
+                ..
+            } => {
+                assert!(approved);
+                assert_eq!(budget_action.as_deref(), Some("raise_limit:65536"));
+            }
+            _ => panic!("expected Confirmed"),
+        }
+    }
+
+    #[test]
+    fn test_budget_render_shows_four_options() {
+        let sel = make_budget_selector("req-1", 32768);
+        let mut buf = Vec::new();
+        sel.render(&mut buf).unwrap();
+        let output = String::from_utf8_lossy(&buf);
+        assert!(output.contains("Approve once"), "got: {output}");
+        assert!(output.contains("Double limit to 65536"), "got: {output}");
+        assert!(output.contains("Disable limit"), "got: {output}");
+        assert!(output.contains("Deny"), "got: {output}");
+    }
+
+    #[test]
+    fn test_budget_render_highlights_selected() {
+        let sel = make_budget_selector("req-1", 32768);
+        let mut buf = Vec::new();
+        sel.render(&mut buf).unwrap();
+        let output = String::from_utf8_lossy(&buf);
+        assert!(
+            output.contains("> Approve once [1]"),
+            "first option should be selected, got: {output}"
+        );
+    }
+
+    #[test]
+    fn test_budget_ctrl_c_denies() {
+        let mut sel = make_budget_selector("req-1", 32768);
+        let action = sel.handle_key(ctrl_key(KeyCode::Char('c')));
+        match action {
+            ConsentAction::Confirmed {
+                approved,
+                budget_action,
+                ..
+            } => {
+                assert!(!approved);
+                assert!(budget_action.is_none());
+            }
+            _ => panic!("expected Confirmed"),
+        }
+    }
+
+    #[test]
+    fn test_budget_saturating_double() {
+        // When current limit is very large, doubling saturates to u64::MAX
+        let sel = make_budget_selector("req-1", u64::MAX);
+        let mut buf = Vec::new();
+        sel.render(&mut buf).unwrap();
+        let output = String::from_utf8_lossy(&buf);
+        let max_str = u64::MAX.to_string();
+        assert!(
+            output.contains(&format!("Double limit to {max_str}")),
+            "should saturate, got: {output}"
+        );
+    }
+
+    #[test]
+    fn test_budget_selector_lines() {
+        let standard = make_selector("req-1");
+        assert_eq!(standard.selector_lines(), 2);
+
+        let budget = make_budget_selector("req-1", 32768);
+        assert_eq!(budget.selector_lines(), 4);
     }
 }
