@@ -34,6 +34,10 @@ use freebird_types::protocol::{ClientMessage, ServerMessage};
 /// at the call site.
 const RISK_LEVEL_SECURITY_WARNING: &str = "warning";
 
+/// Sentinel value returned by [`parse_approval_category`] when the category
+/// is a `budget_exceeded` kind.
+const RISK_LEVEL_BUDGET_EXCEEDED: &str = "budget";
+
 use self::consent::{ConsentAction, ConsentSelector};
 use self::input::{InputAction, InputEditor};
 use self::output::OutputRenderer;
@@ -389,6 +393,7 @@ impl TtyChat {
     ///
     /// - Consent requests: yellow "CONSENT REQUIRED" with tool name and risk level
     /// - Security warnings: red "SECURITY WARNING" with threat details
+    /// - Budget exceeded: yellow "BUDGET EXCEEDED" with resource and usage
     ///
     /// The interactive selector or text-based fallback is rendered separately.
     fn render_consent_header(
@@ -403,26 +408,23 @@ impl TtyChat {
         };
 
         let is_security_warning = risk_level == RISK_LEVEL_SECURITY_WARNING;
+        let is_budget_exceeded = risk_level == RISK_LEVEL_BUDGET_EXCEEDED;
+
+        let (banner_color, banner_text) = if is_security_warning {
+            (Color::Red, "SECURITY WARNING")
+        } else if is_budget_exceeded {
+            (Color::Yellow, "BUDGET EXCEEDED")
+        } else {
+            (Color::Yellow, "CONSENT REQUIRED")
+        };
 
         writeln!(self.writer)?;
         queue!(
             self.writer,
             SetAttribute(Attribute::Bold),
-            SetForegroundColor(if is_security_warning {
-                Color::Red
-            } else {
-                Color::Yellow
-            }),
+            SetForegroundColor(banner_color),
         )?;
-        write!(
-            self.writer,
-            "  {}",
-            if is_security_warning {
-                "SECURITY WARNING"
-            } else {
-                "CONSENT REQUIRED"
-            }
-        )?;
+        write!(self.writer, "  {banner_text}")?;
         queue!(self.writer, ResetColor, SetAttribute(Attribute::Reset))?;
 
         writeln!(self.writer)?;
@@ -433,6 +435,8 @@ impl TtyChat {
         )?;
         if is_security_warning {
             write!(self.writer, "  Source: {display_name}")?;
+        } else if is_budget_exceeded {
+            write!(self.writer, "  Resource: {display_name}")?;
         } else {
             write!(self.writer, "  Tool: {display_name} (risk: {risk_level})")?;
         }
@@ -444,16 +448,14 @@ impl TtyChat {
             SetAttribute(Attribute::Dim),
             SetForegroundColor(Color::White),
         )?;
-        write!(
-            self.writer,
-            "  {}",
-            if is_security_warning {
-                "Detail"
-            } else {
-                "Action"
-            }
-        )?;
-        write!(self.writer, ": {action_summary}")?;
+        let label = if is_security_warning {
+            "Detail"
+        } else if is_budget_exceeded {
+            "Usage"
+        } else {
+            "Action"
+        };
+        write!(self.writer, "  {label}: {action_summary}")?;
         queue!(self.writer, ResetColor, SetAttribute(Attribute::Reset))?;
 
         writeln!(self.writer)?;
@@ -517,6 +519,21 @@ impl TtyChat {
                     summary
                 };
                 (header, summary, RISK_LEVEL_SECURITY_WARNING.into())
+            }
+            "budget_exceeded" => {
+                let resource = str_field("resource");
+                let used = val
+                    .get("used")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let limit = val
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+
+                let header = format!("budget: {resource}");
+                let summary = format!("Used {used}, limit {limit} \u{2014} approve to continue");
+                (header, summary, RISK_LEVEL_BUDGET_EXCEEDED.into())
             }
             _ => ("approval".into(), category_json.to_string(), "—".into()),
         }

@@ -964,7 +964,10 @@ impl AgentRuntime {
         .await;
     }
 
-    /// Handle a budget exceeded error: audit-log, notify user, mark turn complete.
+    /// Handle a budget exceeded error: request user approval to continue.
+    ///
+    /// Returns `true` if the user approves (caller should continue the loop),
+    /// or `false` if denied/expired (caller should abort).
     async fn handle_budget_exceeded(
         &self,
         session_id: &SessionId,
@@ -972,35 +975,68 @@ impl AgentRuntime {
         current_turn: &mut Turn,
         sender_id: &str,
         outbound: &mpsc::Sender<OutboundEvent>,
-    ) {
-        tracing::warn!(%session_id, %error, "token budget exceeded");
+    ) -> bool {
+        tracing::warn!(%session_id, %error, "token budget exceeded — requesting approval");
 
-        if let freebird_security::error::SecurityError::BudgetExceeded {
-            resource,
-            used,
-            limit,
-        } = error
+        let (resource_str, used_val, limit_val) =
+            if let freebird_security::error::SecurityError::BudgetExceeded {
+                resource,
+                used,
+                limit,
+            } = error
+            {
+                (resource.to_string(), *used, *limit)
+            } else {
+                return false;
+            };
+
+        // Attempt approval via the gate.
+        match self
+            .tool_executor
+            .check_budget_approval(resource_str.clone(), used_val, limit_val, sender_id)
+            .await
         {
-            self.audit(
-                session_id,
-                AuditEventType::BudgetExceeded {
-                    resource: resource.to_string(),
-                    used: *used,
-                    limit: *limit,
-                },
-            )
-            .await;
+            Ok(()) => {
+                tracing::info!(%session_id, resource = %resource_str, "budget override approved by user");
+                self.audit(
+                    session_id,
+                    AuditEventType::BudgetExceeded {
+                        resource: resource_str,
+                        used: used_val,
+                        limit: limit_val,
+                    },
+                )
+                .await;
+                true
+            }
+            Err(approval_err) => {
+                tracing::warn!(
+                    %session_id,
+                    resource = %resource_str,
+                    %approval_err,
+                    "budget override denied"
+                );
+                self.audit(
+                    session_id,
+                    AuditEventType::BudgetExceeded {
+                        resource: resource_str,
+                        used: used_val,
+                        limit: limit_val,
+                    },
+                )
+                .await;
+                current_turn.completed_at = Some(Utc::now());
+                send_outbound(
+                    outbound,
+                    OutboundEvent::Error {
+                        text: format!("Budget exceeded: {error} (approval {approval_err})"),
+                        recipient_id: sender_id.into(),
+                    },
+                )
+                .await;
+                false
+            }
         }
-
-        current_turn.completed_at = Some(Utc::now());
-        send_outbound(
-            outbound,
-            OutboundEvent::Error {
-                text: format!("Budget exceeded: {error}"),
-                recipient_id: sender_id.into(),
-            },
-        )
-        .await;
     }
 
     /// Run the agentic loop: call provider, handle tool use, deliver response.
@@ -1008,7 +1044,7 @@ impl AgentRuntime {
     /// When `initial_request` is `Some`, the first loop iteration uses it directly
     /// instead of building a fresh `CompletionRequest`. This supports the streaming
     /// fallback path where the request has already been constructed.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn run_agentic_loop(
         &self,
         safe_message: &SafeMessage,
@@ -1037,15 +1073,19 @@ impl AgentRuntime {
             if let Some(ref b) = budget {
                 let round_u32 = u32::try_from(round).unwrap_or(u32::MAX);
                 if let Err(e) = b.check_tool_rounds(round_u32) {
-                    self.handle_budget_exceeded(
-                        session_id,
-                        &e,
-                        &mut current_turn,
-                        sender_id,
-                        outbound,
-                    )
-                    .await;
-                    return current_turn;
+                    if !self
+                        .handle_budget_exceeded(
+                            session_id,
+                            &e,
+                            &mut current_turn,
+                            sender_id,
+                            outbound,
+                        )
+                        .await
+                    {
+                        return current_turn;
+                    }
+                    // User approved — continue the loop beyond the limit.
                 }
             } else if round >= max_rounds {
                 // No budget configured — fall back to config limit.
@@ -1074,15 +1114,21 @@ impl AgentRuntime {
             // Record token usage and check per-request/per-session limits.
             if let Some(ref b) = budget {
                 if let Err(e) = b.record_usage(&response.usage) {
-                    self.handle_budget_exceeded(
-                        session_id,
-                        &e,
-                        &mut current_turn,
-                        sender_id,
-                        outbound,
-                    )
-                    .await;
-                    return current_turn;
+                    if self
+                        .handle_budget_exceeded(
+                            session_id,
+                            &e,
+                            &mut current_turn,
+                            sender_id,
+                            outbound,
+                        )
+                        .await
+                    {
+                        // User approved — force-commit the usage.
+                        b.force_record_usage(&response.usage);
+                    } else {
+                        return current_turn;
+                    }
                 }
             }
 
@@ -1490,15 +1536,19 @@ impl AgentRuntime {
             if let Some(ref b) = budget {
                 let round_u32 = u32::try_from(round).unwrap_or(u32::MAX);
                 if let Err(e) = b.check_tool_rounds(round_u32) {
-                    self.handle_budget_exceeded(
-                        session_id,
-                        &e,
-                        &mut current_turn,
-                        sender_id,
-                        outbound,
-                    )
-                    .await;
-                    return current_turn;
+                    if !self
+                        .handle_budget_exceeded(
+                            session_id,
+                            &e,
+                            &mut current_turn,
+                            sender_id,
+                            outbound,
+                        )
+                        .await
+                    {
+                        return current_turn;
+                    }
+                    // User approved — continue the loop beyond the limit.
                 }
             } else if round >= max_rounds {
                 // No budget configured — fall back to config limit.
@@ -1544,15 +1594,21 @@ impl AgentRuntime {
             // Record token usage and check per-request/per-session limits.
             if let Some(ref b) = budget {
                 if let Err(e) = b.record_usage(&usage) {
-                    self.handle_budget_exceeded(
-                        session_id,
-                        &e,
-                        &mut current_turn,
-                        sender_id,
-                        outbound,
-                    )
-                    .await;
-                    return current_turn;
+                    if self
+                        .handle_budget_exceeded(
+                            session_id,
+                            &e,
+                            &mut current_turn,
+                            sender_id,
+                            outbound,
+                        )
+                        .await
+                    {
+                        // User approved — force-commit the usage.
+                        b.force_record_usage(&usage);
+                    } else {
+                        return current_turn;
+                    }
                 }
             }
 
