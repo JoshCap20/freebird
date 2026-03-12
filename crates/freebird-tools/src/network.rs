@@ -53,7 +53,7 @@ pub struct NetworkToolConfig {
 impl Default for NetworkToolConfig {
     fn default() -> Self {
         Self {
-            max_response_bytes: 1_048_576,
+            max_response_bytes: 102_400,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -247,6 +247,9 @@ impl HttpRequestTool {
     /// Inner implementation without timeout wrapper.
     async fn send_request_inner(&self, request: ValidatedRequest) -> Result<ToolOutput, ToolError> {
         let mut req = self.client.request(request.method, &request.url);
+
+        // Default User-Agent identifies freebird; user-supplied headers below can override.
+        req = req.header("User-Agent", "freebird-agent/0.1");
 
         for (key, value) in &request.headers {
             req = req.header(key.as_str(), value.as_str());

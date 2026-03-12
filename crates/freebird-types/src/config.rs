@@ -328,7 +328,7 @@ fn default_egress_allowed_ports() -> Vec<u16> {
 }
 
 const fn default_egress_max_response_bytes() -> usize {
-    1_048_576 // 1 MiB
+    102_400 // 100 KiB — ~25k tokens, fits comfortably in LLM context
 }
 
 const fn default_egress_request_timeout_secs() -> u64 {
@@ -899,7 +899,7 @@ drain_timeout_secs = 1"#,
             vec!["api.anthropic.com", "api.openai.com"]
         );
         assert_eq!(config.security.egress.allowed_ports, vec![443]);
-        assert_eq!(config.security.egress.max_response_bytes, 1_048_576);
+        assert_eq!(config.security.egress.max_response_bytes, 102_400);
         assert_eq!(config.security.egress.request_timeout_secs, 30);
     }
 
@@ -934,7 +934,7 @@ drain_timeout_secs = 1"#,
             ]
         );
         assert_eq!(config.security.egress.allowed_ports, vec![443]);
-        assert_eq!(config.security.egress.max_response_bytes, 1_048_576);
+        assert_eq!(config.security.egress.max_response_bytes, 102_400);
         assert_eq!(config.security.egress.request_timeout_secs, 30);
     }
 
