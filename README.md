@@ -125,6 +125,7 @@ freebird-daemon      Binary entry point, config, lifecycle, TUI chat client
 | `store_knowledge`, `search_knowledge`, `update_knowledge`, `delete_knowledge` | knowledge | Low |
 | `repo_map` | repo_map | Low |
 | `cargo_verify` | cargo_verify | Medium |
+| `list_sessions`, `search_sessions`, `recall_session` | session | Low |
 
 Dependencies flow in one direction. `freebird-traits` and `freebird-types` depend on nothing internal. Security primitives live in `freebird-security` and are used everywhere — they aren't an afterthought bolted onto the runtime.
 
@@ -204,6 +205,7 @@ freebird serve   Start the daemon with TCP listener
 freebird chat    Connect to a running daemon for interactive chat
 freebird status  Check if the daemon is running
 freebird stop    Send graceful shutdown to the daemon
+freebird replay  Replay a past session as a detailed trace
 ```
 
 #### `freebird serve` Options
@@ -235,6 +237,22 @@ allowed_directories = ["~/Documents/myproject", "~/src/other"]
 ```
 
 Paths support `~` expansion. CLI flags are merged with any directories set in config. Relative paths from the agent always resolve against the sandbox; absolute paths are validated against the sandbox and all allowed directories.
+
+#### `freebird replay` Options
+
+| Flag | Description |
+|------|-------------|
+| `<SESSION_ID>` | Session ID (UUID) to replay |
+| `--last` | Replay the most recent session |
+| `--json` | Output as JSON instead of human-readable trace |
+
+```bash
+# Replay the most recent session
+freebird replay --last
+
+# Replay a specific session as JSON
+freebird replay abc123-def4-5678-... --json
+```
 
 ## License
 

@@ -5,6 +5,7 @@
 //! - `freebird chat`   — connect to running daemon for interactive chat
 //! - `freebird status` — check if daemon is running
 //! - `freebird stop`   — send graceful shutdown to daemon
+//! - `freebird replay` — replay a past session as a detailed trace
 
 #![deny(clippy::all, clippy::pedantic, clippy::nursery)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -33,6 +34,7 @@ use freebird_types::config::AppConfig;
 
 mod chat;
 mod providers;
+mod replay;
 mod tools;
 mod ui;
 
@@ -60,6 +62,17 @@ enum Commands {
     Status,
     /// Send graceful shutdown to the daemon.
     Stop,
+    /// Replay a past session as a detailed trace.
+    Replay {
+        /// Session ID to replay (UUID).
+        session_id: Option<String>,
+        /// Replay the most recent session.
+        #[arg(long)]
+        last: bool,
+        /// Output as JSON instead of human-readable trace.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -71,6 +84,11 @@ async fn main() -> Result<()> {
         Commands::Chat => cmd_chat().await,
         Commands::Status => cmd_status().await,
         Commands::Stop => cmd_stop().await,
+        Commands::Replay {
+            session_id,
+            last,
+            json,
+        } => cmd_replay(session_id, last, json).await,
     }
 }
 
@@ -116,7 +134,15 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
             freebird_memory::sqlite_audit::SqliteAuditSink::new(std::sync::Arc::clone(&db)),
         ));
 
-    // 6b. EMIT DaemonStarted audit event
+    // 6b. VERIFY AUDIT CHAIN — detect tampering between restarts (ASI06, #111)
+    if let Some(ref sink) = audit_sink {
+        sink.verify_chain().await.with_context(
+            || "audit chain integrity check failed — the audit log may have been tampered with",
+        )?;
+        tracing::info!("audit chain integrity verified");
+    }
+
+    // 6c. EMIT DaemonStarted audit event
     if let Some(ref sink) = audit_sink {
         let event = freebird_security::audit::AuditEventType::DaemonStarted {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -199,6 +225,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         tools_config.allowed_directories.clone(),
         Some(approval_gate),
         knowledge_store,
+        Some(std::sync::Arc::clone(&memory)),
         secret_guard,
         config.security.injection.clone(),
     )
@@ -213,7 +240,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         channel,
         tool_executor,
         Some(approval_rx),
-        Box::new(memory),
+        memory,
         ks_for_runtime,
         config.knowledge,
         config.runtime,
@@ -320,6 +347,55 @@ async fn cmd_stop() -> Result<()> {
     Ok(())
 }
 
+/// `freebird replay` — display a past session as a detailed trace.
+///
+/// Opens the encrypted database (prompts for key if needed), resolves the
+/// session via `--last` or an explicit session ID, and prints the formatted
+/// replay to stdout.
+async fn cmd_replay(session_id: Option<String>, last: bool, json: bool) -> Result<()> {
+    let config = load_config()?;
+
+    if session_id.is_none() && !last {
+        bail!("specify a session ID or use --last to replay the most recent session");
+    }
+
+    let (memory, _knowledge, _db, _salt) = init_sqlite(&config)?;
+
+    // Resolve session ID
+    let sid = if last {
+        let sessions = memory
+            .list_sessions(1)
+            .await
+            .context("failed to list sessions")?;
+        sessions
+            .into_iter()
+            .next()
+            .map(|s| s.session_id)
+            .ok_or_else(|| anyhow::anyhow!("no sessions found"))?
+    } else {
+        // session_id is Some(...) due to the bail above
+        let raw = session_id.ok_or_else(|| anyhow::anyhow!("missing session ID"))?;
+        freebird_traits::id::SessionId::from(raw.as_str())
+    };
+
+    let conversation = memory
+        .load(&sid)
+        .await
+        .with_context(|| format!("failed to load session `{sid}`"))?
+        .ok_or_else(|| anyhow::anyhow!("session `{sid}` not found"))?;
+
+    if json {
+        let output =
+            replay::format_replay_json(&conversation).context("failed to serialize session")?;
+        println!("{output}");
+    } else {
+        let output = replay::format_replay(&conversation);
+        print!("{output}");
+    }
+
+    Ok(())
+}
+
 /// Load configuration from TOML file with environment variable overrides.
 fn load_config() -> Result<AppConfig> {
     let config_path =
@@ -421,7 +497,7 @@ fn enforce_security_minimums(mut config: AppConfig) -> AppConfig {
 
 /// Result of [`init_sqlite`]: memory backend, optional knowledge store, raw DB handle, and salt.
 type SqliteComponents = (
-    SqliteMemory,
+    std::sync::Arc<dyn freebird_traits::memory::Memory>,
     Option<std::sync::Arc<dyn freebird_traits::knowledge::KnowledgeStore>>,
     std::sync::Arc<freebird_memory::sqlite::SqliteDb>,
     Vec<u8>,
@@ -480,7 +556,10 @@ fn init_sqlite(config: &AppConfig) -> Result<SqliteComponents> {
 
     tracing::info!(path = %db_path.display(), "encrypted database opened");
 
-    let memory = SqliteMemory::new(Arc::clone(&db), config.memory.verify_on_load);
+    let memory: Arc<dyn freebird_traits::memory::Memory> = Arc::new(SqliteMemory::new(
+        Arc::clone(&db),
+        config.memory.verify_on_load,
+    ));
     let knowledge: Arc<dyn freebird_traits::knowledge::KnowledgeStore> =
         Arc::new(SqliteKnowledgeStore::new(Arc::clone(&db)));
 

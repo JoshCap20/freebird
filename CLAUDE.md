@@ -739,7 +739,11 @@ See `deny.toml` for configuration.
 
 ## 18. Daemon Lifecycle
 
-`freebird-daemon/src/main.rs` is a **thin composition root** — under 30 lines of logic. It loads config, initializes logging, builds channels/providers/memory, constructs `AgentRuntime`, and calls `runtime.run(channels)`.
+`freebird-daemon/src/main.rs` is a **thin composition root**. It loads config, initializes logging, builds channels/providers/memory, constructs `AgentRuntime`, and calls `runtime.run(channels)`.
+
+**Subcommands**: `serve` (start daemon), `chat` (interactive client), `status` (probe daemon), `stop` (graceful shutdown), `replay` (session trace — see below).
+
+**`freebird replay`**: Replays a past session as a human-readable trace or JSON. Accepts a session ID or `--last` for the most recent session. Uses `--json` for machine-consumable output. Opens the encrypted database directly (no running daemon required). See `crates/freebird-daemon/src/replay.rs`.
 
 **Graceful shutdown**: `ShutdownCoordinator` listens for SIGINT/SIGTERM, cancels via `CancellationToken`, drains in-flight requests within a configurable timeout.
 

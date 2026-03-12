@@ -69,6 +69,7 @@ pub struct ToolExecutor {
     allowed_directories: Vec<PathBuf>,
     approval_gate: Option<ApprovalGate>,
     knowledge_store: Option<Arc<dyn KnowledgeStore>>,
+    memory: Option<Arc<dyn freebird_traits::memory::Memory>>,
     secret_guard: Option<SecretGuard>,
     injection_config: InjectionConfig,
 }
@@ -82,6 +83,7 @@ impl std::fmt::Debug for ToolExecutor {
             .field("allowed_directories", &self.allowed_directories)
             .field("has_approval_gate", &self.approval_gate.is_some())
             .field("has_knowledge_store", &self.knowledge_store.is_some())
+            .field("has_memory", &self.memory.is_some())
             .field("has_secret_guard", &self.secret_guard.is_some())
             .field("injection_config", &self.injection_config)
             .finish()
@@ -105,6 +107,7 @@ impl ToolExecutor {
         allowed_directories: Vec<PathBuf>,
         approval_gate: Option<ApprovalGate>,
         knowledge_store: Option<Arc<dyn KnowledgeStore>>,
+        memory: Option<Arc<dyn freebird_traits::memory::Memory>>,
         secret_guard: Option<SecretGuard>,
         injection_config: InjectionConfig,
     ) -> Result<Self, ToolExecutorError> {
@@ -129,6 +132,7 @@ impl ToolExecutor {
             allowed_directories,
             approval_gate,
             knowledge_store,
+            memory,
             secret_guard,
             injection_config,
         })
@@ -359,6 +363,7 @@ impl ToolExecutor {
             granted_capabilities: &caps_vec,
             allowed_directories: &self.allowed_directories,
             knowledge_store: self.knowledge_store.as_deref(),
+            memory: self.memory.as_deref(),
         };
 
         let start = std::time::Instant::now();
@@ -1112,6 +1117,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             InjectionConfig::default(),
         )
         .unwrap();
@@ -1140,6 +1146,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
             None,
             None,
             None,
@@ -1172,6 +1179,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
             None,
             None,
             None,
@@ -1211,6 +1219,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             InjectionConfig::default(),
         )
         .unwrap();
@@ -1247,6 +1256,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             InjectionConfig::default(),
         )
         .unwrap();
@@ -1275,6 +1285,7 @@ mod tests {
             StdDuration::from_millis(50),
             None,
             vec![],
+            None,
             None,
             None,
             None,
@@ -1308,6 +1319,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
             None,
             None,
             None,
@@ -1345,6 +1357,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             InjectionConfig::default(),
         )
         .unwrap();
@@ -1376,6 +1389,7 @@ mod tests {
             StdDuration::from_secs(5),
             Some(sink),
             vec![],
+            None,
             None,
             None,
             None,
@@ -1419,6 +1433,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             InjectionConfig::default(),
         )
         .unwrap();
@@ -1456,6 +1471,7 @@ mod tests {
             StdDuration::from_secs(5),
             Some(sink),
             vec![],
+            None,
             None,
             None,
             None,
@@ -1504,6 +1520,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             InjectionConfig::default(),
         )
         .unwrap();
@@ -1544,6 +1561,7 @@ mod tests {
             StdDuration::from_secs(5),
             Some(sink),
             vec![],
+            None,
             None,
             None,
             None,
@@ -1591,6 +1609,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             InjectionConfig::default(),
         )
         .unwrap();
@@ -1623,6 +1642,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             InjectionConfig::default(),
         );
         let err = result.expect_err("should fail");
@@ -1636,6 +1656,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
             None,
             None,
             None,
@@ -1656,6 +1677,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             InjectionConfig::default(),
         )
         .unwrap();
@@ -1670,6 +1692,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
             None,
             None,
             None,
@@ -1693,6 +1716,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
             None,
             None,
             None,
@@ -1723,6 +1747,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             InjectionConfig::default(),
         )
         .unwrap();
@@ -1742,6 +1767,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
             None,
             None,
             None,
@@ -1768,6 +1794,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
             None,
             None,
             None,
@@ -1801,6 +1828,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
             None,
             None,
             None,
@@ -1838,6 +1866,7 @@ mod tests {
             Some(gate),
             None,
             None,
+            None,
             InjectionConfig::default(),
         )
         .unwrap();
@@ -1873,6 +1902,7 @@ mod tests {
                 None,
                 vec![],
                 Some(gate),
+                None,
                 None,
                 None,
                 InjectionConfig::default(),
@@ -1923,6 +1953,7 @@ mod tests {
                 Some(gate),
                 None,
                 None,
+                None,
                 InjectionConfig::default(),
             )
             .unwrap(),
@@ -1966,6 +1997,7 @@ mod tests {
             Some(gate),
             None,
             None,
+            None,
             InjectionConfig::default(),
         )
         .unwrap();
@@ -1998,6 +2030,7 @@ mod tests {
                 None,
                 vec![],
                 Some(gate),
+                None,
                 None,
                 None,
                 InjectionConfig::default(),
@@ -2046,6 +2079,7 @@ mod tests {
                 Some(gate),
                 None,
                 None,
+                None,
                 InjectionConfig::default(),
             )
             .unwrap(),
@@ -2088,6 +2122,7 @@ mod tests {
                 Some(sink),
                 vec![],
                 Some(gate),
+                None,
                 None,
                 None,
                 InjectionConfig::default(),
@@ -2134,6 +2169,7 @@ mod tests {
             Some(gate),
             None,
             None,
+            None,
             InjectionConfig::default(),
         )
         .unwrap();
@@ -2151,6 +2187,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
             None,
             None,
             None,
@@ -2185,6 +2222,7 @@ mod tests {
             None,
             vec![],
             Some(gate),
+            None,
             None,
             None,
             InjectionConfig::default(),
@@ -2254,6 +2292,7 @@ mod tests {
             Some(gate),
             None,
             None,
+            None,
             InjectionConfig::default(),
         )
         .unwrap();
@@ -2321,6 +2360,7 @@ mod tests {
             vec![],
             None,
             None,
+            None,
             Some(make_block_secret_guard()),
             InjectionConfig::default(),
         )
@@ -2363,6 +2403,7 @@ mod tests {
                 None,
                 vec![],
                 Some(approval_gate),
+                None,
                 None,
                 Some(make_secret_guard()),
                 InjectionConfig::default(),
@@ -2429,6 +2470,7 @@ mod tests {
             vec![],
             None,
             None,
+            None,
             Some(make_secret_guard()),
             InjectionConfig::default(),
         )
@@ -2464,6 +2506,7 @@ mod tests {
             StdDuration::from_secs(5),
             None,
             vec![],
+            None,
             None,
             None,
             Some(make_secret_guard()),
@@ -2505,6 +2548,7 @@ mod tests {
             StdDuration::from_secs(5),
             Some(sink),
             vec![],
+            None,
             None,
             None,
             Some(make_block_secret_guard()),
@@ -2564,6 +2608,7 @@ mod tests {
                 None,
                 vec![],
                 Some(gate),
+                None,
                 None,
                 None,
                 InjectionConfig::default(),
@@ -2634,6 +2679,7 @@ mod tests {
             Some(gate),
             None,
             None,
+            None,
             InjectionConfig::default(),
         )
         .unwrap();
@@ -2667,6 +2713,7 @@ mod tests {
                 None,
                 vec![],
                 Some(gate),
+                None,
                 None,
                 None,
                 InjectionConfig::default(),
@@ -2725,6 +2772,7 @@ mod tests {
             Some(gate),
             None,
             None,
+            None,
             InjectionConfig::default(),
         )
         .unwrap();
@@ -2760,6 +2808,7 @@ mod tests {
             Some(gate),
             None,
             None,
+            None,
             InjectionConfig::default(),
         )
         .unwrap();
@@ -2792,6 +2841,7 @@ mod tests {
             None,
             vec![],
             Some(gate),
+            None,
             None,
             None,
             InjectionConfig::default(),
@@ -2839,6 +2889,7 @@ mod tests {
                 None,
                 vec![],
                 Some(gate),
+                None,
                 None,
                 Some(make_secret_guard()), // consent mode (escalate, not block)
                 InjectionConfig::default(),
@@ -2914,6 +2965,7 @@ mod tests {
                 Some(gate),
                 None,
                 None,
+                None,
                 InjectionConfig::default(),
             )
             .unwrap(),
@@ -2976,6 +3028,7 @@ mod tests {
                     Some(gate),
                     None,
                     None,
+                    None,
                     InjectionConfig::default(),
                 )
                 .unwrap(),
@@ -3026,6 +3079,7 @@ mod tests {
                 None,
                 vec![],
                 Some(gate),
+                None,
                 None,
                 None,
                 InjectionConfig::default(),

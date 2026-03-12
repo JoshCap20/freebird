@@ -15,6 +15,7 @@ pub mod grep;
 pub mod knowledge;
 pub mod network;
 pub mod repo_map;
+pub mod session;
 pub mod shell;
 #[cfg(test)]
 pub mod test_utils;

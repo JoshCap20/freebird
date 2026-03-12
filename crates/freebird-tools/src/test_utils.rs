@@ -68,6 +68,7 @@ impl TestHarness {
             granted_capabilities: &self.capabilities,
             allowed_directories: &self.allowed_directories,
             knowledge_store: None,
+            memory: None,
         }
     }
 }

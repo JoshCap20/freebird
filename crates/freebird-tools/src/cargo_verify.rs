@@ -1161,6 +1161,7 @@ mod tests {
                 granted_capabilities: &self.capabilities,
                 allowed_directories: &[],
                 knowledge_store: None,
+                memory: None,
             }
         }
 

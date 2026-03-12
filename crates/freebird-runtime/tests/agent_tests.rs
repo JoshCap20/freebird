@@ -7,6 +7,7 @@
 
 mod helpers;
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -55,7 +56,7 @@ fn make_runtime(channel: MockChannel) -> AgentRuntime {
         Box::new(channel),
         make_tool_executor(vec![]),
         None,
-        Box::new(NoopMemory),
+        Arc::new(NoopMemory),
         None,
         KnowledgeConfig::default(),
         RuntimeConfig {
