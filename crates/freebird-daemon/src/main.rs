@@ -92,6 +92,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
 
     // 3. VALIDATE
     validate_config(&config)?;
+    let config = enforce_security_minimums(config);
 
     // 4. PROVIDER REGISTRY
     let registry = providers::build_provider_registry(&config).await?;
@@ -103,7 +104,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
     ));
 
     // 6. MEMORY — SQLite with SQLCipher encryption
-    let (memory, knowledge_store, db, db_salt) = init_sqlite(&config)?;
+    let (memory, knowledge_store, db, _db_salt) = init_sqlite(&config)?;
 
     // 6a. EVENT SINK + AUDIT SINK — event-sourced persistence into the same SQLite DB
     let event_sink: Option<std::sync::Arc<dyn freebird_traits::event::EventSink>> =
@@ -114,6 +115,14 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         Some(std::sync::Arc::new(
             freebird_memory::sqlite_audit::SqliteAuditSink::new(std::sync::Arc::clone(&db)),
         ));
+
+    // 6b. EMIT DaemonStarted audit event
+    if let Some(ref sink) = audit_sink {
+        let event = freebird_security::audit::AuditEventType::DaemonStarted {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+        emit_audit_event(sink.as_ref(), None, &event).await;
+    }
 
     // 7. TOOLS — build registry before moving config.tools
     let tool_registry =
@@ -182,43 +191,11 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         None
     };
 
-    // 11. AUDIT LOGGER — tamper-evident, hash-chained audit log (ASI security)
-    let audit_logger = if let Some(ref audit_dir) = config.logging.audit_dir {
-        let expanded_dir = expand_tilde(audit_dir)?;
-        std::fs::create_dir_all(&expanded_dir).with_context(|| {
-            format!(
-                "failed to create audit directory `{}`",
-                expanded_dir.display()
-            )
-        })?;
-        let audit_path = expanded_dir.join("audit.jsonl");
-
-        // Derive HMAC signing key from DB salt + domain separator.
-        // The salt is unique per installation and not publicly known,
-        // making the audit chain unforgeable without database access.
-        let audit_key_material = format!("freebird-audit-{}", hex::encode(&db_salt));
-        let signing_key =
-            ring::hmac::Key::new(ring::hmac::HMAC_SHA256, audit_key_material.as_bytes());
-
-        let logger = freebird_security::audit::AuditLogger::new(&audit_path, signing_key)
-            .with_context(|| {
-                format!(
-                    "failed to initialize audit logger at `{}`",
-                    audit_path.display()
-                )
-            })?;
-        tracing::info!(path = %audit_path.display(), "audit logger initialized");
-        Some(logger)
-    } else {
-        tracing::info!("audit logging disabled (no audit_dir configured)");
-        None
-    };
-
-    // 12. TOOL EXECUTOR — consumes the registry, adds security pipeline (incl. secret guard)
+    // 11. TOOL EXECUTOR — consumes the registry, adds security pipeline (incl. secret guard)
     let tool_executor = freebird_runtime::tool_executor::ToolExecutor::new(
         tool_registry.into_tools(),
         std::time::Duration::from_secs(tools_config.default_timeout_secs),
-        audit_logger.clone(),
+        audit_sink.clone(),
         tools_config.allowed_directories.clone(),
         Some(approval_gate),
         knowledge_store,
@@ -228,6 +205,9 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
     .context("failed to construct ToolExecutor (duplicate tool names?)")?;
 
     // 13. AGENT RUNTIME
+    // Clone audit_sink before moving it into the runtime so we can
+    // emit DaemonShutdown after the runtime exits.
+    let audit_sink_for_shutdown = audit_sink.clone();
     let mut runtime = AgentRuntime::new(
         registry,
         channel,
@@ -239,7 +219,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         config.runtime,
         tools_config,
         config.security.budgets,
-        audit_logger,
+        config.security.default_session_ttl_hours,
         event_sink,
         audit_sink,
     );
@@ -249,6 +229,16 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
     match &run_result {
         Ok(()) => tracing::info!("runtime exited cleanly"),
         Err(e) => tracing::error!(%e, "runtime error"),
+    }
+
+    // 14b. EMIT DaemonShutdown audit event
+    if let Some(ref sink) = audit_sink_for_shutdown {
+        let reason = match &run_result {
+            Ok(()) => "clean shutdown".to_string(),
+            Err(e) => format!("runtime error: {e}"),
+        };
+        let event = freebird_security::audit::AuditEventType::DaemonShutdown { reason };
+        emit_audit_event(sink.as_ref(), None, &event).await;
     }
 
     // 15. DRAIN
@@ -261,6 +251,17 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
 
     tracing::info!("freebird stopped");
     run_result.map_err(Into::into)
+}
+
+/// Emit an audit event to the sink, handling serialization errors gracefully.
+///
+/// Delegates to the shared `emit_audit` helper in `freebird-runtime`.
+async fn emit_audit_event(
+    sink: &dyn freebird_traits::audit::AuditSink,
+    session_id: Option<&str>,
+    event: &freebird_security::audit::AuditEventType,
+) {
+    freebird_runtime::agent::emit_audit(sink, session_id, event.clone()).await;
 }
 
 /// `freebird chat` — interactive client that connects to the daemon.
@@ -337,7 +338,85 @@ fn validate_config(config: &AppConfig) -> Result<()> {
         bail!("at least one provider must be configured in [[providers]]");
     }
 
+    // Budget limits must be positive
+    if config.security.budgets.max_tokens_per_session == 0 {
+        bail!("security.budgets.max_tokens_per_session must be > 0");
+    }
+    if config.security.budgets.max_tokens_per_request == 0 {
+        bail!("security.budgets.max_tokens_per_request must be > 0");
+    }
+    if config.security.budgets.max_tool_rounds_per_turn == 0 {
+        bail!("security.budgets.max_tool_rounds_per_turn must be > 0");
+    }
+    if config.runtime.max_tool_rounds == 0 {
+        bail!("runtime.max_tool_rounds must be > 0");
+    }
+
+    // Egress allowed_hosts must be valid domain-like strings
+    for host in &config.security.egress.allowed_hosts {
+        if host.is_empty() || host.contains(' ') {
+            bail!(
+                "security.egress.allowed_hosts contains invalid entry: `{host}` \
+                 (must be non-empty and contain no spaces)"
+            );
+        }
+    }
+
+    // PBKDF2 iterations minimum
+    if config.memory.pbkdf2_iterations < 1000 {
+        bail!(
+            "memory.pbkdf2_iterations must be >= 1000 (got {})",
+            config.memory.pbkdf2_iterations
+        );
+    }
+
+    // Session TTL must be positive
+    if config.runtime.session.session_ttl_secs == 0 {
+        bail!("runtime.session.session_ttl_secs must be > 0");
+    }
+
     Ok(())
+}
+
+/// Enforce minimum security thresholds regardless of env var overrides.
+///
+/// Prevents misconfiguration (accidental or adversarial) from weakening
+/// security below safe minimums. Values that exceed limits are clamped
+/// with a warning.
+fn enforce_security_minimums(mut config: AppConfig) -> AppConfig {
+    use freebird_traits::tool::RiskLevel;
+
+    // require_consent_above must be at most High (Critical would disable all consent)
+    if config.security.require_consent_above > RiskLevel::High {
+        tracing::warn!(
+            original = ?config.security.require_consent_above,
+            clamped = ?RiskLevel::High,
+            "require_consent_above exceeds maximum — clamping to High"
+        );
+        config.security.require_consent_above = RiskLevel::High;
+    }
+
+    // max_tokens_per_session must be > 0
+    if config.security.budgets.max_tokens_per_session == 0 {
+        tracing::warn!("max_tokens_per_session is 0 — clamping to 1");
+        config.security.budgets.max_tokens_per_session = 1;
+    }
+
+    // max_tool_rounds_per_turn must be > 0 and <= 50
+    if config.security.budgets.max_tool_rounds_per_turn == 0 {
+        tracing::warn!("max_tool_rounds_per_turn is 0 — clamping to 1");
+        config.security.budgets.max_tool_rounds_per_turn = 1;
+    }
+    if config.security.budgets.max_tool_rounds_per_turn > 50 {
+        tracing::warn!(
+            original = config.security.budgets.max_tool_rounds_per_turn,
+            clamped = 50,
+            "max_tool_rounds_per_turn exceeds maximum — clamping to 50"
+        );
+        config.security.budgets.max_tool_rounds_per_turn = 50;
+    }
+
+    config
 }
 
 /// Result of [`init_sqlite`]: memory backend, optional knowledge store, raw DB handle, and salt.
@@ -380,7 +459,8 @@ fn init_sqlite(config: &AppConfig) -> Result<SqliteComponents> {
     .context("failed to resolve database encryption key")?;
 
     let key =
-        freebird_security::db_key::derive_key(&passphrase, &salt, config.memory.pbkdf2_iterations);
+        freebird_security::db_key::derive_key(&passphrase, &salt, config.memory.pbkdf2_iterations)
+            .context("failed to derive database encryption key")?;
 
     // Derive HMAC signing key from passphrase + salt for event and audit chain integrity.
     // Uses HMAC-SHA256 with the passphrase as key and a domain-separated salt as message,
@@ -671,5 +751,59 @@ format = "pretty"
             std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
         );
         assert_eq!(config.daemon.port, 7531);
+    }
+
+    #[test]
+    fn test_validate_config_zero_max_tool_rounds_errors() {
+        let mut config = valid_config();
+        config.runtime.max_tool_rounds = 0;
+        let err = validate_config(&config).unwrap_err();
+        assert!(err.to_string().contains("max_tool_rounds"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_config_zero_budget_tokens_errors() {
+        let mut config = valid_config();
+        config.security.budgets.max_tokens_per_session = 0;
+        let err = validate_config(&config).unwrap_err();
+        assert!(
+            err.to_string().contains("max_tokens_per_session"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_config_invalid_egress_host_errors() {
+        let mut config = valid_config();
+        config.security.egress.allowed_hosts = vec!["valid.com".into(), String::new()];
+        let err = validate_config(&config).unwrap_err();
+        assert!(err.to_string().contains("allowed_hosts"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_config_low_pbkdf2_errors() {
+        let mut config = valid_config();
+        config.memory.pbkdf2_iterations = 500;
+        let err = validate_config(&config).unwrap_err();
+        assert!(err.to_string().contains("pbkdf2_iterations"), "got: {err}");
+    }
+
+    #[test]
+    fn test_enforce_security_minimums_clamps_consent() {
+        let mut config = valid_config();
+        config.security.require_consent_above = freebird_traits::tool::RiskLevel::Critical;
+        let config = enforce_security_minimums(config);
+        assert_eq!(
+            config.security.require_consent_above,
+            freebird_traits::tool::RiskLevel::High
+        );
+    }
+
+    #[test]
+    fn test_enforce_security_minimums_clamps_tool_rounds() {
+        let mut config = valid_config();
+        config.security.budgets.max_tool_rounds_per_turn = 100;
+        let config = enforce_security_minimums(config);
+        assert_eq!(config.security.budgets.max_tool_rounds_per_turn, 50);
     }
 }

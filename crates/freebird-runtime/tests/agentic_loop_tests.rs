@@ -378,7 +378,7 @@ fn make_test_runtime(
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     )
@@ -695,7 +695,7 @@ async fn test_tool_use_timeout() {
         default_config(),
         tools_config,
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -758,7 +758,7 @@ async fn test_tool_use_max_rounds_exceeded() {
         config,
         default_tools_config(),
         budget_config,
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -842,7 +842,7 @@ async fn test_conversation_saved_after_turn() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -884,7 +884,7 @@ async fn test_tool_invocations_recorded_in_turn() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -1035,7 +1035,7 @@ async fn test_tool_output_injection_replaced_with_error() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -1088,7 +1088,7 @@ async fn test_model_output_injection_blocks_delivery() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -1137,7 +1137,7 @@ async fn test_truncated_response_injection_blocks_delivery() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -1211,7 +1211,7 @@ async fn test_memory_load_error_sends_error_event() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -1250,7 +1250,7 @@ async fn test_memory_save_error_does_not_crash() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -1349,7 +1349,7 @@ async fn test_continuing_session_includes_history_in_request() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -1418,6 +1418,7 @@ async fn test_new_conversation_uses_config_values() {
         temperature: Some(0.5),
         max_turns_per_session: 10,
         drain_timeout_secs: 1,
+        session: freebird_types::config::SessionConfig::default(),
     };
 
     let runtime = AgentRuntime::new(
@@ -1431,7 +1432,7 @@ async fn test_new_conversation_uses_config_values() {
         config,
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -1488,7 +1489,7 @@ async fn test_multi_turn_within_same_session() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -1622,7 +1623,7 @@ async fn test_token_budget_per_request_exceeded() {
         default_config(),
         default_tools_config(),
         budget,
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -1668,7 +1669,7 @@ async fn test_token_budget_per_session_exceeded() {
         default_config(),
         default_tools_config(),
         budget,
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );

@@ -16,4 +16,6 @@ pub mod knowledge;
 pub mod network;
 pub mod repo_map;
 pub mod shell;
+#[cfg(test)]
+pub mod test_utils;
 pub mod viewer;

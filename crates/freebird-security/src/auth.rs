@@ -10,7 +10,8 @@
 //! - Deserialized via `serde` with [`#[serde(try_from)]`](serde::Deserialize)
 //!   which validates on parse (not after)
 
-use std::time::Duration;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use freebird_traits::tool::Capability;
@@ -279,6 +280,107 @@ pub fn verify_session_key<'a>(
     }
 
     Ok(&stored.capabilities)
+}
+
+/// Sliding-window rate limiter for failed authentication attempts.
+///
+/// Tracks per-`key_id` attempt timestamps in a sliding window. When the
+/// number of attempts within the window exceeds the configured maximum,
+/// further attempts are rejected until old entries expire.
+///
+/// **Thread safety**: This struct uses interior mutability via `std::sync::Mutex`.
+/// The lock is held only for nanosecond-scale hashmap operations with no `.await`,
+/// so `std::sync::Mutex` is acceptable here (see CLAUDE.md S20).
+pub struct RateLimiter {
+    /// Maximum failed attempts per `key_id` within the window.
+    max_attempts: usize,
+    /// Sliding window duration.
+    window: Duration,
+    /// Per-`key_id` attempt timestamps.
+    attempts: std::sync::Mutex<HashMap<String, Vec<Instant>>>,
+}
+
+impl RateLimiter {
+    /// Create a new rate limiter.
+    ///
+    /// - `max_attempts`: maximum failed attempts per `key_id` within the window.
+    /// - `window`: sliding window duration.
+    #[must_use]
+    pub fn new(max_attempts: usize, window: Duration) -> Self {
+        Self {
+            max_attempts,
+            window,
+            attempts: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Create a rate limiter with default settings: 10 attempts per 5 minutes.
+    #[must_use]
+    pub fn default_auth() -> Self {
+        Self::new(10, Duration::from_secs(300))
+    }
+
+    /// Check whether a `key_id` has exceeded the rate limit.
+    ///
+    /// Does **not** record the attempt — call [`record_attempt`](Self::record_attempt)
+    /// after a failed auth to register it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SecurityError::InvalidSessionKey` if the rate limit is exceeded.
+    ///
+    pub fn check_rate_limit(&self, key_id: &str) -> Result<(), SecurityError> {
+        let now = Instant::now();
+        // Lock scope is nanosecond-scale — no `.await` inside.
+        // std::sync::Mutex is acceptable per CLAUDE.md §20 (nanosecond-held, no .await).
+        let attempts = self
+            .attempts
+            .lock()
+            .map_err(|_| SecurityError::InvalidCredential {
+                reason: "rate limiter internal error".into(),
+            })?;
+        if let Some(timestamps) = attempts.get(key_id) {
+            let recent_count = timestamps
+                .iter()
+                .filter(|&&t| now.duration_since(t) < self.window)
+                .count();
+            if recent_count >= self.max_attempts {
+                return Err(SecurityError::InvalidSessionKey {
+                    key_id: format!("{key_id} (rate limited)"),
+                });
+            }
+        }
+        drop(attempts);
+        Ok(())
+    }
+
+    /// Record a failed authentication attempt for a `key_id`.
+    ///
+    /// Also prunes expired entries for this `key_id` to prevent unbounded growth.
+    ///
+    pub fn record_attempt(&self, key_id: &str) {
+        let now = Instant::now();
+        // Lock scope is nanosecond-scale — no `.await` inside.
+        // std::sync::Mutex is acceptable per CLAUDE.md §20 (nanosecond-held, no .await).
+        let Ok(mut attempts) = self.attempts.lock() else {
+            tracing::error!("rate limiter mutex poisoned — skipping attempt recording");
+            return;
+        };
+        let entry = attempts.entry(key_id.to_owned()).or_default();
+        // Prune expired entries
+        entry.retain(|&t| now.duration_since(t) < self.window);
+        entry.push(now);
+        drop(attempts);
+    }
+}
+
+impl std::fmt::Debug for RateLimiter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RateLimiter")
+            .field("max_attempts", &self.max_attempts)
+            .field("window", &self.window)
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(test)]
@@ -579,5 +681,66 @@ mod tests {
                 prop_assert!(result.is_ok());
             }
         }
+    }
+
+    // ── Rate Limiter Tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_rate_limiter_allows_under_limit() {
+        let limiter = RateLimiter::new(3, Duration::from_secs(60));
+        limiter.record_attempt("key1");
+        limiter.record_attempt("key1");
+        assert!(limiter.check_rate_limit("key1").is_ok());
+    }
+
+    #[test]
+    fn test_rate_limiter_blocks_at_limit() {
+        let limiter = RateLimiter::new(3, Duration::from_secs(60));
+        for _ in 0..3 {
+            limiter.record_attempt("key1");
+        }
+        let result = limiter.check_rate_limit("key1");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("rate limited"));
+    }
+
+    #[test]
+    fn test_rate_limiter_separate_keys() {
+        let limiter = RateLimiter::new(2, Duration::from_secs(60));
+        for _ in 0..2 {
+            limiter.record_attempt("key1");
+        }
+        // key1 is rate limited
+        assert!(limiter.check_rate_limit("key1").is_err());
+        // key2 is not
+        assert!(limiter.check_rate_limit("key2").is_ok());
+    }
+
+    #[test]
+    fn test_rate_limiter_unknown_key_allowed() {
+        let limiter = RateLimiter::new(3, Duration::from_secs(60));
+        assert!(limiter.check_rate_limit("never_seen").is_ok());
+    }
+
+    #[test]
+    fn test_rate_limiter_default_auth_settings() {
+        let limiter = RateLimiter::default_auth();
+        // Should allow at least 10 attempts
+        for _ in 0..10 {
+            limiter.record_attempt("key1");
+        }
+        assert!(limiter.check_rate_limit("key1").is_err());
+    }
+
+    #[test]
+    fn test_rate_limiter_expired_window() {
+        // Use a very short window (1 nanosecond) so entries expire immediately
+        let limiter = RateLimiter::new(2, Duration::from_nanos(1));
+        limiter.record_attempt("key1");
+        limiter.record_attempt("key1");
+        // Wait a tiny bit for the window to expire
+        std::thread::sleep(Duration::from_millis(1));
+        // Should be allowed again after window expires
+        assert!(limiter.check_rate_limit("key1").is_ok());
     }
 }

@@ -160,33 +160,40 @@ fn matches_extra_pattern(filename: &str, pattern: &str) -> bool {
 }
 
 /// Check if a file path matches any sensitive pattern.
+///
+/// Normalizes filenames and directory components to lowercase before matching,
+/// so that `.ENV`, `.Ssh/id_rsa`, etc. are detected on case-insensitive
+/// filesystems (macOS, Windows).
 fn is_sensitive_path(path_str: &str, extra_patterns: &[String]) -> Option<String> {
     let path = Path::new(path_str);
 
-    // Check directory components
+    // Check directory components (case-insensitive)
     for component in path.components() {
         let comp_str = component.as_os_str().to_string_lossy();
+        let comp_lower = comp_str.to_lowercase();
         for dir in SENSITIVE_DIRECTORIES {
-            if comp_str == *dir {
+            if comp_lower == *dir {
                 return Some(format!("path contains sensitive directory `{dir}`"));
             }
         }
     }
 
-    // Check filename
-    let filename = path
+    // Check filename (case-insensitive)
+    let filename_raw = path
         .file_name()
         .map(|f| f.to_string_lossy())
         .unwrap_or_default();
 
-    if filename.is_empty() {
+    if filename_raw.is_empty() {
         return None;
     }
+
+    let filename = filename_raw.to_lowercase();
 
     // Exact filename match
     for name in SENSITIVE_EXACT_FILENAMES {
         if filename == *name {
-            return Some(format!("sensitive file `{filename}`"));
+            return Some(format!("sensitive file `{filename_raw}`"));
         }
     }
 
@@ -194,7 +201,7 @@ fn is_sensitive_path(path_str: &str, extra_patterns: &[String]) -> Option<String
     for prefix in SENSITIVE_FILE_PREFIXES {
         if filename.starts_with(prefix) {
             return Some(format!(
-                "file `{filename}` matches sensitive prefix `{prefix}`"
+                "file `{filename_raw}` matches sensitive prefix `{prefix}`"
             ));
         }
     }
@@ -203,16 +210,17 @@ fn is_sensitive_path(path_str: &str, extra_patterns: &[String]) -> Option<String
     for suffix in SENSITIVE_FILE_SUFFIXES {
         if filename.ends_with(suffix) {
             return Some(format!(
-                "file `{filename}` matches sensitive suffix `{suffix}`"
+                "file `{filename_raw}` matches sensitive suffix `{suffix}`"
             ));
         }
     }
 
-    // Extra user-defined patterns
+    // Extra user-defined patterns (case-insensitive)
     for pattern in extra_patterns {
-        if matches_extra_pattern(&filename, pattern) {
+        let pattern_lower = pattern.to_lowercase();
+        if matches_extra_pattern(&filename, &pattern_lower) {
             return Some(format!(
-                "file `{filename}` matches custom pattern `{pattern}`"
+                "file `{filename_raw}` matches custom pattern `{pattern}`"
             ));
         }
     }
@@ -773,6 +781,58 @@ mod tests {
         let input = serde_json::json!({"file_path": ".env"});
         let result = guard.check_tool_input("read_file", &input);
         assert!(is_consent(&result), "expected consent, got {result:?}");
+    }
+
+    // ── Case-insensitive matching tests ──
+
+    #[test]
+    fn test_uppercase_env_detected() {
+        let guard = default_guard();
+        let result = guard.check_tool_input("read_file", &file_input(".ENV"));
+        assert!(
+            is_consent(&result),
+            "expected consent for .ENV, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_mixed_case_ssh_detected() {
+        let guard = default_guard();
+        let result = guard.check_tool_input("read_file", &file_input("/home/user/.Ssh/id_rsa"));
+        assert!(
+            is_consent(&result),
+            "expected consent for .Ssh/id_rsa, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_uppercase_pem_detected() {
+        let guard = default_guard();
+        let result = guard.check_tool_input("read_file", &file_input("server.PEM"));
+        assert!(
+            is_consent(&result),
+            "expected consent for .PEM, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_mixed_case_env_local_detected() {
+        let guard = default_guard();
+        let result = guard.check_tool_input("read_file", &file_input(".ENV.local"));
+        assert!(
+            is_consent(&result),
+            "expected consent for .ENV.local, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_uppercase_key_file_detected() {
+        let guard = default_guard();
+        let result = guard.check_tool_input("read_file", &file_input("tls.KEY"));
+        assert!(
+            is_consent(&result),
+            "expected consent for tls.KEY, got {result:?}"
+        );
     }
 
     #[test]

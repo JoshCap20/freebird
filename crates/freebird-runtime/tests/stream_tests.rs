@@ -445,6 +445,7 @@ fn default_config() -> RuntimeConfig {
         temperature: None,
         max_turns_per_session: 10,
         drain_timeout_secs: 1,
+        session: freebird_types::config::SessionConfig::default(),
     }
 }
 
@@ -511,7 +512,7 @@ fn make_stream_runtime(
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     )
@@ -689,7 +690,7 @@ async fn test_streaming_fallback_on_stream_setup_failure() {
         },
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -727,7 +728,7 @@ async fn test_non_streaming_channel_uses_non_streaming_path() {
         },
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -817,7 +818,7 @@ async fn test_streaming_conversation_persisted() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -981,7 +982,7 @@ async fn test_streaming_max_tool_rounds_exceeded() {
             max_tool_rounds_per_turn: 1,
             ..BudgetConfig::default()
         },
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -1028,7 +1029,7 @@ async fn test_streaming_stop_sequence() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -1122,7 +1123,7 @@ async fn test_non_streaming_provider_uses_complete_path() {
         },
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -1167,7 +1168,7 @@ async fn test_streaming_empty_done() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );

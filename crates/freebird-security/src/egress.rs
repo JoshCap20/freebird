@@ -3,10 +3,63 @@
 //! Provides `EgressPolicy` which validates URLs against an allowlist of
 //! permitted hosts and ports. Used by `SafeUrl::from_tainted()` to ensure
 //! the agent can only reach explicitly authorized endpoints.
+//!
+//! Also provides DNS rebinding prevention via [`is_private_ip`] and
+//! [`EgressPolicy::check_resolved_ip`], which reject resolved IP addresses
+//! in private/loopback/link-local ranges to prevent SSRF to internal services.
 
 use std::collections::BTreeSet;
+use std::net::IpAddr;
 
 use crate::error::SecurityError;
+
+/// Check whether an IP address is private, loopback, link-local, or otherwise
+/// non-routable.
+///
+/// Covers:
+/// - RFC 1918 private ranges: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`
+/// - Loopback: `127.0.0.0/8` (IPv4), `::1` (IPv6)
+/// - Link-local: `169.254.0.0/16` (IPv4), `fe80::/10` (IPv6)
+/// - IPv4-mapped IPv6: `::ffff:0:0/96` — delegates to the embedded IPv4 check
+/// - Documentation/example ranges: `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`
+/// - Broadcast: `255.255.255.255`
+/// - Unspecified: `0.0.0.0`, `::`
+#[must_use]
+pub fn is_private_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            // Loopback: 127.0.0.0/8
+            octets[0] == 127
+            // RFC 1918: 10.0.0.0/8
+            || octets[0] == 10
+            // RFC 1918: 172.16.0.0/12
+            || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+            // RFC 1918: 192.168.0.0/16
+            || (octets[0] == 192 && octets[1] == 168)
+            // Link-local: 169.254.0.0/16
+            || (octets[0] == 169 && octets[1] == 254)
+            // Documentation: 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
+            || (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
+            || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+            || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+            // Broadcast
+            || *v4 == std::net::Ipv4Addr::BROADCAST
+            // Unspecified
+            || v4.is_unspecified()
+        }
+        IpAddr::V6(v6) => {
+            // Loopback: ::1
+            v6.is_loopback()
+            // Unspecified: ::
+            || v6.is_unspecified()
+            // Link-local: fe80::/10
+            || (v6.segments()[0] & 0xffc0) == 0xfe80
+            // IPv4-mapped IPv6: ::ffff:x.x.x.x — check the embedded IPv4
+            || v6.to_ipv4_mapped().is_some_and(|v4| is_private_ip(&IpAddr::V4(v4)))
+        }
+    }
+}
 
 /// Controls which hosts and ports the agent is permitted to contact.
 ///
@@ -16,13 +69,8 @@ use crate::error::SecurityError;
 /// Uses `BTreeSet` (not `HashSet`) for deterministic iteration order,
 /// which ensures stable debug output and predictable test assertions.
 ///
-/// # Future: DNS rebinding prevention
-///
-/// This policy validates hostnames but does not verify resolved IP addresses.
-/// A DNS rebinding attack could cause an allowlisted hostname to resolve to
-/// a private/loopback IP (`10.x`, `172.16-31.x`, `192.168.x`, `127.x`, `::1`),
-/// enabling SSRF to internal services. IP validation should be added at the
-/// HTTP client layer before outbound connections are established.
+/// Also provides DNS rebinding prevention via [`check_resolved_ip`](EgressPolicy::check_resolved_ip),
+/// which rejects resolved IP addresses in private/loopback/link-local ranges.
 pub struct EgressPolicy {
     allowed_hosts: BTreeSet<String>,
     allowed_ports: BTreeSet<u16>,
@@ -54,6 +102,29 @@ impl EgressPolicy {
     #[must_use]
     pub const fn allowed_ports(&self) -> &BTreeSet<u16> {
         &self.allowed_ports
+    }
+
+    /// Validate that a resolved IP address is not private/loopback/link-local.
+    ///
+    /// Call this after DNS resolution and before establishing a connection
+    /// to prevent DNS rebinding attacks where an allowlisted hostname resolves
+    /// to a private IP (SSRF to internal services).
+    ///
+    /// # Errors
+    ///
+    /// Returns `SecurityError::EgressBlocked` if the IP is private, loopback,
+    /// link-local, or otherwise non-routable.
+    #[must_use = "egress check result must not be silently discarded"]
+    pub fn check_resolved_ip(&self, ip: &IpAddr) -> Result<(), SecurityError> {
+        if is_private_ip(ip) {
+            return Err(SecurityError::EgressBlocked {
+                reason: format!(
+                    "resolved IP `{ip}` is in a private/loopback/link-local range \
+                     (DNS rebinding prevention)"
+                ),
+            });
+        }
+        Ok(())
     }
 
     /// Validate a parsed URL against this policy.
@@ -191,5 +262,90 @@ mod tests {
             .parse()
             .unwrap();
         assert!(policy.check_url(&url).is_err());
+    }
+
+    // ── DNS rebinding prevention tests ──────────────────────────────
+
+    #[test]
+    fn test_private_ip_rfc1918_10() {
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        assert!(is_private_ip(&ip));
+    }
+
+    #[test]
+    fn test_private_ip_rfc1918_172() {
+        let ip: IpAddr = "172.16.0.1".parse().unwrap();
+        assert!(is_private_ip(&ip));
+    }
+
+    #[test]
+    fn test_private_ip_rfc1918_192() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        assert!(is_private_ip(&ip));
+    }
+
+    #[test]
+    fn test_private_ip_loopback_v4() {
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(is_private_ip(&ip));
+    }
+
+    #[test]
+    fn test_private_ip_loopback_v6() {
+        let ip: IpAddr = "::1".parse().unwrap();
+        assert!(is_private_ip(&ip));
+    }
+
+    #[test]
+    fn test_private_ip_link_local_v4() {
+        let ip: IpAddr = "169.254.1.1".parse().unwrap();
+        assert!(is_private_ip(&ip));
+    }
+
+    #[test]
+    fn test_public_ip_8888() {
+        let ip: IpAddr = "8.8.8.8".parse().unwrap();
+        assert!(!is_private_ip(&ip));
+    }
+
+    #[test]
+    fn test_public_ip_1111() {
+        let ip: IpAddr = "1.1.1.1".parse().unwrap();
+        assert!(!is_private_ip(&ip));
+    }
+
+    #[test]
+    fn test_check_resolved_ip_rejects_private() {
+        let policy = test_policy();
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let result = policy.check_resolved_ip(&ip);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("DNS rebinding prevention")
+        );
+    }
+
+    #[test]
+    fn test_check_resolved_ip_allows_public() {
+        let policy = test_policy();
+        let ip: IpAddr = "8.8.8.8".parse().unwrap();
+        assert!(policy.check_resolved_ip(&ip).is_ok());
+    }
+
+    #[test]
+    fn test_check_resolved_ip_rejects_loopback_v6() {
+        let policy = test_policy();
+        let ip: IpAddr = "::1".parse().unwrap();
+        assert!(policy.check_resolved_ip(&ip).is_err());
+    }
+
+    #[test]
+    fn test_check_resolved_ip_rejects_link_local() {
+        let policy = test_policy();
+        let ip: IpAddr = "169.254.1.1".parse().unwrap();
+        assert!(policy.check_resolved_ip(&ip).is_err());
     }
 }

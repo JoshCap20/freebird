@@ -353,61 +353,21 @@ impl Tool for ListDirectoryTool {
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use std::io::Write as _;
-    use std::path::PathBuf;
 
-    use freebird_traits::id::SessionId;
-    use freebird_traits::tool::{Capability, Tool, ToolContext, ToolError};
+    use freebird_traits::tool::{Capability, Tool, ToolError};
 
     use super::*;
+    use crate::test_utils::TestHarness;
 
-    /// Test harness that owns the temp directory, session ID, and capabilities,
-    /// providing a zero-boilerplate `context()` method for tool tests.
-    struct TestHarness {
-        _tmp: tempfile::TempDir,
-        sandbox: PathBuf,
-        session_id: SessionId,
-        capabilities: Vec<Capability>,
-        allowed_directories: Vec<PathBuf>,
-    }
-
-    impl TestHarness {
-        fn new() -> Self {
-            let tmp = tempfile::tempdir().unwrap();
-            let sandbox = tmp.path().to_path_buf();
-            Self {
-                _tmp: tmp,
-                sandbox,
-                session_id: SessionId::from_string("test-session"),
-                capabilities: vec![Capability::FileRead, Capability::FileWrite],
-                allowed_directories: vec![],
-            }
-        }
-
-        fn with_allowed_directories(mut self, dirs: Vec<PathBuf>) -> Self {
-            self.allowed_directories = dirs;
-            self
-        }
-
-        fn path(&self) -> &std::path::Path {
-            &self.sandbox
-        }
-
-        fn context(&self) -> ToolContext<'_> {
-            ToolContext {
-                session_id: &self.session_id,
-                sandbox_root: &self.sandbox,
-                granted_capabilities: &self.capabilities,
-                allowed_directories: &self.allowed_directories,
-                knowledge_store: None,
-            }
-        }
+    fn harness() -> TestHarness {
+        TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite])
     }
 
     // ── read_file tests ─────────────────────────────────────────
 
     #[tokio::test]
     async fn test_read_existing_file() {
-        let h = TestHarness::new();
+        let h = harness();
         std::fs::write(h.path().join("hello.txt"), "Hello, world!").unwrap();
 
         let tool = ReadFileTool::new();
@@ -421,7 +381,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_nonexistent_file() {
-        let h = TestHarness::new();
+        let h = harness();
         let tool = ReadFileTool::new();
 
         let err = tool
@@ -440,7 +400,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_path_traversal_rejected() {
-        let h = TestHarness::new();
+        let h = harness();
         let tool = ReadFileTool::new();
 
         let err = tool
@@ -458,7 +418,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_missing_path_field() {
-        let h = TestHarness::new();
+        let h = harness();
         let tool = ReadFileTool::new();
 
         let err = tool
@@ -473,7 +433,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_non_utf8_file() {
-        let h = TestHarness::new();
+        let h = harness();
         let file_path = h.path().join("binary.bin");
         {
             let mut f = std::fs::File::create(&file_path).unwrap();
@@ -493,7 +453,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_file_exceeds_size_limit() {
-        let h = TestHarness::new();
+        let h = harness();
         let file_path = h.path().join("huge.txt");
         {
             let f = std::fs::File::create(&file_path).unwrap();
@@ -519,7 +479,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_empty_file() {
-        let h = TestHarness::new();
+        let h = harness();
         std::fs::write(h.path().join("empty.txt"), "").unwrap();
 
         let tool = ReadFileTool::new();
@@ -533,7 +493,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_absolute_path_rejected() {
-        let h = TestHarness::new();
+        let h = harness();
         let tool = ReadFileTool::new();
 
         let err = tool
@@ -550,7 +510,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_new_file() {
-        let h = TestHarness::new();
+        let h = harness();
         let tool = WriteFileTool::new();
 
         let output = tool
@@ -568,7 +528,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_overwrites_existing() {
-        let h = TestHarness::new();
+        let h = harness();
         std::fs::write(h.path().join("existing.txt"), "old content").unwrap();
 
         let tool = WriteFileTool::new();
@@ -587,7 +547,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_path_traversal_rejected() {
-        let h = TestHarness::new();
+        let h = harness();
         let tool = WriteFileTool::new();
 
         let err = tool
@@ -605,7 +565,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_missing_path_field() {
-        let h = TestHarness::new();
+        let h = harness();
         let tool = WriteFileTool::new();
 
         let err = tool
@@ -620,7 +580,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_missing_content_field() {
-        let h = TestHarness::new();
+        let h = harness();
         let tool = WriteFileTool::new();
 
         let err = tool
@@ -635,7 +595,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_nonexistent_parent_dir() {
-        let h = TestHarness::new();
+        let h = harness();
         let tool = WriteFileTool::new();
 
         let err = tool
@@ -653,7 +613,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_output_reports_relative_path() {
-        let h = TestHarness::new();
+        let h = harness();
         let tool = WriteFileTool::new();
 
         let output = tool
@@ -678,7 +638,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_no_orphaned_temp_on_success() {
-        let h = TestHarness::new();
+        let h = harness();
         let tool = WriteFileTool::new();
 
         tool.execute(
@@ -704,7 +664,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_directory_returns_sorted_entries() {
-        let h = TestHarness::new();
+        let h = harness();
         std::fs::write(h.path().join("banana.txt"), "").unwrap();
         std::fs::write(h.path().join("apple.txt"), "").unwrap();
         std::fs::create_dir(h.path().join("cherry_dir")).unwrap();
@@ -726,7 +686,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_nonexistent_directory() {
-        let h = TestHarness::new();
+        let h = harness();
         let tool = ListDirectoryTool::new();
 
         let err = tool
@@ -743,7 +703,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_file_not_dir() {
-        let h = TestHarness::new();
+        let h = harness();
         std::fs::write(h.path().join("afile.txt"), "content").unwrap();
 
         let tool = ListDirectoryTool::new();
@@ -759,7 +719,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_path_traversal_rejected() {
-        let h = TestHarness::new();
+        let h = harness();
         let tool = ListDirectoryTool::new();
 
         let err = tool
@@ -774,7 +734,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_empty_directory() {
-        let h = TestHarness::new();
+        let h = harness();
         std::fs::create_dir(h.path().join("empty")).unwrap();
 
         let tool = ListDirectoryTool::new();
@@ -788,7 +748,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_empty_content() {
-        let h = TestHarness::new();
+        let h = harness();
         let tool = WriteFileTool::new();
 
         let output = tool
@@ -807,7 +767,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_absolute_path_rejected() {
-        let h = TestHarness::new();
+        let h = harness();
         let tool = WriteFileTool::new();
 
         let err = tool
@@ -825,7 +785,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_directory_truncates_at_limit() {
-        let h = TestHarness::new();
+        let h = harness();
         let dir = h.path().join("big");
         std::fs::create_dir(&dir).unwrap();
         // Create MAX_DIR_ENTRIES + 5 files to exceed the cap
@@ -854,7 +814,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_file_via_allowed_directory() {
-        let h = TestHarness::new();
+        let h = harness();
         let extra_dir = tempfile::tempdir().unwrap();
         // Canonicalize to resolve macOS /var → /private/var symlink
         let extra_canonical = extra_dir.path().canonicalize().unwrap();
@@ -877,7 +837,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_file_via_allowed_directory() {
-        let h = TestHarness::new();
+        let h = harness();
         let extra_dir = tempfile::tempdir().unwrap();
         let extra_canonical = extra_dir.path().canonicalize().unwrap();
 
@@ -900,7 +860,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_absolute_path_rejected_when_not_in_allowed_directories() {
-        let h = TestHarness::new();
+        let h = harness();
         let extra_dir = tempfile::tempdir().unwrap();
         std::fs::write(extra_dir.path().join("secret.txt"), "secret").unwrap();
 
@@ -923,7 +883,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_directory_via_allowed_directory() {
-        let h = TestHarness::new();
+        let h = harness();
         let extra_dir = tempfile::tempdir().unwrap();
         let extra_canonical = extra_dir.path().canonicalize().unwrap();
         std::fs::write(extra_canonical.join("visible.txt"), "").unwrap();
@@ -986,7 +946,7 @@ mod tests {
                     .build()
                     .unwrap();
                 rt.block_on(async {
-                    let h = TestHarness::new();
+                    let h = harness();
                     let write_tool = WriteFileTool::new();
                     let read_tool = ReadFileTool::new();
 
@@ -1021,7 +981,7 @@ mod tests {
                     .build()
                     .unwrap();
                 rt.block_on(async {
-                    let h = TestHarness::new();
+                    let h = harness();
                     let tool = ReadFileTool::new();
 
                     let traversal = format!("{}{}", "../".repeat(depth), suffix);
@@ -1044,7 +1004,7 @@ mod tests {
                     .build()
                     .unwrap();
                 rt.block_on(async {
-                    let h = TestHarness::new();
+                    let h = harness();
                     let tool = WriteFileTool::new();
 
                     let output = tool

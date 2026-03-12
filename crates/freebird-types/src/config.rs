@@ -62,6 +62,39 @@ pub struct RuntimeConfig {
     pub max_turns_per_session: usize,
     /// Seconds to wait for in-flight work during graceful shutdown.
     pub drain_timeout_secs: u64,
+    /// In-memory session manager limits.
+    #[serde(default)]
+    pub session: SessionConfig,
+}
+
+/// In-memory session manager configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionConfig {
+    /// Maximum number of concurrent in-memory sessions. Default: 100.
+    /// When exceeded, the least-recently-used session is evicted.
+    #[serde(default = "default_max_sessions")]
+    pub max_sessions: usize,
+    /// Session time-to-live in seconds. Default: 86400 (24 hours).
+    /// Sessions idle longer than this are evicted on the next operation.
+    #[serde(default = "default_session_ttl_secs")]
+    pub session_ttl_secs: u64,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            max_sessions: default_max_sessions(),
+            session_ttl_secs: default_session_ttl_secs(),
+        }
+    }
+}
+
+const fn default_max_sessions() -> usize {
+    100
+}
+
+const fn default_session_ttl_secs() -> u64 {
+    86_400 // 24 hours
 }
 
 /// Which LLM provider backend to use.
@@ -247,6 +280,14 @@ pub struct BudgetConfig {
     pub max_tokens_per_request: u64,
     /// Maximum tool rounds in a single agentic turn.
     pub max_tool_rounds_per_turn: u32,
+    /// Maximum cost per session in microdollars (1 microdollar = $0.000001).
+    /// Default: 5,000,000 = $5.00.
+    #[serde(default = "default_max_cost_microdollars")]
+    pub max_cost_microdollars: u64,
+}
+
+const fn default_max_cost_microdollars() -> u64 {
+    5_000_000 // $5.00
 }
 
 impl Default for BudgetConfig {
@@ -255,6 +296,7 @@ impl Default for BudgetConfig {
             max_tokens_per_session: 500_000,
             max_tokens_per_request: 32_768,
             max_tool_rounds_per_turn: 10,
+            max_cost_microdollars: default_max_cost_microdollars(),
         }
     }
 }
@@ -274,6 +316,10 @@ pub struct SecurityConfig {
     /// Prevents LLM flooding attacks. Default: 5.
     #[serde(default = "default_max_pending_consent")]
     pub max_pending_consent_requests: usize,
+    /// Default session TTL in hours. Sessions expire after this duration
+    /// unless a more specific TTL is provided. Default: 24 hours.
+    #[serde(default = "default_session_ttl_hours")]
+    pub default_session_ttl_hours: u64,
     /// Network egress policy. Controls which hosts the agent can contact.
     #[serde(default)]
     pub egress: EgressConfig,
@@ -447,6 +493,10 @@ const fn default_injection_prompt_timeout_secs() -> u64 {
     60
 }
 
+const fn default_session_ttl_hours() -> u64 {
+    24
+}
+
 const fn default_consent_timeout_secs() -> u64 {
     60
 }
@@ -480,12 +530,11 @@ pub enum LogFormat {
     Compact,
 }
 
-/// Logging and audit configuration.
+/// Logging configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingConfig {
     pub level: LogLevel,
     pub format: LogFormat,
-    pub audit_dir: Option<PathBuf>,
 }
 
 #[cfg(test)]

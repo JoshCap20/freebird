@@ -22,6 +22,8 @@ pub enum BudgetResource {
     TokensPerSession,
     /// Tool rounds per agentic turn.
     ToolRoundsPerTurn,
+    /// Cumulative cost in microdollars per session.
+    CostPerSession,
 }
 
 impl fmt::Display for BudgetResource {
@@ -30,6 +32,7 @@ impl fmt::Display for BudgetResource {
             Self::TokensPerRequest => write!(f, "tokens_per_request"),
             Self::TokensPerSession => write!(f, "tokens_per_session"),
             Self::ToolRoundsPerTurn => write!(f, "tool_rounds_per_turn"),
+            Self::CostPerSession => write!(f, "cost_per_session"),
         }
     }
 }
@@ -46,7 +49,9 @@ pub struct TokenBudget {
     max_tokens_per_session: AtomicU64,
     max_tokens_per_request: AtomicU64,
     max_tool_rounds_per_turn: AtomicU32,
+    max_cost_microdollars: AtomicU64,
     tokens_used: AtomicU64,
+    cost_microdollars_used: AtomicU64,
 }
 
 impl TokenBudget {
@@ -57,7 +62,9 @@ impl TokenBudget {
             max_tokens_per_session: AtomicU64::new(config.max_tokens_per_session),
             max_tokens_per_request: AtomicU64::new(config.max_tokens_per_request),
             max_tool_rounds_per_turn: AtomicU32::new(config.max_tool_rounds_per_turn),
+            max_cost_microdollars: AtomicU64::new(config.max_cost_microdollars),
             tokens_used: AtomicU64::new(0),
+            cost_microdollars_used: AtomicU64::new(0),
         }
     }
 
@@ -192,6 +199,72 @@ impl TokenBudget {
         self.tokens_used
             .fetch_add(request_tokens, Ordering::Relaxed);
     }
+
+    /// Record cost in microdollars (1 microdollar = $0.000001).
+    ///
+    /// Atomically adds the cost and checks the per-session cost limit.
+    /// On limit exceeded, the atomic counter is rolled back.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SecurityError::BudgetExceeded` if the session cost limit
+    /// is exceeded.
+    pub fn record_cost(&self, microdollars: u64) -> Result<(), SecurityError> {
+        let previous = self
+            .cost_microdollars_used
+            .fetch_add(microdollars, Ordering::Relaxed);
+        let new_total = previous + microdollars;
+
+        let max_cost = self.max_cost_microdollars.load(Ordering::Relaxed);
+        if new_total > max_cost {
+            self.cost_microdollars_used
+                .fetch_sub(microdollars, Ordering::Relaxed);
+            return Err(SecurityError::BudgetExceeded {
+                resource: BudgetResource::CostPerSession,
+                used: new_total,
+                limit: max_cost,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Check whether the current cost is within the session limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SecurityError::BudgetExceeded` if the cost limit has been
+    /// reached or exceeded.
+    pub fn check_cost(&self) -> Result<(), SecurityError> {
+        let used = self.cost_microdollars_used.load(Ordering::Relaxed);
+        let max_cost = self.max_cost_microdollars.load(Ordering::Relaxed);
+        if used > max_cost {
+            return Err(SecurityError::BudgetExceeded {
+                resource: BudgetResource::CostPerSession,
+                used,
+                limit: max_cost,
+            });
+        }
+        Ok(())
+    }
+
+    /// Returns the total cost consumed in this session so far (microdollars).
+    #[must_use]
+    pub fn cost_used(&self) -> u64 {
+        self.cost_microdollars_used.load(Ordering::Relaxed)
+    }
+
+    /// Returns the maximum cost allowed per session (microdollars).
+    #[must_use]
+    pub fn max_cost_microdollars(&self) -> u64 {
+        self.max_cost_microdollars.load(Ordering::Relaxed)
+    }
+
+    /// Update the per-session cost limit at runtime.
+    pub fn set_max_cost_microdollars(&self, new_limit: u64) {
+        self.max_cost_microdollars
+            .store(new_limit, Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]
@@ -208,6 +281,7 @@ mod tests {
             max_tokens_per_session: 1000,
             max_tokens_per_request: 200,
             max_tool_rounds_per_turn: 3,
+            max_cost_microdollars: 5_000_000,
         }
     }
 
@@ -457,6 +531,7 @@ mod tests {
         assert_eq!(config.max_tokens_per_session, 500_000);
         assert_eq!(config.max_tokens_per_request, 32_768);
         assert_eq!(config.max_tool_rounds_per_turn, 10);
+        assert_eq!(config.max_cost_microdollars, 5_000_000);
     }
 
     #[test]
@@ -465,12 +540,14 @@ mod tests {
             max_tokens_per_session: 100_000,
             max_tokens_per_request: 16_384,
             max_tool_rounds_per_turn: 5,
+            max_cost_microdollars: 1_000_000,
         };
         let json = serde_json::to_string(&config).unwrap();
         let back: BudgetConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.max_tokens_per_session, 100_000);
         assert_eq!(back.max_tokens_per_request, 16_384);
         assert_eq!(back.max_tool_rounds_per_turn, 5);
+        assert_eq!(back.max_cost_microdollars, 1_000_000);
     }
 
     #[test]
@@ -602,5 +679,68 @@ mod tests {
 
         // Any request size should pass.
         assert!(budget.record_usage(&usage(u32::MAX, 0)).is_ok());
+    }
+
+    // ── Cost budget tests ────────────────────────────────────────
+
+    #[test]
+    fn record_cost_within_limit() {
+        let budget = TokenBudget::new(&default_config());
+        assert!(budget.record_cost(1_000_000).is_ok());
+        assert_eq!(budget.cost_used(), 1_000_000);
+    }
+
+    #[test]
+    fn record_cost_exceeds_limit() {
+        let budget = TokenBudget::new(&default_config());
+        // Default limit is 5,000,000 ($5.00)
+        assert!(budget.record_cost(3_000_000).is_ok());
+        let result = budget.record_cost(3_000_000);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SecurityError::BudgetExceeded {
+                resource,
+                used,
+                limit,
+            } => {
+                assert_eq!(resource, BudgetResource::CostPerSession);
+                assert_eq!(used, 6_000_000);
+                assert_eq!(limit, 5_000_000);
+            }
+            other => panic!("expected BudgetExceeded, got: {other:?}"),
+        }
+        // Counter should be rolled back.
+        assert_eq!(budget.cost_used(), 3_000_000);
+    }
+
+    #[test]
+    fn check_cost_within_limit() {
+        let budget = TokenBudget::new(&default_config());
+        budget.record_cost(1_000_000).unwrap();
+        assert!(budget.check_cost().is_ok());
+    }
+
+    #[test]
+    fn cost_budget_resource_display() {
+        assert_eq!(
+            BudgetResource::CostPerSession.to_string(),
+            "cost_per_session"
+        );
+    }
+
+    #[test]
+    fn max_cost_microdollars_returns_configured_value() {
+        let budget = TokenBudget::new(&default_config());
+        assert_eq!(budget.max_cost_microdollars(), 5_000_000);
+    }
+
+    #[test]
+    fn set_max_cost_microdollars_raises_limit() {
+        let budget = TokenBudget::new(&default_config());
+        budget.record_cost(5_000_000).unwrap();
+        assert!(budget.record_cost(1).is_err());
+
+        budget.set_max_cost_microdollars(10_000_000);
+        assert!(budget.record_cost(1).is_ok());
     }
 }

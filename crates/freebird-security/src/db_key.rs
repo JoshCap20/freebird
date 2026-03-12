@@ -26,13 +26,50 @@ const SALT_LEN: usize = 32;
 /// Environment variable name for the database encryption key.
 const ENV_VAR_NAME: &str = "FREEBIRD_DB_KEY";
 
-/// Derives a SQLCipher-compatible hex key from a passphrase and salt.
+/// Minimum acceptable PBKDF2 iteration count.
+///
+/// Values below this are insecure for production use. OWASP recommends
+/// `>= 600,000` for PBKDF2-HMAC-SHA256 as of 2023, but we use `1,000` as the
+/// hard floor to allow low-iteration testing. The default is `100,000`.
+const MIN_ITERATIONS: u32 = 1000;
+
+/// Derives a `SQLCipher`-compatible hex key from a passphrase and salt.
 ///
 /// Returns a 64-character hex string suitable for `PRAGMA key = 'x"..."'`.
-#[must_use]
-pub fn derive_key(passphrase: &SecretString, salt: &[u8], iterations: u32) -> SecretString {
+///
+/// # Errors
+///
+/// Returns `SecurityError::KeyfileError` if `iterations` is zero or below
+/// the minimum secure threshold ([`MIN_ITERATIONS`]).
+///
+/// # Panics
+///
+/// Panics if `iterations` is zero after the error check — this cannot happen
+/// in practice because the zero check returns `Err` before reaching the
+/// `unwrap()` call.
+pub fn derive_key(
+    passphrase: &SecretString,
+    salt: &[u8],
+    iterations: u32,
+) -> Result<SecretString, SecurityError> {
+    if iterations == 0 {
+        return Err(SecurityError::KeyfileError(
+            "PBKDF2 iterations must not be zero".into(),
+        ));
+    }
+    if iterations < MIN_ITERATIONS {
+        tracing::warn!(
+            iterations,
+            min = MIN_ITERATIONS,
+            "PBKDF2 iteration count is below the recommended minimum"
+        );
+    }
+
     let mut key_bytes = [0u8; KEY_LEN];
-    let non_zero_iters = std::num::NonZeroU32::new(iterations).unwrap_or(std::num::NonZeroU32::MIN);
+    // SAFETY of unwrap: we checked `iterations > 0` above, so NonZeroU32::new
+    // is guaranteed to return Some.
+    #[allow(clippy::unwrap_used)]
+    let non_zero_iters = std::num::NonZeroU32::new(iterations).unwrap();
     pbkdf2::derive(
         PBKDF2_ALG,
         non_zero_iters,
@@ -43,7 +80,7 @@ pub fn derive_key(passphrase: &SecretString, salt: &[u8], iterations: u32) -> Se
     let hex_key = hex::encode(key_bytes);
     // Zeroize the intermediate key bytes
     key_bytes.fill(0);
-    SecretString::from(hex_key)
+    Ok(SecretString::from(hex_key))
 }
 
 /// Load or create the salt file for key derivation.
@@ -130,10 +167,10 @@ pub fn resolve_passphrase(
 ) -> Result<SecretString, SecurityError> {
     // 1. Environment variable
     if let Ok(val) = std::env::var(ENV_VAR_NAME) {
-        // SAFETY: Intentional removal of sensitive data from env.
+        // Intentional removal of sensitive data from env.
         // The env var name is a static constant, not user-controlled.
         // `remove_var` is unsafe in edition 2024 due to potential data races,
-        // but we only call this once during single-threaded startup.
+        // SAFETY: we only call this once during single-threaded startup.
         unsafe {
             std::env::remove_var(ENV_VAR_NAME);
         }
@@ -296,8 +333,8 @@ mod tests {
     fn test_derive_key_deterministic_with_same_salt() {
         let passphrase = SecretString::from("test-passphrase".to_owned());
         let salt = b"fixed-salt-for-testing-1234567890";
-        let key1 = derive_key(&passphrase, salt, 1000);
-        let key2 = derive_key(&passphrase, salt, 1000);
+        let key1 = derive_key(&passphrase, salt, 1000).unwrap();
+        let key2 = derive_key(&passphrase, salt, 1000).unwrap();
         assert_eq!(key1.expose_secret(), key2.expose_secret());
     }
 
@@ -306,8 +343,8 @@ mod tests {
         let passphrase = SecretString::from("test-passphrase".to_owned());
         let salt1 = b"salt-aaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let salt2 = b"salt-bbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        let key1 = derive_key(&passphrase, salt1, 1000);
-        let key2 = derive_key(&passphrase, salt2, 1000);
+        let key1 = derive_key(&passphrase, salt1, 1000).unwrap();
+        let key2 = derive_key(&passphrase, salt2, 1000).unwrap();
         assert_ne!(key1.expose_secret(), key2.expose_secret());
     }
 
@@ -315,9 +352,21 @@ mod tests {
     fn test_derive_key_produces_64_char_hex() {
         let passphrase = SecretString::from("test".to_owned());
         let salt = b"12345678901234567890123456789012";
-        let key = derive_key(&passphrase, salt, 1000);
+        let key = derive_key(&passphrase, salt, 1000).unwrap();
         assert_eq!(key.expose_secret().len(), 64);
         assert!(key.expose_secret().chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_derive_key_zero_iterations_returns_error() {
+        let passphrase = SecretString::from("test".to_owned());
+        let salt = b"12345678901234567890123456789012";
+        let result = derive_key(&passphrase, salt, 0);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("must not be zero"),
+            "error should mention zero iterations"
+        );
     }
 
     #[test]

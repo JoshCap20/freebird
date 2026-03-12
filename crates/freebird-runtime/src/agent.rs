@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use freebird_security::approval::ApprovalRequest;
-use freebird_security::audit::{AuditEventType, AuditLogger, InjectionSource};
+use freebird_security::audit::{AuditEventType, InjectionSource};
 use freebird_security::budget::TokenBudget;
 use freebird_security::capability::CapabilityGrant;
 use freebird_security::error::Severity;
@@ -92,7 +92,9 @@ pub struct AgentRuntime {
     /// Token and tool-round budget limits (ASI08). Used to create a
     /// per-session `TokenBudget` when a new session starts.
     budget_config: BudgetConfig,
-    audit: Option<AuditLogger>,
+    /// Default session TTL in hours. Used to set expiration on capability
+    /// grants when per-session auth is not yet wired up.
+    default_session_ttl_hours: u64,
     event_sink: Option<Arc<dyn EventSink>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
     sessions: SessionManager,
@@ -116,10 +118,11 @@ impl AgentRuntime {
         config: RuntimeConfig,
         tools_config: ToolsConfig,
         budget_config: BudgetConfig,
-        audit: Option<AuditLogger>,
+        default_session_ttl_hours: u64,
         event_sink: Option<Arc<dyn EventSink>>,
         audit_sink: Option<Arc<dyn AuditSink>>,
     ) -> Self {
+        let sessions = SessionManager::with_config(config.session.clone());
         Self {
             provider_registry,
             channel,
@@ -131,20 +134,35 @@ impl AgentRuntime {
             config,
             tools_config,
             budget_config,
-            audit,
+            default_session_ttl_hours,
             event_sink,
             audit_sink,
-            sessions: SessionManager::new(),
+            sessions,
         }
     }
 
     /// Create a default [`CapabilityGrant`] for a new session.
     ///
-    /// Grants all capabilities scoped to the configured sandbox root.
-    /// Returns `Err` if the sandbox root cannot be canonicalized.
+    /// Grants all capabilities scoped to the configured sandbox root with a
+    /// time-limited expiration based on `default_session_ttl_hours`. Logs a
+    /// warning because this is a permissive fallback — per-session auth
+    /// should scope grants from the authenticated credential.
     fn create_default_grant(
         &self,
     ) -> Result<CapabilityGrant, freebird_security::error::SecurityError> {
+        tracing::warn!(
+            ttl_hours = self.default_session_ttl_hours,
+            "using permissive default capability grant — per-session auth not yet wired"
+        );
+        let ttl_hours = i64::try_from(self.default_session_ttl_hours).map_err(|_| {
+            freebird_security::error::SecurityError::InvalidCredential {
+                reason: format!(
+                    "default_session_ttl_hours value {} exceeds maximum representable duration",
+                    self.default_session_ttl_hours
+                ),
+            }
+        })?;
+        let expires_at = Utc::now() + chrono::Duration::hours(ttl_hours);
         CapabilityGrant::new(
             [
                 Capability::FileRead,
@@ -159,7 +177,7 @@ impl AgentRuntime {
             .into_iter()
             .collect(),
             self.tools_config.sandbox_root.clone(),
-            None,
+            Some(expires_at),
         )
     }
 
@@ -418,10 +436,22 @@ impl AgentRuntime {
             }
             InboundEvent::Connected { sender_id } => {
                 tracing::info!(%sender_id, "user connected");
+                let channel_id = self.channel.info().id.as_str().to_owned();
+                self.audit_no_session(AuditEventType::ChannelConnected {
+                    channel_id,
+                    remote_addr: Some(sender_id),
+                })
+                .await;
                 LoopAction::Continue
             }
             InboundEvent::Disconnected { sender_id } => {
                 tracing::info!(%sender_id, "user disconnected");
+                let channel_id = self.channel.info().id.as_str().to_owned();
+                self.audit_no_session(AuditEventType::ChannelDisconnected {
+                    channel_id,
+                    reason: None,
+                })
+                .await;
                 LoopAction::Continue
             }
             InboundEvent::ApprovalResponse {
@@ -1037,6 +1067,7 @@ impl AgentRuntime {
             BudgetResource::ToolRoundsPerTurn => {
                 budget.set_max_tool_rounds_per_turn(u32::try_from(new_limit).unwrap_or(u32::MAX));
             }
+            BudgetResource::CostPerSession => budget.set_max_cost_microdollars(new_limit),
         }
     }
 
@@ -1624,48 +1655,20 @@ impl AgentRuntime {
         current_turn.completed_at = Some(Utc::now());
     }
 
-    /// Record an audit event if an audit logger is configured.
+    /// Record an audit event without a session context.
     ///
-    /// Writes to both the legacy file-based `AuditLogger` and the new
-    /// `AuditSink` (SQLite-backed). No-op when neither is configured.
+    /// Used for daemon-level and channel-level events that occur
+    /// outside of a specific session. No-op when no `AuditSink` is configured.
     /// Errors are logged but never block the agent loop.
-    async fn audit(&self, session_id: &SessionId, event: AuditEventType) {
-        // Legacy file-based audit logger
-        if let Some(audit) = &self.audit {
-            if let Err(e) = audit.record(session_id.as_str(), event.clone()).await {
-                tracing::error!(
-                    error = %e,
-                    %session_id,
-                    "audit logging failed — security events may not be recorded"
-                );
-            }
-        }
-
-        // New SQLite-backed audit sink
+    async fn audit_no_session(&self, event: AuditEventType) {
         if let Some(sink) = &self.audit_sink {
-            // Serialize to Value once, extract the serde "type" tag, then stringify.
-            let event_value = match serde_json::to_value(&event) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to serialize audit event");
-                    return;
-                }
-            };
-            let event_type = event_value
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let event_json = event_value.to_string();
-            if let Err(e) = sink
-                .record(Some(session_id.as_str()), event_type, &event_json)
-                .await
-            {
-                tracing::error!(
-                    error = %e,
-                    %session_id,
-                    "audit sink recording failed"
-                );
-            }
+            emit_audit(sink.as_ref(), None, event).await;
+        }
+    }
+
+    async fn audit(&self, session_id: &SessionId, event: AuditEventType) {
+        if let Some(sink) = &self.audit_sink {
+            emit_audit(sink.as_ref(), Some(session_id.as_str()), event).await;
         }
     }
 
@@ -1855,7 +1858,7 @@ impl AgentRuntime {
                 event_stream,
                 sender_id,
                 session_id,
-                self.audit.as_ref(),
+                self.audit_sink.as_deref(),
                 outbound,
             )
             .await
@@ -1999,7 +2002,7 @@ impl AgentRuntime {
         >,
         sender_id: &str,
         session_id: &SessionId,
-        audit: Option<&AuditLogger>,
+        audit_sink: Option<&dyn AuditSink>,
         outbound: &mpsc::Sender<OutboundEvent>,
     ) -> Option<(StreamAccumulator, StopReason, TokenUsage)> {
         let mut accumulator = StreamAccumulator::new();
@@ -2026,7 +2029,7 @@ impl AgentRuntime {
                 Ok(StreamEvent::Error(e)) => {
                     tracing::error!(error = %e, "stream error mid-response");
                     Self::audit_stream_error(
-                        audit,
+                        audit_sink,
                         session_id,
                         "stream_error",
                         &format!("mid-stream error: {e}"),
@@ -2038,7 +2041,7 @@ impl AgentRuntime {
                 Err(e) => {
                     tracing::error!(error = %e, "provider error during streaming");
                     Self::audit_stream_error(
-                        audit,
+                        audit_sink,
                         session_id,
                         "stream_provider_error",
                         &format!("provider error during streaming: {e}"),
@@ -2062,22 +2065,18 @@ impl AgentRuntime {
 
     /// Record an audit event for a stream error.
     async fn audit_stream_error(
-        audit: Option<&AuditLogger>,
+        audit_sink: Option<&dyn AuditSink>,
         session_id: &SessionId,
         rule: &str,
         context: &str,
     ) {
-        if let Some(a) = audit {
-            let _ = a
-                .record(
-                    session_id.as_str(),
-                    AuditEventType::PolicyViolation {
-                        rule: rule.into(),
-                        context: context.into(),
-                        severity: Severity::Medium,
-                    },
-                )
-                .await;
+        if let Some(sink) = audit_sink {
+            let event = AuditEventType::PolicyViolation {
+                rule: rule.into(),
+                context: context.into(),
+                severity: Severity::Medium,
+            };
+            emit_audit(sink, Some(session_id.as_str()), event).await;
         }
     }
 
@@ -2117,6 +2116,29 @@ async fn send_stream_error(outbound: &mpsc::Sender<OutboundEvent>, sender_id: &s
         },
     )
     .await;
+}
+
+/// Serialize and record an audit event via an [`AuditSink`].
+///
+/// Extracts the serde `"type"` tag from the serialized [`AuditEventType`]
+/// for the `event_type` column, then records the full JSON. Errors are
+/// logged but never propagated — audit must not block the agent loop.
+pub async fn emit_audit(sink: &dyn AuditSink, session_id: Option<&str>, event: AuditEventType) {
+    let event_value = match serde_json::to_value(&event) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to serialize audit event — event lost");
+            return;
+        }
+    };
+    let event_type = event_value
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let event_json = event_value.to_string();
+    if let Err(e) = sink.record(session_id, event_type, &event_json).await {
+        tracing::error!(error = %e, "audit sink recording failed");
+    }
 }
 
 /// Join all `ContentBlock::Text` blocks in a message.
@@ -2274,6 +2296,7 @@ mod tests {
                 temperature: None,
                 max_turns_per_session: 10,
                 drain_timeout_secs: 1,
+                session: freebird_types::config::SessionConfig::default(),
             },
             ToolsConfig {
                 sandbox_root: std::env::temp_dir(),
@@ -2284,7 +2307,7 @@ mod tests {
                 edit: EditConfig::default(),
             },
             BudgetConfig::default(),
-            None,
+            24, // default_session_ttl_hours
             None,
             None,
         )

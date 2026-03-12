@@ -67,6 +67,7 @@ fn make_runtime(channel: MockChannel) -> AgentRuntime {
             temperature: None,
             max_turns_per_session: 10,
             drain_timeout_secs: 1,
+            session: freebird_types::config::SessionConfig::default(),
         },
         ToolsConfig {
             sandbox_root: std::env::temp_dir(),
@@ -77,7 +78,7 @@ fn make_runtime(channel: MockChannel) -> AgentRuntime {
             edit: EditConfig::default(),
         },
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     )

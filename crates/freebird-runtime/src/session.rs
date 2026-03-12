@@ -4,15 +4,25 @@
 //! multi-channel, multi-user support. The [`SessionManager`] is consumed by
 //! the agent runtime event loop to route inbound events to the correct
 //! conversation context.
+//!
+//! Supports TTL-based expiration and LRU eviction to bound memory usage.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use freebird_security::budget::TokenBudget;
 use freebird_security::capability::CapabilityGrant;
 use freebird_traits::id::SessionId;
+use freebird_types::config::SessionConfig;
 use freebird_types::id::new_session_id;
 use tokio::sync::RwLock;
+
+/// Per-session metadata tracked alongside the session mapping.
+struct SessionEntry {
+    id: SessionId,
+    last_accessed: Instant,
+}
 
 /// Maps `(channel_id, sender_id)` pairs to [`SessionId`] values and
 /// tracks per-session [`TokenBudget`]s and [`CapabilityGrant`]s.
@@ -21,8 +31,12 @@ use tokio::sync::RwLock;
 /// manager can be stored as a direct field on the agent runtime without
 /// `Arc` wrapping. The `RwLock` provides correctness if the runtime evolves
 /// to concurrent event handling.
+///
+/// Session eviction: expired sessions (older than `session_ttl_secs`) and
+/// excess sessions beyond `max_sessions` are cleaned up during `resolve()`
+/// and `new_session()` operations.
 pub struct SessionManager {
-    sessions: RwLock<HashMap<(String, String), SessionId>>,
+    sessions: RwLock<HashMap<(String, String), SessionEntry>>,
     /// Per-session token budgets. Wrapped in `Arc` because `TokenBudget`
     /// uses `AtomicU64` internally (interior mutability), and we need to
     /// return owned handles through the `RwLock`.
@@ -30,16 +44,30 @@ pub struct SessionManager {
     /// Per-session capability grants. Each session has a scoped set of
     /// permissions that determine which tools it can invoke.
     grants: RwLock<HashMap<SessionId, CapabilityGrant>>,
+    /// Configuration for session limits.
+    config: SessionConfig,
 }
 
 impl SessionManager {
-    /// Create an empty session manager.
+    /// Create an empty session manager with default configuration.
     #[must_use]
     pub fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
             budgets: RwLock::new(HashMap::new()),
             grants: RwLock::new(HashMap::new()),
+            config: SessionConfig::default(),
+        }
+    }
+
+    /// Create a session manager with the given configuration.
+    #[must_use]
+    pub fn with_config(config: SessionConfig) -> Self {
+        Self {
+            sessions: RwLock::new(HashMap::new()),
+            budgets: RwLock::new(HashMap::new()),
+            grants: RwLock::new(HashMap::new()),
+            config,
         }
     }
 
@@ -49,20 +77,43 @@ impl SessionManager {
     /// Uses read-then-write locking with double-check: the fast path
     /// (existing session) only acquires a read lock. A write lock is
     /// taken only for new sessions, with a re-check to handle races.
+    ///
+    /// Triggers eviction of expired and excess sessions.
     #[must_use = "the returned SessionId identifies the user's conversation"]
     pub async fn resolve(&self, channel_id: &str, sender_id: &str) -> SessionId {
         // Fast path: read lock only
         let key = (channel_id.to_owned(), sender_id.to_owned());
         {
             let sessions = self.sessions.read().await;
-            if let Some(id) = sessions.get(&key) {
-                return id.clone();
+            if let Some(entry) = sessions.get(&key) {
+                // last_accessed is an Instant — updating it requires a write lock,
+                // but the hot path avoids it. Staleness is acceptable for LRU eviction
+                // (eviction is best-effort, not security-critical).
+                return entry.id.clone();
             }
         }
 
-        // Slow path: write lock with double-check
+        // Slow path: write lock with insert
         let mut sessions = self.sessions.write().await;
-        sessions.entry(key).or_insert_with(new_session_id).clone()
+        // Double-check after acquiring write lock
+        if let Some(entry) = sessions.get_mut(&key) {
+            entry.last_accessed = Instant::now();
+            return entry.id.clone();
+        }
+        let entry = SessionEntry {
+            id: new_session_id(),
+            last_accessed: Instant::now(),
+        };
+        let id = entry.id.clone();
+        sessions.insert(key, entry);
+        // Drop the write lock before running eviction (which also takes write locks)
+        drop(sessions);
+
+        // Run eviction after inserting
+        self.evict_expired().await;
+        self.evict_lru().await;
+
+        id
     }
 
     /// Creates a new [`SessionId`] for this `(channel, sender)` pair,
@@ -73,11 +124,15 @@ impl SessionManager {
     #[must_use = "the returned SessionId identifies the new conversation"]
     pub async fn new_session(&self, channel_id: &str, sender_id: &str) -> SessionId {
         let key = (channel_id.to_owned(), sender_id.to_owned());
-        let id = new_session_id();
+        let entry = SessionEntry {
+            id: new_session_id(),
+            last_accessed: Instant::now(),
+        };
+        let id = entry.id.clone();
 
         let old_id = {
             let mut sessions = self.sessions.write().await;
-            sessions.insert(key, id.clone())
+            sessions.insert(key, entry).map(|e| e.id)
         };
 
         // Clean up old session's grant and budget if one existed.
@@ -86,6 +141,10 @@ impl SessionManager {
             self.budgets.write().await.remove(&old_id);
         }
 
+        // Run eviction after inserting
+        self.evict_expired().await;
+        self.evict_lru().await;
+
         id
     }
 
@@ -93,8 +152,13 @@ impl SessionManager {
     /// Returns `None` for unknown `(channel, sender)` pairs.
     pub async fn get(&self, channel_id: &str, sender_id: &str) -> Option<SessionId> {
         let key = (channel_id.to_owned(), sender_id.to_owned());
-        let sessions = self.sessions.read().await;
-        sessions.get(&key).cloned()
+        let mut sessions = self.sessions.write().await;
+        if let Some(entry) = sessions.get_mut(&key) {
+            entry.last_accessed = Instant::now();
+            Some(entry.id.clone())
+        } else {
+            None
+        }
     }
 
     /// Removes the session mapping for this `(channel, sender)` pair.
@@ -106,7 +170,7 @@ impl SessionManager {
         let key = (channel_id.to_owned(), sender_id.to_owned());
         let removed_id = {
             let mut sessions = self.sessions.write().await;
-            sessions.remove(&key)
+            sessions.remove(&key).map(|e| e.id)
         };
 
         if let Some(ref id) = removed_id {
@@ -152,6 +216,85 @@ impl SessionManager {
     pub async fn session_count(&self) -> usize {
         let sessions = self.sessions.read().await;
         sessions.len()
+    }
+
+    /// Remove sessions that have exceeded the configured TTL.
+    async fn evict_expired(&self) {
+        let ttl = std::time::Duration::from_secs(self.config.session_ttl_secs);
+        let now = Instant::now();
+
+        let expired_ids = {
+            let mut sessions = self.sessions.write().await;
+            let mut expired_keys = Vec::new();
+            for (k, entry) in sessions.iter() {
+                if now.duration_since(entry.last_accessed) > ttl {
+                    expired_keys.push(k.clone());
+                }
+            }
+            let mut ids = Vec::with_capacity(expired_keys.len());
+            for k in expired_keys {
+                if let Some(entry) = sessions.remove(&k) {
+                    ids.push(entry.id);
+                }
+            }
+            ids
+        };
+
+        if expired_ids.is_empty() {
+            return;
+        }
+        tracing::info!(count = expired_ids.len(), "evicted expired sessions");
+        self.cleanup_evicted(&expired_ids).await;
+    }
+
+    /// Remove least-recently-used sessions if the count exceeds `max_sessions`.
+    async fn evict_lru(&self) {
+        let max = self.config.max_sessions;
+
+        let evicted_ids = {
+            let mut sessions = self.sessions.write().await;
+            if sessions.len() <= max {
+                return;
+            }
+            let excess = sessions.len() - max;
+
+            // Sort entries by last_accessed (oldest first)
+            let mut entries: Vec<_> = sessions
+                .iter()
+                .map(|(k, e)| (k.clone(), e.last_accessed))
+                .collect();
+            entries.sort_by_key(|(_, ts)| *ts);
+
+            let mut ids = Vec::with_capacity(excess);
+            for (k, _) in entries.into_iter().take(excess) {
+                if let Some(entry) = sessions.remove(&k) {
+                    ids.push(entry.id);
+                }
+            }
+            ids
+        };
+
+        if evicted_ids.is_empty() {
+            return;
+        }
+        tracing::info!(count = evicted_ids.len(), "evicted LRU sessions");
+        self.cleanup_evicted(&evicted_ids).await;
+    }
+
+    /// Remove grants and budgets for evicted session IDs.
+    async fn cleanup_evicted(&self, ids: &[SessionId]) {
+        {
+            let mut grants = self.grants.write().await;
+            for id in ids {
+                grants.remove(id);
+            }
+        }
+        {
+            let mut budgets = self.budgets.write().await;
+            for id in ids {
+                budgets.remove(id);
+            }
+        }
     }
 }
 
@@ -304,6 +447,7 @@ mod tests {
             max_tokens_per_session: 1000,
             max_tokens_per_request: 200,
             max_tool_rounds_per_turn: 3,
+            max_cost_microdollars: 5_000_000,
         };
         mgr.set_budget(&id, freebird_security::budget::TokenBudget::new(&config))
             .await;
@@ -388,6 +532,97 @@ mod tests {
         // Remove session — budget and grant should be cleaned up.
         let removed = mgr.remove("cli", "alice").await;
         assert_eq!(removed, Some(id.clone()));
+        assert!(mgr.get_budget(&id).await.is_none());
+        assert!(mgr.get_grant(&id).await.is_none());
+    }
+
+    // ── TTL eviction tests ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_expired_sessions_are_evicted() {
+        // Use a 1-second TTL so we can expire alice but keep bob fresh.
+        let config = SessionConfig {
+            max_sessions: 100,
+            session_ttl_secs: 1,
+        };
+        let mgr = SessionManager::with_config(config);
+
+        let id1 = mgr.resolve("cli", "alice").await;
+        assert!(!id1.as_str().is_empty());
+
+        // Wait for alice's TTL to expire
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+        // Resolving bob triggers eviction after insert.
+        // Alice's session is expired, bob's is fresh.
+        let _id2 = mgr.resolve("cli", "bob").await;
+
+        // Alice's session should have been evicted
+        assert!(mgr.get("cli", "alice").await.is_none());
+        // Bob's session should still exist
+        assert!(mgr.get("cli", "bob").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_lru_eviction_removes_oldest() {
+        let config = SessionConfig {
+            max_sessions: 2,
+            session_ttl_secs: 86_400,
+        };
+        let mgr = SessionManager::with_config(config);
+
+        let _id1 = mgr.resolve("cli", "alice").await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let _id2 = mgr.resolve("cli", "bob").await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        // Adding a third session triggers eviction after insert.
+        // Carol is inserted (count=3), then evict_lru removes alice (count=2).
+        let _id3 = mgr.resolve("cli", "carol").await;
+
+        assert_eq!(
+            mgr.session_count().await,
+            2,
+            "session count should be 2 after LRU eviction"
+        );
+        // Alice (oldest) should be evicted
+        assert!(
+            mgr.get("cli", "alice").await.is_none(),
+            "oldest session (alice) should be evicted"
+        );
+        // Bob and carol should remain
+        assert!(mgr.get("cli", "bob").await.is_some());
+        assert!(mgr.get("cli", "carol").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_eviction_cleans_up_budgets_and_grants() {
+        let config = SessionConfig {
+            max_sessions: 100,
+            session_ttl_secs: 1,
+        };
+        let mgr = SessionManager::with_config(config);
+
+        let id = mgr.resolve("cli", "alice").await;
+        let budget_config = freebird_types::config::BudgetConfig::default();
+        mgr.set_budget(
+            &id,
+            freebird_security::budget::TokenBudget::new(&budget_config),
+        )
+        .await;
+        let grant = freebird_security::capability::CapabilityGrant::new(
+            std::iter::once(freebird_traits::tool::Capability::FileRead).collect(),
+            std::env::current_dir().unwrap(),
+            None,
+        )
+        .unwrap();
+        mgr.set_grant(&id, grant).await;
+
+        // Wait for alice's TTL to expire, then trigger eviction
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        let _id2 = mgr.resolve("cli", "bob").await;
+
+        // Budget and grant for evicted session should be gone
         assert!(mgr.get_budget(&id).await.is_none());
         assert!(mgr.get_grant(&id).await.is_none());
     }

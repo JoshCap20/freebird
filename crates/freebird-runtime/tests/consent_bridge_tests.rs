@@ -199,7 +199,7 @@ async fn test_consent_request_forwarded_to_channel() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -322,7 +322,7 @@ async fn test_consent_approved_executes_tool() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -454,7 +454,7 @@ async fn test_consent_denied_returns_error_to_provider() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -585,7 +585,7 @@ async fn test_consent_low_risk_no_prompt() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -686,7 +686,7 @@ async fn test_consent_no_gate_executes_freely() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );
@@ -771,7 +771,7 @@ async fn test_consent_response_unknown_id_logged() {
         default_config(),
         default_tools_config(),
         BudgetConfig::default(),
-        None,
+        24, // default_session_ttl_hours
         None,
         None,
     );

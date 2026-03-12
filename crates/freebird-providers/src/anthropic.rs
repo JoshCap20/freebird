@@ -26,8 +26,9 @@ const API_VERSION: &str = "2023-06-01";
 const OAUTH_BETA_FLAG: &str = "oauth-2025-04-20";
 /// Default base URL for the Anthropic API.
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
-/// Default model ID.
-const DEFAULT_MODEL: &str = "claude-opus-4-6";
+/// Default model ID — matches `config/default.toml`'s `runtime.default_model`.
+/// The source of truth for the default model is `default.toml`.
+const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 /// HTTP request timeout in seconds.
 const REQUEST_TIMEOUT_SECS: u64 = 300;
 /// Default retry-after delay when header is missing (ms).
