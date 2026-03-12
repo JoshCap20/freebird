@@ -28,6 +28,7 @@ use freebird_memory::in_memory::InMemoryMemory;
 use freebird_runtime::agent::AgentRuntime;
 use freebird_runtime::registry::ProviderRegistry;
 use freebird_runtime::tool_executor::ToolExecutor;
+use freebird_security::capability::CapabilityGrant;
 use freebird_traits::channel::{InboundEvent, OutboundEvent};
 use freebird_traits::id::{ModelId, ProviderId, SessionId};
 use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary, Turn};
@@ -1711,4 +1712,140 @@ async fn test_token_budget_per_session_exceeded() {
         has_budget_error,
         "second message should trigger budget exceeded, got: {events:?}"
     );
+}
+
+// ===========================================================================
+// Tests — Capability denial E2E
+// ===========================================================================
+
+/// E2E test verifying the full capability denial path:
+///   provider requests tool → executor checks capability → denial propagated
+///   back as `ToolResult { is_error: true }` → provider receives error → final
+///   response delivered to channel.
+#[tokio::test]
+async fn test_capability_denial_propagates_to_provider() {
+    let (channel, inbound_tx, outbound_rx, _) = MockChannel::new();
+
+    // Create a capturing provider: first response requests a tool requiring
+    // ShellExecute, second response acknowledges the denial.
+    let capturing = Arc::new(RequestCapturingProvider::new(vec![
+        tool_use_response("dangerous_shell", serde_json::json!({"cmd": "rm -rf /"})),
+        text_response("I understand the tool was denied"),
+    ]));
+
+    // MockTool requiring ShellExecute capability.
+    let shell_tool = MockTool::new(
+        "dangerous_shell",
+        vec![Ok(ToolOutput {
+            content: "this should never execute".into(),
+            outcome: ToolOutcome::Success,
+            metadata: None,
+        })],
+    );
+    // Override the required capability to ShellExecute.
+    let mut shell_info = shell_tool.info().clone();
+    shell_info.required_capability = Capability::ShellExecute;
+    let restricted_shell_tool = CapabilityRestrictedMockTool {
+        info: shell_info,
+        outputs: TokioMutex::new(VecDeque::from(vec![Ok(ToolOutput {
+            content: "this should never execute".into(),
+            outcome: ToolOutcome::Success,
+            metadata: None,
+        })])),
+        executed: std::sync::atomic::AtomicBool::new(false),
+    };
+
+    let runtime = AgentRuntime::new(
+        make_capturing_registry(Arc::clone(&capturing)),
+        Box::new(channel),
+        make_tool_executor(vec![Box::new(restricted_shell_tool)]),
+        None,
+        Arc::new(InMemoryMemory::new()),
+        None,
+        KnowledgeConfig::default(),
+        default_config(),
+        default_tools_config(),
+        BudgetConfig::default(),
+        24,
+        None,
+        None,
+    );
+
+    // Pre-seed the session with a restricted grant: only FileRead, no ShellExecute.
+    let session_id = runtime.sessions().resolve("mock", "alice").await;
+    let restricted_grant = CapabilityGrant::new(
+        std::iter::once(Capability::FileRead).collect(),
+        default_tools_config().sandbox_root,
+        Some(Utc::now() + chrono::Duration::hours(24)),
+    )
+    .unwrap();
+    runtime
+        .sessions()
+        .set_grant(&session_id, restricted_grant)
+        .await;
+
+    let events = send_message_and_collect(
+        &inbound_tx,
+        outbound_rx,
+        runtime,
+        "Execute dangerous command",
+    )
+    .await;
+    let events = without_status_events(events);
+
+    // Provider should have been called twice: first tool_use, then after receiving
+    // the denial as a ToolResult, it responds with text.
+    assert_eq!(
+        capturing.captured_requests().await.len(),
+        2,
+        "provider should be called twice (tool_use + after denial)"
+    );
+
+    // The second request should contain a ToolResult with is_error=true
+    let second_request = &capturing.captured_requests().await[1];
+    let has_tool_error = second_request.messages.iter().any(|m| {
+        m.content.iter().any(|c| matches!(c, ContentBlock::ToolResult { is_error: true, content, .. } if content.contains("denied")))
+    });
+    assert!(
+        has_tool_error,
+        "second provider request should include a denied ToolResult, got: {:?}",
+        second_request.messages
+    );
+
+    // Final response should be delivered to the channel.
+    let has_response = events
+        .iter()
+        .any(|e| message_text(e).is_some_and(|t| t.contains("denied")));
+    assert!(
+        has_response,
+        "channel should receive the denial acknowledgement, got: {events:?}"
+    );
+}
+
+/// Mock tool with a configurable required capability and execution tracking.
+struct CapabilityRestrictedMockTool {
+    info: ToolInfo,
+    outputs: TokioMutex<VecDeque<Result<ToolOutput, ToolError>>>,
+    executed: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl Tool for CapabilityRestrictedMockTool {
+    fn info(&self) -> &ToolInfo {
+        &self.info
+    }
+
+    async fn execute(
+        &self,
+        _input: serde_json::Value,
+        _context: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        self.executed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.outputs
+            .lock()
+            .await
+            .pop_front()
+            .expect("CapabilityRestrictedMockTool: no more queued outputs")
+    }
 }
