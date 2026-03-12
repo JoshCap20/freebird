@@ -111,7 +111,15 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         }
     });
 
-    // 4. RUN
+    // 4. EMIT DaemonStarted audit event (lifecycle events belong in the daemon)
+    if let Some(sink) = app.audit_sink() {
+        let event = freebird_security::audit::AuditEventType::DaemonStarted {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+        freebird_runtime::agent::emit_audit(sink.as_ref(), None, event).await;
+    }
+
+    // 5. RUN
     let audit_sink_for_shutdown = app.audit_sink().cloned();
     let run_result = app.run(token).await;
     match &run_result {
@@ -119,7 +127,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         Err(e) => tracing::error!(%e, "runtime error"),
     }
 
-    // 5. EMIT DaemonShutdown audit event
+    // 6. EMIT DaemonShutdown audit event
     if let Some(ref sink) = audit_sink_for_shutdown {
         let reason = match &run_result {
             Ok(()) => "clean shutdown".to_string(),
@@ -129,7 +137,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         freebird_runtime::agent::emit_audit(sink.as_ref(), None, event).await;
     }
 
-    // 6. DRAIN
+    // 7. DRAIN
     if drain_timeout > Duration::ZERO {
         tracing::info!(?drain_timeout, "draining in-flight work");
         let _ = tokio::time::timeout(drain_timeout, signal_handle).await;

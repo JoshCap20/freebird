@@ -110,20 +110,12 @@ impl FreebirdBuilder {
             tracing::info!("audit chain integrity verified");
         }
 
-        // 4. EMIT DaemonStarted audit event
-        if let Some(ref sink) = audit_sink {
-            let event = freebird_security::audit::AuditEventType::DaemonStarted {
-                version: env!("CARGO_PKG_VERSION").to_string(),
-            };
-            freebird_runtime::agent::emit_audit(sink.as_ref(), None, event).await;
-        }
-
-        // 5. PROVIDER REGISTRY
+        // 4. PROVIDER REGISTRY
         let registry = providers::build_provider_registry(&config)
             .await
             .map_err(CoreError::Provider)?;
 
-        // 6. CHANNEL
+        // 5. CHANNEL
         let channel: Box<dyn freebird_traits::channel::Channel> = match self.channel {
             ChannelStrategy::Tcp => Box::new(TcpChannel::new(
                 config.daemon.host.to_string(),
@@ -132,19 +124,19 @@ impl FreebirdBuilder {
             ChannelStrategy::Custom(ch) => ch,
         };
 
-        // 7. TOOLS
+        // 6. TOOLS
         let tool_registry = tools::build_tool_registry(&config)
             .context("failed to build tool registry")
             .map_err(CoreError::ToolRegistry)?;
 
-        // 7b. BOOTSTRAP KNOWLEDGE
+        // 6b. BOOTSTRAP KNOWLEDGE
         if let Some(ref store) = knowledge_store {
             knowledge::populate_system_knowledge(store.as_ref(), &tool_registry, &config)
                 .await
                 .map_err(CoreError::Knowledge)?;
         }
 
-        // 8. SANDBOX + ALLOW DIRS
+        // 7. SANDBOX + ALLOW DIRS
         let mut tools_config = config.tools;
         tools_config.sandbox_root = util::expand_tilde(&tools_config.sandbox_root)
             .map_err(|e| CoreError::Config(e.to_string()))?;
@@ -160,7 +152,7 @@ impl FreebirdBuilder {
         util::merge_allow_dirs(&mut tools_config, self.extra_allow_dirs)
             .map_err(|e| CoreError::Config(e.to_string()))?;
 
-        // 9. APPROVAL GATE
+        // 8. APPROVAL GATE
         let (approval_gate, approval_rx) = freebird_security::approval::ApprovalGate::new(
             config.security.require_consent_above.clone(),
             Duration::from_secs(config.security.consent_timeout_secs),
@@ -176,7 +168,7 @@ impl FreebirdBuilder {
         // Clone knowledge store for runtime (ToolExecutor also needs its own Arc).
         let ks_for_runtime = knowledge_store.clone();
 
-        // 10. SECRET GUARD
+        // 9. SECRET GUARD
         let secret_guard = if config.security.secret_guard.enabled {
             Some(
                 freebird_security::secret_guard::SecretGuard::from_config(
@@ -190,7 +182,7 @@ impl FreebirdBuilder {
             None
         };
 
-        // 11. TOOL EXECUTOR
+        // 10. TOOL EXECUTOR
         let tool_executor = freebird_runtime::tool_executor::ToolExecutor::new(
             tool_registry.into_tools(),
             Duration::from_secs(tools_config.default_timeout_secs),
@@ -205,7 +197,7 @@ impl FreebirdBuilder {
         .context("failed to construct ToolExecutor (duplicate tool names?)")
         .map_err(CoreError::ToolRegistry)?;
 
-        // 12. AGENT RUNTIME
+        // 11. AGENT RUNTIME
         let runtime = AgentRuntime::new(
             registry,
             channel,
