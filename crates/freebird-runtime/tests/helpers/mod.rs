@@ -27,7 +27,7 @@ use freebird_traits::provider::{
     StreamEvent,
 };
 use freebird_traits::tool::Tool;
-use freebird_types::config::{EditConfig, RuntimeConfig, ToolsConfig};
+use freebird_types::config::{ContextConfig, EditConfig, RuntimeConfig, ToolsConfig};
 
 // ---------------------------------------------------------------------------
 // MockChannel
@@ -210,6 +210,7 @@ pub fn default_config() -> RuntimeConfig {
         max_turns_per_session: 10,
         drain_timeout_secs: 1,
         session: freebird_types::config::SessionConfig::default(),
+        context: ContextConfig::default(),
     }
 }
 

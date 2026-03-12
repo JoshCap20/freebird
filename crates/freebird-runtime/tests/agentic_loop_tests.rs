@@ -40,7 +40,8 @@ use freebird_traits::tool::{
     ToolOutput,
 };
 use freebird_types::config::{
-    BudgetConfig, EditConfig, InjectionConfig, KnowledgeConfig, RuntimeConfig, ToolsConfig,
+    BudgetConfig, ContextConfig, EditConfig, InjectionConfig, KnowledgeConfig, RuntimeConfig,
+    ToolsConfig,
 };
 
 use helpers::{
@@ -1398,6 +1399,7 @@ async fn test_new_conversation_uses_config_values() {
         max_turns_per_session: 10,
         drain_timeout_secs: 1,
         session: freebird_types::config::SessionConfig::default(),
+        context: ContextConfig::default(),
     };
 
     let runtime = AgentRuntime::new(

@@ -35,7 +35,7 @@ use freebird_types::config::{
 };
 // Re-exported for test module via `use super::*`.
 #[cfg(test)]
-use freebird_types::config::InjectionConfig;
+use freebird_types::config::{ContextConfig, InjectionConfig};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -958,6 +958,16 @@ impl AgentRuntime {
         let tool_definitions = self.tool_executor.tool_definitions_for_grant(grant);
 
         let mut messages = conversation_to_messages(conversation);
+
+        // Collapse stale tool outputs from older turns to free context space.
+        // Only affects the wire messages — persisted data retains full output.
+        if self.config.context.collapse_tool_outputs {
+            crate::observation::collapse_observations(
+                &mut messages,
+                conversation,
+                self.config.context.collapse_after_turns,
+            );
+        }
 
         // CLAUDE.md §14: scan loaded conversation history for context injection
         // before sending to provider. Filter out any messages containing injection
@@ -2298,6 +2308,7 @@ mod tests {
                 max_turns_per_session: 10,
                 drain_timeout_secs: 1,
                 session: freebird_types::config::SessionConfig::default(),
+                context: ContextConfig::default(),
             },
             ToolsConfig {
                 sandbox_root: std::env::temp_dir(),

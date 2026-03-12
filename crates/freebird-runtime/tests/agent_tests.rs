@@ -17,7 +17,7 @@ use freebird_traits::channel::InboundEvent;
 use freebird_traits::id::{ModelId, ProviderId, SessionId};
 use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary};
 use freebird_types::config::{
-    BudgetConfig, EditConfig, KnowledgeConfig, RuntimeConfig, ToolsConfig,
+    BudgetConfig, ContextConfig, EditConfig, KnowledgeConfig, RuntimeConfig, ToolsConfig,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -69,6 +69,7 @@ fn make_runtime(channel: MockChannel) -> AgentRuntime {
             max_turns_per_session: 10,
             drain_timeout_secs: 1,
             session: freebird_types::config::SessionConfig::default(),
+            context: ContextConfig::default(),
         },
         ToolsConfig {
             sandbox_root: std::env::temp_dir(),
