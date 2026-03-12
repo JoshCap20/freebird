@@ -9,13 +9,14 @@
 //! `reqwest::Client` level to prevent egress policy bypass.
 
 use std::collections::HashMap;
+use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::Method;
 
-use freebird_security::egress::EgressPolicy;
+use freebird_security::egress::{EgressPolicy, EgressRateLimiter};
 use freebird_security::taint::TaintedToolInput;
 use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
@@ -70,6 +71,7 @@ impl Default for NetworkToolConfig {
 pub struct HttpRequestTool {
     client: reqwest::Client,
     egress_policy: Arc<EgressPolicy>,
+    rate_limiter: Option<Arc<EgressRateLimiter>>,
     config: NetworkToolConfig,
     info: ToolInfo,
 }
@@ -86,6 +88,7 @@ impl HttpRequestTool {
     pub fn new(
         client: reqwest::Client,
         egress_policy: Arc<EgressPolicy>,
+        rate_limiter: Option<Arc<EgressRateLimiter>>,
         config: NetworkToolConfig,
     ) -> Self {
         let hosts: Vec<&str> = egress_policy
@@ -104,6 +107,7 @@ impl HttpRequestTool {
         Self {
             client,
             egress_policy,
+            rate_limiter,
             config,
             info: ToolInfo {
                 name: Self::NAME.into(),
@@ -209,8 +213,16 @@ impl HttpRequestTool {
             }
         }
 
-        // 3. Body (optional)
+        // 3. Body (optional) — check size against egress policy limit.
         let body = input.get("body").and_then(|v| v.as_str()).map(String::from);
+        if let Some(ref b) = body {
+            self.egress_policy
+                .check_request_body_size(b.len())
+                .map_err(|e| ToolError::InvalidInput {
+                    tool: Self::NAME.into(),
+                    reason: e.to_string(),
+                })?;
+        }
 
         // 4. URL through taint boundary (HTTPS + egress policy enforced).
         //    Done last so we can consume `input` without cloning.
@@ -245,7 +257,41 @@ impl HttpRequestTool {
     }
 
     /// Inner implementation without timeout wrapper.
+    ///
+    /// Before sending, performs:
+    /// 1. Rate limit check (if rate limiter configured)
+    /// 2. DNS rebinding prevention — resolves host and rejects private IPs
     async fn send_request_inner(&self, request: ValidatedRequest) -> Result<ToolOutput, ToolError> {
+        // Rate limit check
+        if let Some(ref limiter) = self.rate_limiter {
+            limiter
+                .check_and_record()
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool: Self::NAME.into(),
+                    reason: e.to_string(),
+                })?;
+        }
+
+        // DNS rebinding prevention: resolve the host and check all IPs.
+        // Only applies to domain names — IP literals don't involve DNS resolution,
+        // so there's no rebinding risk (the egress policy already gates the host).
+        if let Ok(url) = url::Url::parse(&request.url) {
+            if let Some(url::Host::Domain(domain)) = url.host() {
+                let port = url.port().unwrap_or(443);
+                let addr = format!("{domain}:{port}");
+                if let Ok(addrs) = addr.to_socket_addrs() {
+                    for sock_addr in addrs {
+                        self.egress_policy
+                            .check_resolved_ip(&sock_addr.ip())
+                            .map_err(|e| ToolError::ExecutionFailed {
+                                tool: Self::NAME.into(),
+                                reason: e.to_string(),
+                            })?;
+                    }
+                }
+            }
+        }
+
         let mut req = self.client.request(request.method, &request.url);
 
         // Default User-Agent identifies freebird; user-supplied headers below can override.
@@ -349,9 +395,15 @@ impl HttpRequestTool {
 pub fn network_tool(
     client: reqwest::Client,
     egress_policy: Arc<EgressPolicy>,
+    rate_limiter: Option<Arc<EgressRateLimiter>>,
     config: NetworkToolConfig,
 ) -> Box<dyn Tool> {
-    Box::new(HttpRequestTool::new(client, egress_policy, config))
+    Box::new(HttpRequestTool::new(
+        client,
+        egress_policy,
+        rate_limiter,
+        config,
+    ))
 }
 
 #[cfg(test)]
@@ -369,6 +421,7 @@ mod tests {
         Arc::new(EgressPolicy::new(
             std::iter::once("api.anthropic.com".into()).collect(),
             std::iter::once(443).collect(),
+            1_048_576,
         ))
     }
 
@@ -380,6 +433,7 @@ mod tests {
         Arc::new(EgressPolicy::new(
             std::iter::once(host).collect(),
             std::iter::once(port).collect(),
+            1_048_576,
         ))
     }
 
@@ -393,14 +447,14 @@ mod tests {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap();
-        HttpRequestTool::new(client, mock_policy(server), config)
+        HttpRequestTool::new(client, mock_policy(server), None, config)
     }
 
     /// Build a tool that only allows HTTPS to api.anthropic.com:443.
     /// Used for validation-only tests (no actual HTTP calls).
     fn validation_tool() -> HttpRequestTool {
         let client = reqwest::Client::builder().build().unwrap();
-        HttpRequestTool::new(client, test_policy(), NetworkToolConfig::default())
+        HttpRequestTool::new(client, test_policy(), None, NetworkToolConfig::default())
     }
 
     /// Valid HTTPS URL for the test policy (for validation-only tests).
@@ -865,8 +919,120 @@ mod tests {
     #[test]
     fn test_network_tool_factory_returns_boxed_tool() {
         let client = reqwest::Client::builder().build().unwrap();
-        let tool = network_tool(client, test_policy(), NetworkToolConfig::default());
+        let tool = network_tool(client, test_policy(), None, NetworkToolConfig::default());
         assert_eq!(tool.info().name, "http_request");
+    }
+
+    // ── Body Size Enforcement Tests ─────────────────────────────────
+
+    #[test]
+    fn test_oversized_request_body_rejected() {
+        let client = reqwest::Client::builder().build().unwrap();
+        // Create policy with tiny body limit
+        let policy = Arc::new(EgressPolicy::new(
+            std::iter::once("api.anthropic.com".into()).collect(),
+            std::iter::once(443).collect(),
+            10, // 10-byte limit
+        ));
+        let tool = HttpRequestTool::new(client, policy, None, NetworkToolConfig::default());
+        let input = serde_json::json!({
+            "url": "https://api.anthropic.com/v1/messages",
+            "method": "POST",
+            "body": "this body is definitely longer than ten bytes"
+        });
+        let err = tool.validate_input(input).unwrap_err();
+        assert!(matches!(err, ToolError::InvalidInput { .. }));
+        assert!(err.to_string().contains("too large"));
+    }
+
+    #[test]
+    fn test_request_body_within_limit_accepted() {
+        let tool = validation_tool();
+        let input = serde_json::json!({
+            "url": valid_url(),
+            "method": "POST",
+            "body": "small"
+        });
+        let req = tool.validate_input(input).unwrap();
+        assert_eq!(req.body.as_deref(), Some("small"));
+    }
+
+    // ── Rate Limiter Integration Tests ───────────────────────────────
+
+    #[tokio::test]
+    async fn test_rate_limiter_blocks_when_exceeded() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/ok"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let limiter = Arc::new(EgressRateLimiter::new(2));
+        let tool = HttpRequestTool::new(
+            client,
+            mock_policy(&server),
+            Some(limiter),
+            NetworkToolConfig::default(),
+        );
+
+        // First two requests succeed
+        for _ in 0..2 {
+            let req = ValidatedRequest {
+                url: format!("{}/ok", server.uri()),
+                method: Method::GET,
+                headers: HashMap::new(),
+                body: None,
+            };
+            assert!(tool.send_request(req).await.is_ok());
+        }
+
+        // Third request is rate limited
+        let req = ValidatedRequest {
+            url: format!("{}/ok", server.uri()),
+            method: Method::GET,
+            headers: HashMap::new(),
+            body: None,
+        };
+        let err = tool.send_request(req).await.unwrap_err();
+        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
+        assert!(err.to_string().contains("rate limited"));
+    }
+
+    // ── DNS Rebinding Prevention Tests ───────────────────────────────
+
+    #[tokio::test]
+    async fn test_dns_rebinding_to_localhost_blocked() {
+        // "localhost" resolves to 127.0.0.1 — a private IP.
+        // Even though "localhost" is in the allowlist, the DNS rebinding
+        // check should reject it because it resolves to a loopback address.
+        let server = MockServer::start().await;
+        let port = url::Url::parse(&server.uri()).unwrap().port().unwrap_or(80);
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        // Allow "localhost" as a host — the DNS rebinding check should
+        // still block because it resolves to 127.0.0.1.
+        let policy = Arc::new(EgressPolicy::new(
+            std::iter::once("localhost".into()).collect(),
+            std::iter::once(port).collect(),
+            1_048_576,
+        ));
+        let tool = HttpRequestTool::new(client, policy, None, NetworkToolConfig::default());
+        let req = ValidatedRequest {
+            url: format!("http://localhost:{port}/data"),
+            method: Method::GET,
+            headers: HashMap::new(),
+            body: None,
+        };
+        let err = tool.send_request(req).await.unwrap_err();
+        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
+        assert!(err.to_string().contains("DNS rebinding prevention"));
     }
 
     // ── Blocked Header Exhaustiveness ────────────────────────────────

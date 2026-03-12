@@ -55,6 +55,16 @@ pub enum SecurityError {
     #[error("egress blocked: {reason}")]
     EgressBlocked { reason: String },
 
+    #[error("egress rate limited: {limit_per_minute} requests/minute exceeded")]
+    EgressRateLimited { limit_per_minute: u32 },
+
+    #[error("egress request body too large: {actual} bytes exceeds {max} byte limit")]
+    EgressBodyTooLarge { actual: usize, max: usize },
+
+    // ── Capability revocation ─────────────────────────────────────
+    #[error("capability grant revoked for session `{session_id}`")]
+    GrantRevoked { session_id: String },
+
     // ── Context poisoning ────────────────────────────────────────
     #[error("context poisoning attempt detected: pattern `{pattern}`")]
     ContextPoisoningAttempt { pattern: String },

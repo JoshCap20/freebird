@@ -1511,6 +1511,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             std::iter::once(443).collect(),
+            1_048_576,
         )
     }
 
