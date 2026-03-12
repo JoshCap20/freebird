@@ -84,9 +84,11 @@ impl SessionManager {
         // Fast path: read lock only
         let key = (channel_id.to_owned(), sender_id.to_owned());
         {
-            let mut sessions = self.sessions.write().await;
-            if let Some(entry) = sessions.get_mut(&key) {
-                entry.last_accessed = Instant::now();
+            let sessions = self.sessions.read().await;
+            if let Some(entry) = sessions.get(&key) {
+                // last_accessed is an Instant — updating it requires a write lock,
+                // but the hot path avoids it. Staleness is acceptable for LRU eviction
+                // (eviction is best-effort, not security-critical).
                 return entry.id.clone();
             }
         }
