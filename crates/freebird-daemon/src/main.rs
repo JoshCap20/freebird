@@ -104,6 +104,16 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
     // 6. MEMORY — SQLite with SQLCipher encryption
     let (memory, knowledge_store, db, db_salt) = init_sqlite(&config)?;
 
+    // 6a. EVENT SINK + AUDIT SINK — event-sourced persistence into the same SQLite DB
+    let event_sink: Option<std::sync::Arc<dyn freebird_traits::event::EventSink>> =
+        Some(std::sync::Arc::new(
+            freebird_memory::sqlite_event::SqliteEventSink::new(std::sync::Arc::clone(&db)),
+        ));
+    let audit_sink: Option<std::sync::Arc<dyn freebird_traits::audit::AuditSink>> =
+        Some(std::sync::Arc::new(
+            freebird_memory::sqlite_audit::SqliteAuditSink::new(std::sync::Arc::clone(&db)),
+        ));
+
     // 6b. MIGRATION — one-time FileMemory → SQLite migration
     if let Some(legacy_dir) = home::home_dir().map(|h| h.join(".freebird/conversations")) {
         if legacy_dir.is_dir() {
@@ -252,8 +262,8 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         tools_config,
         config.security.budgets,
         audit_logger,
-        None, // event_sink — wired in Step 9
-        None, // audit_sink — wired in Step 9
+        event_sink,
+        audit_sink,
     );
 
     // 14. RUN
