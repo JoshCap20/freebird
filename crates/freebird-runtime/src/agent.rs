@@ -17,9 +17,11 @@ use freebird_security::error::Severity;
 use freebird_security::injection;
 use freebird_security::safe_types::{SafeMessage, ScannedModelResponse, ValidationResult};
 use freebird_security::taint::Tainted;
+use freebird_traits::audit::AuditSink;
 use freebird_traits::channel::{
     Channel, ChannelError, ChannelFeature, InboundEvent, OutboundEvent,
 };
+use freebird_traits::event::{ConversationEvent, EventSink};
 use freebird_traits::id::SessionId;
 use freebird_traits::knowledge::{KnowledgeMatch, KnowledgeStore};
 use freebird_traits::memory::{Conversation, Memory, MemoryError, ToolInvocation, Turn};
@@ -91,6 +93,8 @@ pub struct AgentRuntime {
     /// per-session `TokenBudget` when a new session starts.
     budget_config: BudgetConfig,
     audit: Option<AuditLogger>,
+    event_sink: Option<Arc<dyn EventSink>>,
+    audit_sink: Option<Arc<dyn AuditSink>>,
     sessions: SessionManager,
 }
 
@@ -113,6 +117,8 @@ impl AgentRuntime {
         tools_config: ToolsConfig,
         budget_config: BudgetConfig,
         audit: Option<AuditLogger>,
+        event_sink: Option<Arc<dyn EventSink>>,
+        audit_sink: Option<Arc<dyn AuditSink>>,
     ) -> Self {
         Self {
             provider_registry,
@@ -126,6 +132,8 @@ impl AgentRuntime {
             tools_config,
             budget_config,
             audit,
+            event_sink,
+            audit_sink,
             sessions: SessionManager::new(),
         }
     }
@@ -771,15 +779,28 @@ impl AgentRuntime {
     ) -> Option<Conversation> {
         match self.memory.load(session_id).await {
             Ok(Some(conv)) => Some(conv),
-            Ok(None) => Some(Conversation {
-                session_id: session_id.clone(),
-                system_prompt: self.config.system_prompt.clone(),
-                turns: Vec::new(),
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-                model_id: self.config.default_model.clone(),
-                provider_id: self.config.default_provider.clone(),
-            }),
+            Ok(None) => {
+                // Emit SessionCreated event for the new conversation
+                self.emit_event(
+                    session_id,
+                    ConversationEvent::SessionCreated {
+                        system_prompt: self.config.system_prompt.clone(),
+                        model_id: self.config.default_model.as_str().to_owned(),
+                        provider_id: self.config.default_provider.as_str().to_owned(),
+                    },
+                )
+                .await;
+
+                Some(Conversation {
+                    session_id: session_id.clone(),
+                    system_prompt: self.config.system_prompt.clone(),
+                    turns: Vec::new(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    model_id: self.config.default_model.clone(),
+                    provider_id: self.config.default_provider.clone(),
+                })
+            }
             Err(e) => {
                 tracing::error!(error = %e, "failed to load conversation from memory");
                 let _ = outbound
@@ -1127,6 +1148,17 @@ impl AgentRuntime {
             .prepare_agentic_loop(safe_message, conversation, grant)
             .await;
 
+        // Emit TurnStarted event
+        self.emit_event(
+            session_id,
+            ConversationEvent::TurnStarted {
+                turn_index: conversation.turns.len(),
+                user_message: current_turn.user_message.clone(),
+            },
+        )
+        .await;
+
+        let turn_index = conversation.turns.len();
         let mut pending_request = initial_request;
 
         // Retrieve the per-session budget (if set).
@@ -1204,6 +1236,9 @@ impl AgentRuntime {
 
             match response.stop_reason {
                 StopReason::ToolUse => {
+                    let invocations_before = current_turn.tool_invocations.len();
+                    let messages_before = current_turn.assistant_messages.len();
+
                     self.handle_tool_use_round(
                         &response,
                         &mut messages,
@@ -1214,8 +1249,44 @@ impl AgentRuntime {
                         outbound,
                     )
                     .await;
+
+                    // Emit AssistantMessage for the intermediate response
+                    if current_turn.assistant_messages.len() > messages_before {
+                        if let Some(msg) = current_turn
+                            .assistant_messages
+                            .get(messages_before)
+                            .cloned()
+                        {
+                            self.emit_event(
+                                session_id,
+                                ConversationEvent::AssistantMessage {
+                                    turn_index,
+                                    message_index: messages_before,
+                                    message: msg,
+                                },
+                            )
+                            .await;
+                        }
+                    }
+
+                    // Emit ToolInvoked for each new tool invocation
+                    for idx in invocations_before..current_turn.tool_invocations.len() {
+                        if let Some(inv) = current_turn.tool_invocations.get(idx).cloned() {
+                            self.emit_event(
+                                session_id,
+                                ConversationEvent::ToolInvoked {
+                                    turn_index,
+                                    invocation_index: idx,
+                                    invocation: inv,
+                                },
+                            )
+                            .await;
+                        }
+                    }
                 }
                 StopReason::EndTurn | StopReason::StopSequence => {
+                    let messages_before = current_turn.assistant_messages.len();
+
                     self.deliver_final_response(
                         &response,
                         sender_id,
@@ -1224,9 +1295,41 @@ impl AgentRuntime {
                         outbound,
                     )
                     .await;
+
+                    // Emit final AssistantMessage
+                    if current_turn.assistant_messages.len() > messages_before {
+                        if let Some(msg) = current_turn
+                            .assistant_messages
+                            .get(messages_before)
+                            .cloned()
+                        {
+                            self.emit_event(
+                                session_id,
+                                ConversationEvent::AssistantMessage {
+                                    turn_index,
+                                    message_index: messages_before,
+                                    message: msg,
+                                },
+                            )
+                            .await;
+                        }
+                    }
+
+                    // Emit TurnCompleted
+                    self.emit_event(
+                        session_id,
+                        ConversationEvent::TurnCompleted {
+                            turn_index,
+                            completed_at: current_turn.completed_at.unwrap_or_else(Utc::now),
+                        },
+                    )
+                    .await;
+
                     return current_turn;
                 }
                 StopReason::MaxTokens => {
+                    let messages_before = current_turn.assistant_messages.len();
+
                     self.deliver_truncated_response(
                         &response,
                         sender_id,
@@ -1235,6 +1338,36 @@ impl AgentRuntime {
                         outbound,
                     )
                     .await;
+
+                    // Emit AssistantMessage for truncated response
+                    if current_turn.assistant_messages.len() > messages_before {
+                        if let Some(msg) = current_turn
+                            .assistant_messages
+                            .get(messages_before)
+                            .cloned()
+                        {
+                            self.emit_event(
+                                session_id,
+                                ConversationEvent::AssistantMessage {
+                                    turn_index,
+                                    message_index: messages_before,
+                                    message: msg,
+                                },
+                            )
+                            .await;
+                        }
+                    }
+
+                    // Emit TurnCompleted
+                    self.emit_event(
+                        session_id,
+                        ConversationEvent::TurnCompleted {
+                            turn_index,
+                            completed_at: current_turn.completed_at.unwrap_or_else(Utc::now),
+                        },
+                    )
+                    .await;
+
                     return current_turn;
                 }
             }
@@ -1242,6 +1375,17 @@ impl AgentRuntime {
 
         self.log_max_rounds_exceeded(session_id, &mut current_turn, sender_id, outbound)
             .await;
+
+        // Emit TurnCompleted for max-rounds-exceeded case
+        self.emit_event(
+            session_id,
+            ConversationEvent::TurnCompleted {
+                turn_index,
+                completed_at: current_turn.completed_at.unwrap_or_else(Utc::now),
+            },
+        )
+        .await;
+
         current_turn
     }
 
@@ -1538,16 +1682,58 @@ impl AgentRuntime {
 
     /// Record an audit event if an audit logger is configured.
     ///
-    /// No-op when `self.audit` is `None`. Errors from the audit logger
-    /// are logged but never block the agent loop — audit failures must
-    /// not prevent message processing.
+    /// Writes to both the legacy file-based `AuditLogger` and the new
+    /// `AuditSink` (SQLite-backed). No-op when neither is configured.
+    /// Errors are logged but never block the agent loop.
     async fn audit(&self, session_id: &SessionId, event: AuditEventType) {
+        // Legacy file-based audit logger
         if let Some(audit) = &self.audit {
-            if let Err(e) = audit.record(session_id.as_str(), event).await {
+            if let Err(e) = audit.record(session_id.as_str(), event.clone()).await {
                 tracing::error!(
                     error = %e,
                     %session_id,
                     "audit logging failed — security events may not be recorded"
+                );
+            }
+        }
+
+        // New SQLite-backed audit sink
+        if let Some(sink) = &self.audit_sink {
+            let event_json = match serde_json::to_string(&event) {
+                Ok(json) => json,
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to serialize audit event");
+                    return;
+                }
+            };
+            // Extract the serde tag "type" field from the serialized JSON.
+            let event_type = serde_json::from_str::<serde_json::Value>(&event_json)
+                .ok()
+                .and_then(|v| v.get("type")?.as_str().map(ToOwned::to_owned))
+                .unwrap_or_else(|| "unknown".into());
+            if let Err(e) = sink
+                .record(Some(session_id.as_str()), &event_type, &event_json)
+                .await
+            {
+                tracing::error!(
+                    error = %e,
+                    %session_id,
+                    "audit sink recording failed"
+                );
+            }
+        }
+    }
+
+    /// Emit a conversation event via the `EventSink` if configured.
+    ///
+    /// Errors are logged but never block the agent loop.
+    async fn emit_event(&self, session_id: &SessionId, event: ConversationEvent) {
+        if let Some(sink) = &self.event_sink {
+            if let Err(e) = sink.append(session_id, event).await {
+                tracing::error!(
+                    error = %e,
+                    %session_id,
+                    "event sink append failed — event-sourced persistence may be incomplete"
                 );
             }
         }
@@ -1593,6 +1779,18 @@ impl AgentRuntime {
         let (mut messages, mut current_turn, tool_definitions) = self
             .prepare_agentic_loop(safe_message, conversation, grant)
             .await;
+
+        let turn_index = conversation.turns.len();
+
+        // Emit TurnStarted event
+        self.emit_event(
+            session_id,
+            ConversationEvent::TurnStarted {
+                turn_index,
+                user_message: current_turn.user_message.clone(),
+            },
+        )
+        .await;
 
         // Retrieve the per-session budget (if set).
         let budget = self.sessions.get_budget(session_id).await;
@@ -1695,6 +1893,9 @@ impl AgentRuntime {
 
             match stop_reason {
                 StopReason::ToolUse => {
+                    let invocations_before = current_turn.tool_invocations.len();
+                    let messages_before = current_turn.assistant_messages.len();
+
                     let assistant_message = accumulator.into_message();
                     self.execute_tool_calls(
                         &assistant_message,
@@ -1706,12 +1907,64 @@ impl AgentRuntime {
                         outbound,
                     )
                     .await;
+
+                    // Emit events for streaming tool-use round
+                    if current_turn.assistant_messages.len() > messages_before {
+                        if let Some(msg) = current_turn
+                            .assistant_messages
+                            .get(messages_before)
+                            .cloned()
+                        {
+                            self.emit_event(
+                                session_id,
+                                ConversationEvent::AssistantMessage {
+                                    turn_index,
+                                    message_index: messages_before,
+                                    message: msg,
+                                },
+                            )
+                            .await;
+                        }
+                    }
+                    for idx in invocations_before..current_turn.tool_invocations.len() {
+                        if let Some(inv) = current_turn.tool_invocations.get(idx).cloned() {
+                            self.emit_event(
+                                session_id,
+                                ConversationEvent::ToolInvoked {
+                                    turn_index,
+                                    invocation_index: idx,
+                                    invocation: inv,
+                                },
+                            )
+                            .await;
+                        }
+                    }
                 }
                 StopReason::EndTurn | StopReason::StopSequence => {
                     let msg = accumulator.into_message();
                     self.audit_streaming_injection(session_id, &msg).await;
-                    current_turn.assistant_messages.push(msg);
+                    let msg_idx = current_turn.assistant_messages.len();
+                    current_turn.assistant_messages.push(msg.clone());
                     current_turn.completed_at = Some(Utc::now());
+
+                    self.emit_event(
+                        session_id,
+                        ConversationEvent::AssistantMessage {
+                            turn_index,
+                            message_index: msg_idx,
+                            message: msg,
+                        },
+                    )
+                    .await;
+                    self.emit_event(
+                        session_id,
+                        ConversationEvent::TurnCompleted {
+                            turn_index,
+                            completed_at: current_turn.completed_at.unwrap_or_else(Utc::now),
+                        },
+                    )
+                    .await;
+
                     return current_turn;
                 }
                 StopReason::MaxTokens => {
@@ -1725,8 +1978,28 @@ impl AgentRuntime {
                         },
                     )
                     .await;
-                    current_turn.assistant_messages.push(msg);
+                    let msg_idx = current_turn.assistant_messages.len();
+                    current_turn.assistant_messages.push(msg.clone());
                     current_turn.completed_at = Some(Utc::now());
+
+                    self.emit_event(
+                        session_id,
+                        ConversationEvent::AssistantMessage {
+                            turn_index,
+                            message_index: msg_idx,
+                            message: msg,
+                        },
+                    )
+                    .await;
+                    self.emit_event(
+                        session_id,
+                        ConversationEvent::TurnCompleted {
+                            turn_index,
+                            completed_at: current_turn.completed_at.unwrap_or_else(Utc::now),
+                        },
+                    )
+                    .await;
+
                     return current_turn;
                 }
             }
@@ -1734,6 +2007,16 @@ impl AgentRuntime {
 
         self.log_max_rounds_exceeded(session_id, &mut current_turn, sender_id, outbound)
             .await;
+
+        self.emit_event(
+            session_id,
+            ConversationEvent::TurnCompleted {
+                turn_index,
+                completed_at: current_turn.completed_at.unwrap_or_else(Utc::now),
+            },
+        )
+        .await;
+
         current_turn
     }
 
@@ -2033,6 +2316,8 @@ mod tests {
                 edit: EditConfig::default(),
             },
             BudgetConfig::default(),
+            None,
+            None,
             None,
         )
     }

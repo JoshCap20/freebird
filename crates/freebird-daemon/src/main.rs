@@ -252,6 +252,8 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         tools_config,
         config.security.budgets,
         audit_logger,
+        None, // event_sink — wired in Step 9
+        None, // audit_sink — wired in Step 9
     );
 
     // 14. RUN
