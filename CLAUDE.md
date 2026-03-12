@@ -46,14 +46,14 @@ freebird/
 ├── config/
 │   └── default.toml                 # Default configuration
 ├── crates/
-│   ├── freebird-traits/             # ALL public traits — zero freebird-* deps
+│   ├── freebird-traits/             # ALL public traits (Provider, Channel, Tool, Memory, KnowledgeStore, EventSink, AuditSink) — zero freebird-* deps
 │   ├── freebird-types/              # Shared domain types — depends only on freebird-traits
 │   ├── freebird-security/           # Taint, safe types, capabilities, approval, audit, secret guard, budgets, injection, egress, auth — no I/O
 │   ├── freebird-runtime/            # Agent loop, session mgmt, orchestration
 │   ├── freebird-providers/          # Provider implementations (Anthropic, etc.)
 │   ├── freebird-channels/           # Channel implementations (TCP, etc.)
 │   ├── freebird-tools/              # Built-in tool implementations
-│   ├── freebird-memory/             # Memory backend implementations
+│   ├── freebird-memory/             # Event-sourced conversations, knowledge store, audit sink (all SQLCipher-encrypted)
 │   └── freebird-daemon/             # Binary — thin composition root
 ```
 
@@ -177,6 +177,8 @@ fn produce() -> Config             // returning owned: caller now owns this
 
 **Conversation types**: `Turn`, `ToolInvocation`, `Conversation`, `SessionSummary` — see `crates/freebird-traits/src/memory.rs`.
 
+**Event types**: `ConversationEvent` (6 variants), `EventSink` — see `crates/freebird-traits/src/event.rs`. `AuditSink` — see `crates/freebird-traits/src/audit.rs`.
+
 **Newtype IDs**: `SessionId`, `ChannelId`, `ProviderId`, `ModelId` — see `crates/freebird-traits/src/id.rs`. All IDs use `define_id!` macro with `generate()` (UUID v4) and `from_string()`.
 
 ---
@@ -256,6 +258,50 @@ pub trait Memory: Send + Sync + 'static {
 }
 ```
 
+### EventSink — persist conversation events
+
+See `crates/freebird-traits/src/event.rs`.
+
+```rust
+#[async_trait]
+pub trait EventSink: Send + Sync + 'static {
+    async fn append(
+        &self,
+        session_id: &SessionId,
+        event: ConversationEvent,
+    ) -> Result<(), MemoryError>;
+}
+```
+
+Key design notes:
+- Events are immutable once appended. The implementation assigns sequence numbers and maintains HMAC chain integrity.
+- `ConversationEvent` is a tagged enum: `SessionCreated`, `SessionMetadataUpdated`, `TurnStarted`, `AssistantMessage`, `ToolInvoked`, `TurnCompleted`.
+- Events use `#[serde(tag = "type", rename_all = "snake_case")]` for JSON serialization.
+- The runtime calls `append()` at each action point in the agentic loop (see §5), providing sub-turn crash recovery.
+
+### AuditSink — persist security audit events
+
+See `crates/freebird-traits/src/audit.rs`.
+
+```rust
+#[async_trait]
+pub trait AuditSink: Send + Sync + 'static {
+    async fn record(
+        &self,
+        session_id: Option<&str>,
+        event_type: &str,
+        event_json: &str,
+    ) -> Result<(), MemoryError>;
+
+    async fn verify_chain(&self) -> Result<(), MemoryError>;
+}
+```
+
+Key design notes:
+- Uses stringly-typed parameters to avoid coupling `freebird-traits` to `freebird-security`'s `AuditEventType` enum.
+- `verify_chain()` reads all audit events and verifies the global HMAC chain linkage.
+- The runtime's `audit()` helper serializes `AuditEventType` and delegates to `record()`.
+
 ### KnowledgeStore — persist agent knowledge
 
 See `crates/freebird-traits/src/knowledge.rs`.
@@ -292,21 +338,25 @@ See `crates/freebird-runtime/src/agent.rs` for the full implementation.
 1. **Receive** `InboundEvent` from channel via fan-in `mpsc` channel
 2. **Taint** raw input: `Tainted::new(&raw_text)`
 3. **Sanitize** via `SafeMessage::from_tainted()` — rejects injection patterns, enforces length
-4. **Load or create** conversation from memory backend
+4. **Load or create** conversation from memory backend. On create: emit `SessionCreated` event + `SessionStarted` audit event
 5. **Retrieve** relevant knowledge via FTS5 search (if `knowledge.auto_retrieve` enabled)
-6. **Build** `CompletionRequest` with conversation history + knowledge context + tool definitions
-7. **Agentic loop** (up to `max_tool_rounds`):
+6. **Emit** `TurnStarted` event with user message
+7. **Build** `CompletionRequest` with conversation history + knowledge context + tool definitions
+8. **Agentic loop** (up to `max_tool_rounds`):
    - Call provider (`complete_with_failover`)
-   - If `StopReason::ToolUse` → execute tools via `ToolExecutor`, wrap output in `ScannedToolOutput::from_raw()`, append results, continue loop
-   - If `StopReason::EndTurn` → wrap response in `ScannedModelResponse::from_raw()`, deliver to channel, break
-   - If `StopReason::MaxTokens` → deliver truncated response, break
-8. **Persist** conversation to memory
+   - **Emit** `AssistantMessage` event for each new assistant response
+   - If `StopReason::ToolUse` → execute tools via `ToolExecutor`, **emit** `ToolInvoked` events, wrap output in `ScannedToolOutput::from_raw()`, append results, continue loop
+   - If `StopReason::EndTurn` → wrap response in `ScannedModelResponse::from_raw()`, **emit** `TurnCompleted` event, deliver to channel, break
+   - If `StopReason::MaxTokens` → **emit** `TurnCompleted` event, deliver truncated response, break
+9. **Persist** conversation metadata to memory (events already persisted incrementally via `EventSink`)
 
 ### Key Invariants
 
 - `handle_message()` is **infallible** — all errors are caught and sent as `OutboundEvent::Error`, never propagated
+- **Event emission is non-fatal**: `emit_event()` logs errors but does not abort the turn (availability over consistency for a user-facing daemon)
 - **Tool output taint**: `ScannedToolOutput::from_raw()` wraps tool results before they enter the LLM context. On injection detection, a synthetic `ToolResult { is_error: true }` replaces the raw content
 - **Model output taint**: `ScannedModelResponse::from_raw()` wraps model responses before delivery. On injection detection, the response is **NOT** saved to memory (prevents memory poisoning)
+- **HMAC verification on load**: When `verify_on_load` is enabled (default), the full HMAC chain is verified before replaying events into a `Conversation`. Tampered sessions are rejected with `IntegrityViolation`
 - Tool execution is always gated by capability check + timeout
 - `CancellationToken` enables cooperative shutdown mid-loop
 
@@ -574,22 +624,53 @@ On budget exhaustion, returns a descriptive `SecurityError::BudgetExceeded` — 
 
 **OWASP ASI06 — Memory & Context Poisoning**: Protects conversation history from tampering.
 
-### Conversation Signing
+### Event-Sourced Persistence
 
-- Every persisted conversation is HMAC-signed (`ring::hmac::Key` with SHA-256)
-- Signature verified on every load — tampered files quarantined (moved to `quarantine/` directory), not loaded
-- HMAC key derived from server-side secret, never stored alongside conversation files
+Conversations are stored as immutable event logs in the `conversation_events` table. Each action in the agentic loop emits a `ConversationEvent` via `EventSink::append()`:
+
+| Event | When Emitted |
+|---|---|
+| `SessionCreated` | New session initialized in `load_or_create_conversation()` |
+| `SessionMetadataUpdated` | Model or provider changed mid-session |
+| `TurnStarted` | User message received |
+| `AssistantMessage` | Each LLM response in the agentic loop |
+| `ToolInvoked` | Each tool execution completes |
+| `TurnCompleted` | Turn ends (EndTurn or MaxTokens) |
+
+On load, events are replayed in sequence order to reconstruct the `Conversation` struct. See `crates/freebird-memory/src/event.rs` for `replay_events_to_conversation()`.
+
+### Per-Session HMAC Chains
+
+Each event's HMAC-SHA256 covers: `session_id|sequence|event_json|timestamp|previous_hmac`. This forms a per-session tamper-evident chain:
+- First event has `previous_hmac = ""`
+- Each subsequent event's HMAC includes the previous event's HMAC
+- On load (when `verify_on_load = true`, the default), `verify_event_chain()` recomputes every HMAC and checks linkage
+- A single tampered or reordered row causes `MemoryError::IntegrityViolation`
+- HMAC signing key derived via `HMAC-SHA256(passphrase, "freebird-event-signing|{salt}")` — never stored alongside data
+
+See `crates/freebird-memory/src/event.rs` for `compute_event_hmac()` and `verify_event_chain()`.
+
+### Denormalized Metadata
+
+The `session_metadata` table provides O(1) session listing and search without full event replay:
+- Updated by `SqliteEventSink::append()` via `update_session_metadata()`
+- Stores: `session_id`, `system_prompt`, `model_id`, `provider_id`, `created_at`, `updated_at`, `turn_count`, `preview`
+- `Memory::list_sessions()` and `Memory::search()` query this table directly
+
+### Conversation FTS5 Search
+
+Event data is indexed in a `conversation_fts` FTS5 virtual table via insert triggers. Search queries are escaped (`fts5_escape()`) before execution to prevent FTS5 syntax injection.
 
 ### Encrypted Storage
 
 All persistent data lives in a single SQLCipher-encrypted SQLite database:
 
-- **AES-256-CBC** page-level encryption — every page is encrypted, including the FTS5 index
+- **AES-256-CBC** page-level encryption — every page is encrypted, including FTS5 indexes
 - **PBKDF2-HMAC-SHA256** key derivation with configurable iterations (default 100k)
 - **WAL mode** for crash resilience and concurrent read performance
 - Key verification on every open — wrong key returns `MemoryError::IntegrityViolation`
-- Schema migrations tracked in `schema_version` table with idempotent application
-- See `crates/freebird-memory/src/sqlite.rs` for `SqliteDb`, `crates/freebird-memory/src/sqlite_memory.rs` for `SqliteMemory`, `crates/freebird-memory/src/sqlite_knowledge.rs` for `SqliteKnowledgeStore`
+- Schema consolidated in `001_initial.sql` with version tracking in `schema_version` table
+- See `crates/freebird-memory/src/sqlite.rs` for `SqliteDb`, `crates/freebird-memory/src/sqlite_memory.rs` for `SqliteMemory`, `crates/freebird-memory/src/sqlite_event.rs` for `SqliteEventSink`, `crates/freebird-memory/src/sqlite_audit.rs` for `SqliteAuditSink`, `crates/freebird-memory/src/sqlite_knowledge.rs` for `SqliteKnowledgeStore`
 
 ### Context Injection Defense
 
@@ -599,19 +680,24 @@ Before appending loaded conversation history to a provider request, `scan_contex
 
 ## 15. Audit Logging
 
-### Hash-Chained Audit Log
+### HMAC-Chained Audit Log
 
-Each audit entry includes the SHA-256 hash of the previous entry, creating a tamper-evident chain:
+Security audit events are stored in the `audit_events` table within the encrypted SQLite database via `SqliteAuditSink` (implements `AuditSink` trait). Each entry includes an HMAC-SHA256 covering `sequence|session_id|event_type|event_json|timestamp|previous_hmac`, forming a **global** (not per-session) tamper-evident chain.
 
-```jsonl
-{"entry": {"sequence": 0, "event": {...}, "timestamp": "...", "previous_hash": ""}, "hash": "a1b2..."}
-{"entry": {"sequence": 1, "event": {...}, "timestamp": "...", "previous_hash": "a1b2..."}, "hash": "c3d4..."}
-```
+- Append-only rows — no in-place mutation
+- If an entry is modified or deleted, the HMAC chain breaks and `AuditSink::verify_chain()` detects it
+- Startup can verify chain integrity
+- See `crates/freebird-memory/src/sqlite_audit.rs` for `SqliteAuditSink`, `crates/freebird-security/src/audit.rs` for `AuditEventType`
 
-- Append-only JSON lines — no in-place mutation
-- If an entry is modified or deleted, the hash chain breaks and `verify_audit_chain()` detects it
-- Startup routine verifies chain integrity
-- See `crates/freebird-security/src/audit.rs`
+### Audited Events
+
+The runtime's `audit()` helper (in `agent.rs`) records events including:
+- `SessionStarted` — new session creation with granted capabilities
+- `ToolExecutionDenied` / `ToolExecutionCompleted` — tool security decisions
+- `InjectionDetected` — prompt injection in input, tool output, or model response
+- `ConsentRequested` / `ConsentGranted` / `ConsentDenied` — approval gate decisions
+- `BudgetExceeded` — token budget violations
+- `SecretGuardTriggered` — sensitive file/command access detected
 
 ---
 
@@ -678,9 +764,12 @@ See `config/default.toml` and `crates/freebird-types/src/config.rs` for typed co
 db_path = "~/.freebird/freebird.db"    # SQLCipher database path (~ expanded)
 keyfile_path = "~/.freebird/db.key"    # Encryption keyfile (optional)
 # pbkdf2_iterations = 100000           # Key derivation iterations (default: 100k)
+verify_on_load = true                  # Verify HMAC chain on conversation load (default: true)
 ```
 
 Key resolution order: `FREEBIRD_DB_KEY` env var → keyfile at `keyfile_path` → interactive prompt. A random salt is stored alongside the database (`*.salt` file).
+
+`verify_on_load` controls whether the HMAC chain is verified when loading conversations from the event log. When enabled (default), tampered events cause `MemoryError::IntegrityViolation`. Disable only for development/debugging.
 
 ### Knowledge Configuration
 
@@ -719,7 +808,7 @@ prompt_timeout_secs = 60            # Timeout for security approval prompts
 
 ### Logging
 
-Use `tracing` for everything. Console output (pretty) for developers, JSON lines to audit file for SIEM. Initialize via `tracing-subscriber` with `EnvFilter`.
+Use `tracing` for everything. Console output (pretty) for developers. Security audit events are persisted to the encrypted database via `AuditSink` (not flat files). Initialize via `tracing-subscriber` with `EnvFilter`.
 
 ### Concurrency Rules
 
@@ -863,15 +952,19 @@ Run `cargo fmt` on save. Treat clippy warnings as errors.
 
 ### Memory Integrity (ASI06)
 
-- [ ] Persisted conversations HMAC-signed
-- [ ] Signature verified on every load — tampered files quarantined
+- [ ] Conversation events stored as immutable rows with per-session HMAC chains
+- [ ] HMAC chain verified on every load (`verify_on_load = true`)
+- [ ] Tampered sessions rejected with `IntegrityViolation` before reaching LLM
+- [ ] Event replay produces correct `Conversation` state (roundtrip fidelity)
+- [ ] FTS5 search queries escaped to prevent syntax injection
 - [ ] Context injection scan on loaded history before sending to provider
 
 ### Audit Log Integrity
 
-- [ ] Every audit entry includes SHA-256 hash of previous entry (hash chain)
-- [ ] Audit entries are append-only JSON lines
-- [ ] Startup verifies audit chain integrity
+- [ ] Every audit entry includes HMAC covering previous entry (global chain)
+- [ ] Audit entries are append-only rows in encrypted database
+- [ ] `AuditSink::verify_chain()` detects tampering
+- [ ] Session creation recorded in audit log with granted capabilities
 
 ### Supply Chain (ASI04)
 
