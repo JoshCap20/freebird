@@ -1842,18 +1842,10 @@ impl AgentRuntime {
 
 /// Parse a budget action string from the wire protocol into a typed action.
 ///
-/// Wire format: `"approve_once"`, `"raise_limit:<u64>"`, `"disable_limit"`.
+/// Delegates to [`BudgetOverrideAction::from_wire`] — the single source of
+/// truth for wire format parsing.
 fn parse_budget_action(s: &str) -> Option<freebird_security::approval::BudgetOverrideAction> {
-    use freebird_security::approval::BudgetOverrideAction;
-    match s {
-        "approve_once" => Some(BudgetOverrideAction::ApproveOnce),
-        "disable_limit" => Some(BudgetOverrideAction::DisableLimit),
-        other if other.starts_with("raise_limit:") => {
-            let val = other.strip_prefix("raise_limit:")?.parse::<u64>().ok()?;
-            Some(BudgetOverrideAction::RaiseLimit { new_limit: val })
-        }
-        _ => None,
-    }
+    freebird_security::approval::BudgetOverrideAction::from_wire(s)
 }
 
 /// Send an outbound event, ignoring channel-closed errors.

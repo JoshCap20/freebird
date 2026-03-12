@@ -107,6 +107,36 @@ pub enum BudgetOverrideAction {
     DisableLimit,
 }
 
+impl BudgetOverrideAction {
+    /// Encode as the wire format string used in `budget_action` fields.
+    ///
+    /// Format: `"approve_once"`, `"raise_limit:<u64>"`, `"disable_limit"`.
+    #[must_use]
+    pub fn to_wire(&self) -> String {
+        match self {
+            Self::ApproveOnce => "approve_once".to_owned(),
+            Self::RaiseLimit { new_limit } => format!("raise_limit:{new_limit}"),
+            Self::DisableLimit => "disable_limit".to_owned(),
+        }
+    }
+
+    /// Parse from the wire format string. Returns `None` for unrecognized input.
+    #[must_use]
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "approve_once" => Some(Self::ApproveOnce),
+            "disable_limit" => Some(Self::DisableLimit),
+            other => {
+                let val = other.strip_prefix("raise_limit:")?.parse::<u64>().ok()?;
+                if val == 0 {
+                    return None;
+                }
+                Some(Self::RaiseLimit { new_limit: val })
+            }
+        }
+    }
+}
+
 // ── Errors ────────────────────────────────────────────────────────────
 
 /// Errors specific to approval operations.
