@@ -44,7 +44,7 @@ use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
     ToolOutput,
 };
-use freebird_types::config::{BudgetConfig, KnowledgeConfig, RuntimeConfig};
+use freebird_types::config::{BudgetConfig, ContextConfig, KnowledgeConfig, RuntimeConfig};
 
 use helpers::{default_tools_config, error_text, make_tool_executor, message_text};
 
@@ -446,6 +446,7 @@ fn default_config() -> RuntimeConfig {
         max_turns_per_session: 10,
         drain_timeout_secs: 1,
         session: freebird_types::config::SessionConfig::default(),
+        context: ContextConfig::default(),
     }
 }
 

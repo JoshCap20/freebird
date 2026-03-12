@@ -8,6 +8,10 @@ temperature = 0.7
 max_turns_per_session = 50
 drain_timeout_secs = 30
 
+[runtime.context]
+collapse_after_turns = 5       # keep last N turns fully intact
+collapse_tool_outputs = true   # enable observation collapsing
+
 [[providers]]
 id = "anthropic"
 kind = "anthropic"

@@ -35,7 +35,7 @@ use freebird_types::config::{
 };
 // Re-exported for test module via `use super::*`.
 #[cfg(test)]
-use freebird_types::config::InjectionConfig;
+use freebird_types::config::{ContextConfig, InjectionConfig};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -2298,6 +2298,7 @@ mod tests {
                 max_turns_per_session: 10,
                 drain_timeout_secs: 1,
                 session: freebird_types::config::SessionConfig::default(),
+                context: ContextConfig::default(),
             },
             ToolsConfig {
                 sandbox_root: std::env::temp_dir(),

@@ -65,6 +65,9 @@ pub struct RuntimeConfig {
     /// In-memory session manager limits.
     #[serde(default)]
     pub session: SessionConfig,
+    /// Context window management — observation collapsing.
+    #[serde(default)]
+    pub context: ContextConfig,
 }
 
 /// In-memory session manager configuration.
@@ -95,6 +98,40 @@ const fn default_max_sessions() -> usize {
 
 const fn default_session_ttl_secs() -> u64 {
     86_400 // 24 hours
+}
+
+/// Context window management configuration.
+///
+/// Controls observation collapsing — compressing tool outputs from older
+/// turns into compact one-line summaries to prevent context window
+/// exhaustion in long sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextConfig {
+    /// Number of recent turns whose tool outputs are kept intact.
+    /// Turns older than this threshold have their tool outputs replaced
+    /// with compact summaries. Default: 5.
+    #[serde(default = "default_collapse_after_turns")]
+    pub collapse_after_turns: usize,
+    /// Whether observation collapsing is enabled. Default: true.
+    #[serde(default = "default_collapse_tool_outputs")]
+    pub collapse_tool_outputs: bool,
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            collapse_after_turns: default_collapse_after_turns(),
+            collapse_tool_outputs: default_collapse_tool_outputs(),
+        }
+    }
+}
+
+const fn default_collapse_after_turns() -> usize {
+    5
+}
+
+const fn default_collapse_tool_outputs() -> bool {
+    true
 }
 
 /// Which LLM provider backend to use.
