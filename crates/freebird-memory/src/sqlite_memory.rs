@@ -305,8 +305,10 @@ fn search_fts(
     query: &str,
     limit: usize,
 ) -> Result<Vec<SessionSummary>, MemoryError> {
-    // FTS5 query — use simple prefix matching for user-friendliness
-    let fts_query = format!("{query}*");
+    // Escape FTS5 special characters by wrapping in double quotes (phrase query).
+    // Internal double quotes are doubled per FTS5 syntax.
+    let escaped = query.replace('"', "\"\"");
+    let fts_query = format!("\"{escaped}\"*");
 
     let mut stmt = conn
         .prepare(
@@ -687,6 +689,22 @@ mod tests {
         mem.save(&conv).await.unwrap();
 
         let results = mem.search("zebra", 10).await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_search_fts5_special_characters_escaped() {
+        let (_dir, mem) = test_memory();
+        let conv = make_conversation("session-1", "hello world");
+        mem.save(&conv).await.unwrap();
+
+        // FTS5 metacharacters should not cause errors or injection
+        let results = mem.search("hello\" OR session_id:*", 10).await.unwrap();
+        // Should not match (the injection attempt is treated as a literal phrase)
+        assert!(results.is_empty());
+
+        // Parens, AND/OR operators treated as literal
+        let results = mem.search("(hello) AND secret", 10).await.unwrap();
         assert!(results.is_empty());
     }
 
