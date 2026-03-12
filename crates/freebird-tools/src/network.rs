@@ -9,7 +9,6 @@
 //! `reqwest::Client` level to prevent egress policy bypass.
 
 use std::collections::HashMap;
-use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -275,20 +274,31 @@ impl HttpRequestTool {
         // DNS rebinding prevention: resolve the host and check all IPs.
         // Only applies to domain names — IP literals don't involve DNS resolution,
         // so there's no rebinding risk (the egress policy already gates the host).
-        if let Ok(url) = url::Url::parse(&request.url) {
-            if let Some(url::Host::Domain(domain)) = url.host() {
-                let port = url.port().unwrap_or(443);
-                let addr = format!("{domain}:{port}");
-                if let Ok(addrs) = addr.to_socket_addrs() {
-                    for sock_addr in addrs {
-                        self.egress_policy
-                            .check_resolved_ip(&sock_addr.ip())
-                            .map_err(|e| ToolError::ExecutionFailed {
-                                tool: Self::NAME.into(),
-                                reason: e.to_string(),
-                            })?;
-                    }
-                }
+        // Uses tokio::net::lookup_host (async) to avoid blocking the runtime thread.
+        // Fails closed: DNS resolution failure blocks the request.
+        let url = url::Url::parse(&request.url).map_err(|e| ToolError::ExecutionFailed {
+            tool: Self::NAME.into(),
+            reason: format!("DNS rebinding check: failed to parse URL: {e}"),
+        })?;
+        if let Some(url::Host::Domain(domain)) = url.host() {
+            let port = url.port().unwrap_or(443);
+            let addr = format!("{domain}:{port}");
+            let addrs =
+                tokio::net::lookup_host(&addr)
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        tool: Self::NAME.into(),
+                        reason: format!(
+                            "DNS rebinding prevention: failed to resolve `{domain}`: {e}"
+                        ),
+                    })?;
+            for sock_addr in addrs {
+                self.egress_policy
+                    .check_resolved_ip(&sock_addr.ip())
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        tool: Self::NAME.into(),
+                        reason: e.to_string(),
+                    })?;
             }
         }
 
