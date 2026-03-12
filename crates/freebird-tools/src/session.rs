@@ -36,6 +36,27 @@ fn require_memory<'a>(
     })
 }
 
+/// Format a list of session summaries into human-readable output.
+fn format_session_list(sessions: &[freebird_traits::memory::SessionSummary]) -> String {
+    let mut output = String::with_capacity(sessions.len() * 128);
+    for (i, s) in sessions.iter().enumerate() {
+        if i > 0 {
+            output.push_str("\n---\n");
+        }
+        let _ = write!(
+            output,
+            "Session: {}\n  Model: {} | Turns: {}\n  Created: {} | Updated: {}\n  Preview: {}",
+            s.session_id,
+            s.model_id,
+            s.turn_count,
+            s.created_at.format("%Y-%m-%d %H:%M"),
+            s.updated_at.format("%Y-%m-%d %H:%M"),
+            s.preview,
+        );
+    }
+    output
+}
+
 // ── ListSessionsTool ──────────────────────────────────────────
 
 struct ListSessionsTool {
@@ -113,25 +134,8 @@ impl Tool for ListSessionsTool {
             });
         }
 
-        let mut output = String::new();
-        for (i, s) in sessions.iter().enumerate() {
-            if i > 0 {
-                output.push_str("\n---\n");
-            }
-            let _ = write!(
-                output,
-                "Session: {}\n  Model: {} | Turns: {}\n  Created: {} | Updated: {}\n  Preview: {}",
-                s.session_id,
-                s.model_id,
-                s.turn_count,
-                s.created_at.format("%Y-%m-%d %H:%M"),
-                s.updated_at.format("%Y-%m-%d %H:%M"),
-                s.preview,
-            );
-        }
-
         Ok(ToolOutput {
-            content: output,
+            content: format_session_list(&sessions),
             outcome: ToolOutcome::Success,
             metadata: Some(serde_json::json!({ "count": sessions.len() })),
         })
@@ -234,25 +238,8 @@ impl Tool for SearchSessionsTool {
             });
         }
 
-        let mut output = String::new();
-        for (i, s) in sessions.iter().enumerate() {
-            if i > 0 {
-                output.push_str("\n---\n");
-            }
-            let _ = write!(
-                output,
-                "Session: {}\n  Model: {} | Turns: {}\n  Created: {} | Updated: {}\n  Preview: {}",
-                s.session_id,
-                s.model_id,
-                s.turn_count,
-                s.created_at.format("%Y-%m-%d %H:%M"),
-                s.updated_at.format("%Y-%m-%d %H:%M"),
-                s.preview,
-            );
-        }
-
         Ok(ToolOutput {
-            content: output,
+            content: format_session_list(&sessions),
             outcome: ToolOutcome::Success,
             metadata: Some(serde_json::json!({ "count": sessions.len() })),
         })
