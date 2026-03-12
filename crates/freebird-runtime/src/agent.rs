@@ -124,6 +124,7 @@ impl AgentRuntime {
         event_sink: Option<Arc<dyn EventSink>>,
         audit_sink: Option<Arc<dyn AuditSink>>,
     ) -> Self {
+        let sessions = SessionManager::with_config(config.session.clone());
         Self {
             provider_registry,
             channel,
@@ -139,7 +140,7 @@ impl AgentRuntime {
             audit,
             event_sink,
             audit_sink,
-            sessions: SessionManager::new(),
+            sessions,
         }
     }
 
@@ -431,10 +432,22 @@ impl AgentRuntime {
             }
             InboundEvent::Connected { sender_id } => {
                 tracing::info!(%sender_id, "user connected");
+                let channel_id = self.channel.info().id.as_str().to_owned();
+                self.audit_no_session(AuditEventType::ChannelConnected {
+                    channel_id,
+                    remote_addr: Some(sender_id),
+                })
+                .await;
                 LoopAction::Continue
             }
             InboundEvent::Disconnected { sender_id } => {
                 tracing::info!(%sender_id, "user disconnected");
+                let channel_id = self.channel.info().id.as_str().to_owned();
+                self.audit_no_session(AuditEventType::ChannelDisconnected {
+                    channel_id,
+                    reason: None,
+                })
+                .await;
                 LoopAction::Continue
             }
             InboundEvent::ApprovalResponse {
@@ -1643,6 +1656,41 @@ impl AgentRuntime {
     /// Writes to both the legacy file-based `AuditLogger` and the new
     /// `AuditSink` (SQLite-backed). No-op when neither is configured.
     /// Errors are logged but never block the agent loop.
+    /// Record an audit event without a session context.
+    ///
+    /// Used for daemon-level and channel-level events that occur
+    /// outside of a specific session.
+    async fn audit_no_session(&self, event: AuditEventType) {
+        // Legacy file-based audit logger — use a synthetic session ID
+        if let Some(audit) = &self.audit {
+            if let Err(e) = audit.record("_system", event.clone()).await {
+                tracing::error!(
+                    error = %e,
+                    "audit logging failed — security events may not be recorded"
+                );
+            }
+        }
+
+        // New SQLite-backed audit sink
+        if let Some(sink) = &self.audit_sink {
+            let event_value = match serde_json::to_value(&event) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to serialize audit event");
+                    return;
+                }
+            };
+            let event_type = event_value
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let event_json = event_value.to_string();
+            if let Err(e) = sink.record(None, event_type, &event_json).await {
+                tracing::error!(error = %e, "audit sink recording failed");
+            }
+        }
+    }
+
     async fn audit(&self, session_id: &SessionId, event: AuditEventType) {
         // Legacy file-based audit logger
         if let Some(audit) = &self.audit {
@@ -2288,6 +2336,7 @@ mod tests {
                 temperature: None,
                 max_turns_per_session: 10,
                 drain_timeout_secs: 1,
+                session: freebird_types::config::SessionConfig::default(),
             },
             ToolsConfig {
                 sandbox_root: std::env::temp_dir(),

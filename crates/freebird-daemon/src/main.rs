@@ -92,6 +92,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
 
     // 3. VALIDATE
     validate_config(&config)?;
+    let config = enforce_security_minimums(config);
 
     // 4. PROVIDER REGISTRY
     let registry = providers::build_provider_registry(&config).await?;
@@ -114,6 +115,22 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         Some(std::sync::Arc::new(
             freebird_memory::sqlite_audit::SqliteAuditSink::new(std::sync::Arc::clone(&db)),
         ));
+
+    // 6b. EMIT DaemonStarted audit event
+    if let Some(ref sink) = audit_sink {
+        let event = freebird_security::audit::AuditEventType::DaemonStarted {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+        let event_value = serde_json::to_value(&event).unwrap_or_default();
+        let event_type = event_value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let event_json = event_value.to_string();
+        if let Err(e) = sink.record(None, event_type, &event_json).await {
+            tracing::warn!(error = %e, "failed to record DaemonStarted audit event");
+        }
+    }
 
     // 7. TOOLS — build registry before moving config.tools
     let tool_registry =
@@ -228,6 +245,9 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
     .context("failed to construct ToolExecutor (duplicate tool names?)")?;
 
     // 13. AGENT RUNTIME
+    // Clone audit_sink before moving it into the runtime so we can
+    // emit DaemonShutdown after the runtime exits.
+    let audit_sink_for_shutdown = audit_sink.clone();
     let mut runtime = AgentRuntime::new(
         registry,
         channel,
@@ -250,6 +270,24 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
     match &run_result {
         Ok(()) => tracing::info!("runtime exited cleanly"),
         Err(e) => tracing::error!(%e, "runtime error"),
+    }
+
+    // 14b. EMIT DaemonShutdown audit event
+    if let Some(ref sink) = audit_sink_for_shutdown {
+        let reason = match &run_result {
+            Ok(()) => "clean shutdown".to_string(),
+            Err(e) => format!("runtime error: {e}"),
+        };
+        let event = freebird_security::audit::AuditEventType::DaemonShutdown { reason };
+        let event_value = serde_json::to_value(&event).unwrap_or_default();
+        let event_type = event_value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let event_json = event_value.to_string();
+        if let Err(e) = sink.record(None, event_type, &event_json).await {
+            tracing::warn!(error = %e, "failed to record DaemonShutdown audit event");
+        }
     }
 
     // 15. DRAIN
@@ -338,7 +376,85 @@ fn validate_config(config: &AppConfig) -> Result<()> {
         bail!("at least one provider must be configured in [[providers]]");
     }
 
+    // Budget limits must be positive
+    if config.security.budgets.max_tokens_per_session == 0 {
+        bail!("security.budgets.max_tokens_per_session must be > 0");
+    }
+    if config.security.budgets.max_tokens_per_request == 0 {
+        bail!("security.budgets.max_tokens_per_request must be > 0");
+    }
+    if config.security.budgets.max_tool_rounds_per_turn == 0 {
+        bail!("security.budgets.max_tool_rounds_per_turn must be > 0");
+    }
+    if config.runtime.max_tool_rounds == 0 {
+        bail!("runtime.max_tool_rounds must be > 0");
+    }
+
+    // Egress allowed_hosts must be valid domain-like strings
+    for host in &config.security.egress.allowed_hosts {
+        if host.is_empty() || host.contains(' ') {
+            bail!(
+                "security.egress.allowed_hosts contains invalid entry: `{host}` \
+                 (must be non-empty and contain no spaces)"
+            );
+        }
+    }
+
+    // PBKDF2 iterations minimum
+    if config.memory.pbkdf2_iterations < 1000 {
+        bail!(
+            "memory.pbkdf2_iterations must be >= 1000 (got {})",
+            config.memory.pbkdf2_iterations
+        );
+    }
+
+    // Session TTL must be positive
+    if config.runtime.session.session_ttl_secs == 0 {
+        bail!("runtime.session.session_ttl_secs must be > 0");
+    }
+
     Ok(())
+}
+
+/// Enforce minimum security thresholds regardless of env var overrides.
+///
+/// Prevents misconfiguration (accidental or adversarial) from weakening
+/// security below safe minimums. Values that exceed limits are clamped
+/// with a warning.
+fn enforce_security_minimums(mut config: AppConfig) -> AppConfig {
+    use freebird_traits::tool::RiskLevel;
+
+    // require_consent_above must be at most High (Critical would disable all consent)
+    if config.security.require_consent_above > RiskLevel::High {
+        tracing::warn!(
+            original = ?config.security.require_consent_above,
+            clamped = ?RiskLevel::High,
+            "require_consent_above exceeds maximum — clamping to High"
+        );
+        config.security.require_consent_above = RiskLevel::High;
+    }
+
+    // max_tokens_per_session must be > 0
+    if config.security.budgets.max_tokens_per_session == 0 {
+        tracing::warn!("max_tokens_per_session is 0 — clamping to 1");
+        config.security.budgets.max_tokens_per_session = 1;
+    }
+
+    // max_tool_rounds_per_turn must be > 0 and <= 50
+    if config.security.budgets.max_tool_rounds_per_turn == 0 {
+        tracing::warn!("max_tool_rounds_per_turn is 0 — clamping to 1");
+        config.security.budgets.max_tool_rounds_per_turn = 1;
+    }
+    if config.security.budgets.max_tool_rounds_per_turn > 50 {
+        tracing::warn!(
+            original = config.security.budgets.max_tool_rounds_per_turn,
+            clamped = 50,
+            "max_tool_rounds_per_turn exceeds maximum — clamping to 50"
+        );
+        config.security.budgets.max_tool_rounds_per_turn = 50;
+    }
+
+    config
 }
 
 /// Result of [`init_sqlite`]: memory backend, optional knowledge store, raw DB handle, and salt.
@@ -673,5 +789,59 @@ format = "pretty"
             std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
         );
         assert_eq!(config.daemon.port, 7531);
+    }
+
+    #[test]
+    fn test_validate_config_zero_max_tool_rounds_errors() {
+        let mut config = valid_config();
+        config.runtime.max_tool_rounds = 0;
+        let err = validate_config(&config).unwrap_err();
+        assert!(err.to_string().contains("max_tool_rounds"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_config_zero_budget_tokens_errors() {
+        let mut config = valid_config();
+        config.security.budgets.max_tokens_per_session = 0;
+        let err = validate_config(&config).unwrap_err();
+        assert!(
+            err.to_string().contains("max_tokens_per_session"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_config_invalid_egress_host_errors() {
+        let mut config = valid_config();
+        config.security.egress.allowed_hosts = vec!["valid.com".into(), String::new()];
+        let err = validate_config(&config).unwrap_err();
+        assert!(err.to_string().contains("allowed_hosts"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_config_low_pbkdf2_errors() {
+        let mut config = valid_config();
+        config.memory.pbkdf2_iterations = 500;
+        let err = validate_config(&config).unwrap_err();
+        assert!(err.to_string().contains("pbkdf2_iterations"), "got: {err}");
+    }
+
+    #[test]
+    fn test_enforce_security_minimums_clamps_consent() {
+        let mut config = valid_config();
+        config.security.require_consent_above = freebird_traits::tool::RiskLevel::Critical;
+        let config = enforce_security_minimums(config);
+        assert_eq!(
+            config.security.require_consent_above,
+            freebird_traits::tool::RiskLevel::High
+        );
+    }
+
+    #[test]
+    fn test_enforce_security_minimums_clamps_tool_rounds() {
+        let mut config = valid_config();
+        config.security.budgets.max_tool_rounds_per_turn = 100;
+        let config = enforce_security_minimums(config);
+        assert_eq!(config.security.budgets.max_tool_rounds_per_turn, 50);
     }
 }

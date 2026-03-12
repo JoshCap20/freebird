@@ -62,6 +62,39 @@ pub struct RuntimeConfig {
     pub max_turns_per_session: usize,
     /// Seconds to wait for in-flight work during graceful shutdown.
     pub drain_timeout_secs: u64,
+    /// In-memory session manager limits.
+    #[serde(default)]
+    pub session: SessionConfig,
+}
+
+/// In-memory session manager configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionConfig {
+    /// Maximum number of concurrent in-memory sessions. Default: 100.
+    /// When exceeded, the least-recently-used session is evicted.
+    #[serde(default = "default_max_sessions")]
+    pub max_sessions: usize,
+    /// Session time-to-live in seconds. Default: 86400 (24 hours).
+    /// Sessions idle longer than this are evicted on the next operation.
+    #[serde(default = "default_session_ttl_secs")]
+    pub session_ttl_secs: u64,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            max_sessions: default_max_sessions(),
+            session_ttl_secs: default_session_ttl_secs(),
+        }
+    }
+}
+
+const fn default_max_sessions() -> usize {
+    100
+}
+
+const fn default_session_ttl_secs() -> u64 {
+    86_400 // 24 hours
 }
 
 /// Which LLM provider backend to use.

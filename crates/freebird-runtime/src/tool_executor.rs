@@ -274,6 +274,7 @@ impl ToolExecutor {
     /// 6. Injection scan on non-error output via `ScannedToolOutput::from_raw()`
     ///
     /// **Infallible**: returns `ToolOutput` with `outcome=ToolOutcome::Error` on failure.
+    #[allow(clippy::too_many_lines)] // security chokepoint — all checks must be in one path
     pub async fn execute(
         &self,
         tool_name: &str,
@@ -361,35 +362,65 @@ impl ToolExecutor {
             knowledge_store: self.knowledge_store.as_deref(),
         };
 
-        let output =
-            match tokio::time::timeout(self.default_timeout, tool.execute(input, &context)).await {
-                Ok(Ok(output)) => output,
-                Ok(Err(e)) => ToolOutput {
+        let start = std::time::Instant::now();
+        let output = match tokio::time::timeout(self.default_timeout, tool.execute(input, &context))
+            .await
+        {
+            Ok(Ok(output)) => {
+                let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+                self.audit_log(
+                    session_id,
+                    AuditEventType::ToolExecutionCompleted {
+                        tool_name: tool_name.into(),
+                        success: output.outcome != ToolOutcome::Error,
+                        duration_ms,
+                    },
+                )
+                .await;
+                output
+            }
+            Ok(Err(e)) => {
+                let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+                self.audit_log(
+                    session_id,
+                    AuditEventType::ToolExecutionCompleted {
+                        tool_name: tool_name.into(),
+                        success: false,
+                        duration_ms,
+                    },
+                )
+                .await;
+                ToolOutput {
                     content: format!("Tool error: {e}"),
                     outcome: ToolOutcome::Error,
                     metadata: None,
-                },
-                Err(_elapsed) => {
-                    self.audit_policy_violation(
-                        session_id,
-                        "tool_timeout",
-                        &format!(
-                            "tool `{tool_name}` exceeded {}ms timeout",
-                            self.default_timeout.as_millis()
-                        ),
-                        Severity::Medium,
-                    )
-                    .await;
-                    return ToolOutput {
-                        content: format!(
-                            "Tool `{tool_name}` timed out after {}ms",
-                            self.default_timeout.as_millis()
-                        ),
-                        outcome: ToolOutcome::Error,
-                        metadata: None,
-                    };
                 }
-            };
+            }
+            Err(_elapsed) => {
+                let timeout_ms =
+                    u64::try_from(self.default_timeout.as_millis()).unwrap_or(u64::MAX);
+                self.audit_log(
+                    session_id,
+                    AuditEventType::ToolExecutionTimeout {
+                        tool_name: tool_name.into(),
+                        timeout_ms,
+                    },
+                )
+                .await;
+                self.audit_policy_violation(
+                    session_id,
+                    "tool_timeout",
+                    &format!("tool `{tool_name}` exceeded {timeout_ms}ms timeout",),
+                    Severity::Medium,
+                )
+                .await;
+                return ToolOutput {
+                    content: format!("Tool `{tool_name}` timed out after {timeout_ms}ms",),
+                    outcome: ToolOutcome::Error,
+                    metadata: None,
+                };
+            }
+        };
 
         // 5.5. Secret guard — redact secrets in output before injection scan.
         let output = self
@@ -403,26 +434,32 @@ impl ToolExecutor {
 
     // ── Private helpers ─────────────────────────────────────────────
 
+    /// Log an audit event, swallowing errors with a warning.
+    ///
+    /// Centralizes the `if let Some(audit) = &self.audit` boilerplate so
+    /// every call site is a single line.
+    async fn audit_log(&self, session_id: &SessionId, event: AuditEventType) {
+        if let Some(audit) = &self.audit {
+            if let Err(e) = audit.record(session_id.as_str(), event).await {
+                tracing::warn!(error = %e, "audit log failed");
+            }
+        }
+    }
+
     async fn audit_tool_invocation(
         &self,
         session_id: &SessionId,
         tool_name: &str,
         result: CapabilityCheckResult,
     ) {
-        if let Some(audit) = &self.audit {
-            if let Err(e) = audit
-                .record(
-                    session_id.as_str(),
-                    AuditEventType::ToolInvocation {
-                        tool_name: tool_name.into(),
-                        capability_check: result,
-                    },
-                )
-                .await
-            {
-                tracing::error!(error = %e, "failed to write tool invocation audit event");
-            }
-        }
+        self.audit_log(
+            session_id,
+            AuditEventType::ToolInvocation {
+                tool_name: tool_name.into(),
+                capability_check: result,
+            },
+        )
+        .await;
     }
 
     async fn audit_policy_violation(
@@ -432,21 +469,15 @@ impl ToolExecutor {
         context: &str,
         severity: Severity,
     ) {
-        if let Some(audit) = &self.audit {
-            if let Err(e) = audit
-                .record(
-                    session_id.as_str(),
-                    AuditEventType::PolicyViolation {
-                        rule: rule.into(),
-                        context: context.into(),
-                        severity,
-                    },
-                )
-                .await
-            {
-                tracing::error!(error = %e, "failed to write policy violation audit event");
-            }
-        }
+        self.audit_log(
+            session_id,
+            AuditEventType::PolicyViolation {
+                rule: rule.into(),
+                context: context.into(),
+                severity,
+            },
+        )
+        .await;
     }
 
     /// Check consent for a tool invocation. Returns `Some(ToolOutput)` to abort
@@ -544,19 +575,13 @@ impl ToolExecutor {
     }
 
     async fn audit_approval_granted(&self, session_id: &SessionId, context: &str) {
-        if let Some(audit) = &self.audit {
-            if let Err(e) = audit
-                .record(
-                    session_id.as_str(),
-                    AuditEventType::ApprovalGranted {
-                        context: context.into(),
-                    },
-                )
-                .await
-            {
-                tracing::error!(error = %e, "failed to write approval granted audit event");
-            }
-        }
+        self.audit_log(
+            session_id,
+            AuditEventType::ApprovalGranted {
+                context: context.into(),
+            },
+        )
+        .await;
     }
 
     async fn audit_approval_denied(
@@ -565,54 +590,36 @@ impl ToolExecutor {
         context: &str,
         reason: Option<&str>,
     ) {
-        if let Some(audit) = &self.audit {
-            if let Err(e) = audit
-                .record(
-                    session_id.as_str(),
-                    AuditEventType::ApprovalDenied {
-                        context: context.into(),
-                        reason: reason.map(Into::into),
-                    },
-                )
-                .await
-            {
-                tracing::error!(error = %e, "failed to write approval denied audit event");
-            }
-        }
+        self.audit_log(
+            session_id,
+            AuditEventType::ApprovalDenied {
+                context: context.into(),
+                reason: reason.map(Into::into),
+            },
+        )
+        .await;
     }
 
     async fn audit_approval_expired(&self, session_id: &SessionId, context: &str) {
-        if let Some(audit) = &self.audit {
-            if let Err(e) = audit
-                .record(
-                    session_id.as_str(),
-                    AuditEventType::ApprovalExpired {
-                        context: context.into(),
-                    },
-                )
-                .await
-            {
-                tracing::error!(error = %e, "failed to write approval expired audit event");
-            }
-        }
+        self.audit_log(
+            session_id,
+            AuditEventType::ApprovalExpired {
+                context: context.into(),
+            },
+        )
+        .await;
     }
 
     async fn audit_injection_detected(&self, session_id: &SessionId, pattern: &str) {
-        if let Some(audit) = &self.audit {
-            if let Err(e) = audit
-                .record(
-                    session_id.as_str(),
-                    AuditEventType::InjectionDetected {
-                        pattern: pattern.into(),
-                        source: InjectionSource::ToolOutput,
-                        severity: Severity::High,
-                    },
-                )
-                .await
-            {
-                tracing::error!(error = %e, "failed to write injection detection audit event");
-            }
-        }
+        self.audit_log(
+            session_id,
+            AuditEventType::InjectionDetected {
+                pattern: pattern.into(),
+                source: InjectionSource::ToolOutput,
+                severity: Severity::High,
+            },
+        )
+        .await;
     }
 
     /// Scan non-error tool output for prompt injection patterns.
@@ -864,38 +871,28 @@ impl ToolExecutor {
         reason: &str,
         blocked: bool,
     ) {
-        if let Some(audit) = &self.audit {
-            let event = if blocked {
-                AuditEventType::SecretAccessBlocked {
-                    tool_name: tool_name.into(),
-                    reason: reason.into(),
-                }
-            } else {
-                AuditEventType::SecretAccessConsent {
-                    tool_name: tool_name.into(),
-                    reason: reason.into(),
-                }
-            };
-            if let Err(e) = audit.record(session_id.as_str(), event).await {
-                tracing::error!(error = %e, "failed to write secret access audit event");
+        let event = if blocked {
+            AuditEventType::SecretAccessBlocked {
+                tool_name: tool_name.into(),
+                reason: reason.into(),
             }
-        }
+        } else {
+            AuditEventType::SecretAccessConsent {
+                tool_name: tool_name.into(),
+                reason: reason.into(),
+            }
+        };
+        self.audit_log(session_id, event).await;
     }
 
     async fn audit_secret_redacted(&self, session_id: &SessionId, tool_name: &str) {
-        if let Some(audit) = &self.audit {
-            if let Err(e) = audit
-                .record(
-                    session_id.as_str(),
-                    AuditEventType::SecretRedacted {
-                        tool_name: tool_name.into(),
-                    },
-                )
-                .await
-            {
-                tracing::error!(error = %e, "failed to write secret redacted audit event");
-            }
-        }
+        self.audit_log(
+            session_id,
+            AuditEventType::SecretRedacted {
+                tool_name: tool_name.into(),
+            },
+        )
+        .await;
     }
 }
 
@@ -1457,13 +1454,18 @@ mod tests {
             .await;
 
         let events = read_audit_events(&log_path);
-        assert_eq!(events.len(), 1);
+        // Granted + ToolExecutionCompleted
+        assert_eq!(events.len(), 2);
         assert!(matches!(
             &events[0],
             AuditEventType::ToolInvocation {
                 capability_check: CapabilityCheckResult::Granted,
                 ..
             }
+        ));
+        assert!(matches!(
+            &events[1],
+            AuditEventType::ToolExecutionCompleted { success: true, .. }
         ));
     }
 
@@ -1496,10 +1498,14 @@ mod tests {
             .await;
 
         let events = read_audit_events(&log_path);
-        // Granted + PolicyViolation
-        assert_eq!(events.len(), 2);
+        // Granted + ToolExecutionTimeout + PolicyViolation
+        assert_eq!(events.len(), 3);
         assert!(matches!(
             &events[1],
+            AuditEventType::ToolExecutionTimeout { .. }
+        ));
+        assert!(matches!(
+            &events[2],
             AuditEventType::PolicyViolation { rule, .. } if rule == "tool_timeout"
         ));
     }
@@ -1534,10 +1540,14 @@ mod tests {
             .await;
 
         let events = read_audit_events(&log_path);
-        // Granted + InjectionDetected
-        assert_eq!(events.len(), 2);
+        // Granted + ToolExecutionCompleted + InjectionDetected
+        assert_eq!(events.len(), 3);
         assert!(matches!(
             &events[1],
+            AuditEventType::ToolExecutionCompleted { success: true, .. }
+        ));
+        assert!(matches!(
+            &events[2],
             AuditEventType::InjectionDetected {
                 source: InjectionSource::ToolOutput,
                 severity: Severity::High,

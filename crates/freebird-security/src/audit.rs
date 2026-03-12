@@ -137,6 +137,29 @@ pub enum AuditEventType {
     SecretRedacted {
         tool_name: String,
     },
+    ToolExecutionCompleted {
+        tool_name: String,
+        success: bool,
+        duration_ms: u64,
+    },
+    ToolExecutionTimeout {
+        tool_name: String,
+        timeout_ms: u64,
+    },
+    ChannelConnected {
+        channel_id: String,
+        remote_addr: Option<String>,
+    },
+    ChannelDisconnected {
+        channel_id: String,
+        reason: Option<String>,
+    },
+    DaemonStarted {
+        version: String,
+    },
+    DaemonShutdown {
+        reason: String,
+    },
 }
 
 // ── Chain metadata types ────────────────────────────────────────────
