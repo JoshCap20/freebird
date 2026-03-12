@@ -1699,20 +1699,21 @@ impl AgentRuntime {
 
         // New SQLite-backed audit sink
         if let Some(sink) = &self.audit_sink {
-            let event_json = match serde_json::to_string(&event) {
-                Ok(json) => json,
+            // Serialize to Value once, extract the serde "type" tag, then stringify.
+            let event_value = match serde_json::to_value(&event) {
+                Ok(v) => v,
                 Err(e) => {
                     tracing::error!(error = %e, "failed to serialize audit event");
                     return;
                 }
             };
-            // Extract the serde tag "type" field from the serialized JSON.
-            let event_type = serde_json::from_str::<serde_json::Value>(&event_json)
-                .ok()
-                .and_then(|v| v.get("type")?.as_str().map(ToOwned::to_owned))
-                .unwrap_or_else(|| "unknown".into());
+            let event_type = event_value
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let event_json = event_value.to_string();
             if let Err(e) = sink
-                .record(Some(session_id.as_str()), &event_type, &event_json)
+                .record(Some(session_id.as_str()), event_type, &event_json)
                 .await
             {
                 tracing::error!(
