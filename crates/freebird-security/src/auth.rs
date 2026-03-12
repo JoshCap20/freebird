@@ -329,7 +329,6 @@ impl RateLimiter {
     ///
     /// Returns `SecurityError::InvalidSessionKey` if the rate limit is exceeded.
     ///
-    #[must_use = "rate limit check result must not be silently discarded"]
     pub fn check_rate_limit(&self, key_id: &str) -> Result<(), SecurityError> {
         let now = Instant::now();
         // Lock scope is nanosecond-scale — no `.await` inside.
