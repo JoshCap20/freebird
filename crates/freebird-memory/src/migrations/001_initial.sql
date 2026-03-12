@@ -132,3 +132,16 @@ CREATE TABLE IF NOT EXISTS audit_events (
 CREATE INDEX IF NOT EXISTS idx_audit_sequence ON audit_events(sequence);
 CREATE INDEX IF NOT EXISTS idx_audit_session ON audit_events(session_id);
 CREATE INDEX IF NOT EXISTS idx_audit_type ON audit_events(event_type);
+
+-- Audit metadata for tail truncation detection.
+-- Stores the expected next sequence and the HMAC of the last appended event.
+-- If an attacker deletes the last N rows, the remaining chain is internally valid
+-- but the metadata will disagree with the actual last row.
+CREATE TABLE IF NOT EXISTS audit_metadata (
+    id                      INTEGER PRIMARY KEY CHECK(id = 1),
+    expected_next_sequence  INTEGER NOT NULL DEFAULT 0,
+    last_hmac               TEXT NOT NULL DEFAULT ''
+);
+
+INSERT OR IGNORE INTO audit_metadata (id, expected_next_sequence, last_hmac)
+    VALUES (1, 0, '');

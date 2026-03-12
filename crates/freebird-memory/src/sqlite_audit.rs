@@ -69,6 +69,13 @@ impl AuditSink for SqliteAuditSink {
         )
         .map_err(|e| rusqlite_to_io("insert audit event", &e))?;
 
+        // Update tail truncation metadata
+        conn.execute(
+            "UPDATE audit_metadata SET expected_next_sequence = ?1, last_hmac = ?2 WHERE id = 1",
+            rusqlite::params![next_seq + 1, hmac_hex],
+        )
+        .map_err(|e| rusqlite_to_io("update audit metadata", &e))?;
+
         Ok(())
     }
 
@@ -84,6 +91,7 @@ impl AuditSink for SqliteAuditSink {
             .map_err(|e| rusqlite_to_io("prepare verify", &e))?;
 
         let mut expected_previous = String::new();
+        let mut last_sequence: Option<i64> = None;
 
         let rows = stmt
             .query_map([], |row| {
@@ -130,11 +138,88 @@ impl AuditSink for SqliteAuditSink {
                 });
             }
 
+            last_sequence = Some(row.sequence);
             expected_previous = row.hmac;
         }
 
+        // Tail truncation detection: compare actual last row against metadata
+        verify_tail_metadata(&conn, last_sequence, &expected_previous)?;
+
         Ok(())
     }
+}
+
+/// Verify that the actual last row matches the metadata table.
+///
+/// If an attacker deletes the last N rows from `audit_events`, the remaining
+/// chain is internally valid, but the metadata will disagree with the actual
+/// last row's sequence and HMAC.
+fn verify_tail_metadata(
+    conn: &rusqlite::Connection,
+    last_sequence: Option<i64>,
+    last_hmac: &str,
+) -> Result<(), MemoryError> {
+    // Check if the audit_metadata table exists (legacy DB migration compat)
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='audit_metadata'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| rusqlite_to_io("check audit_metadata table", &e))?;
+
+    if !table_exists {
+        // Legacy database without metadata — skip tail check
+        tracing::warn!("audit_metadata table missing; skipping tail truncation check");
+        return Ok(());
+    }
+
+    let meta: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT expected_next_sequence, last_hmac FROM audit_metadata WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| rusqlite_to_io("query audit metadata", &e))?;
+
+    let Some((expected_next, expected_hmac)) = meta else {
+        // No metadata row — skip (shouldn't happen with schema, but be defensive)
+        return Ok(());
+    };
+
+    match last_sequence {
+        Some(seq) => {
+            if seq + 1 != expected_next {
+                return Err(MemoryError::IntegrityViolation {
+                    reason: format!(
+                        "audit log tail truncation detected: \
+                         last sequence is {seq} but metadata expects next sequence {expected_next}"
+                    ),
+                });
+            }
+            if last_hmac != expected_hmac {
+                return Err(MemoryError::IntegrityViolation {
+                    reason: "audit log tail truncation detected: \
+                             last HMAC does not match metadata"
+                        .into(),
+                });
+            }
+        }
+        None => {
+            // No rows in audit_events — metadata should also be empty
+            if expected_next != 0 || !expected_hmac.is_empty() {
+                return Err(MemoryError::IntegrityViolation {
+                    reason: format!(
+                        "audit log tail truncation detected: \
+                         no audit events but metadata expects next sequence {expected_next}"
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Get the next global sequence number and the HMAC of the last audit event.
@@ -238,6 +323,70 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("HMAC mismatch"));
+    }
+
+    #[tokio::test]
+    async fn test_tail_truncation_detected_via_sequence_counter() {
+        let (_dir, sink) = test_audit_sink();
+
+        // Append 5 events
+        for i in 0..5 {
+            sink.record(Some("s1"), &format!("event_{i}"), "{}")
+                .await
+                .unwrap();
+        }
+
+        // Delete the last 2 events (sequences 3 and 4)
+        let conn = sink.db.conn().await;
+        conn.execute("DELETE FROM audit_events WHERE sequence >= 3", [])
+            .unwrap();
+        drop(conn);
+
+        // The remaining chain (0,1,2) is internally valid, but metadata
+        // says expected_next=5, while actual last is 2
+        let result = sink.verify_chain().await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("tail truncation"),
+            "expected tail truncation error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_tail_truncation_on_intact_log() {
+        let (_dir, sink) = test_audit_sink();
+
+        for i in 0..5 {
+            sink.record(Some("s1"), &format!("event_{i}"), "{}")
+                .await
+                .unwrap();
+        }
+
+        // Should pass — log is intact
+        sink.verify_chain().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_tail_truncation_on_empty_with_stale_metadata() {
+        let (_dir, sink) = test_audit_sink();
+
+        // Append events, then delete ALL of them but leave metadata
+        sink.record(Some("s1"), "e1", "{}").await.unwrap();
+        sink.record(Some("s1"), "e2", "{}").await.unwrap();
+
+        let conn = sink.db.conn().await;
+        conn.execute("DELETE FROM audit_events", []).unwrap();
+        drop(conn);
+
+        // Metadata says expected_next=2, but no events exist
+        let result = sink.verify_chain().await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("tail truncation"),
+            "expected tail truncation error, got: {err}"
+        );
     }
 
     #[tokio::test]
