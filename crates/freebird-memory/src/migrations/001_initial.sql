@@ -1,19 +1,15 @@
--- FreeBird database schema v1: conversations + knowledge with FTS5
+-- FreeBird database schema v1: event-sourced conversations, knowledge, audit
 
--- Conversations (replaces file-based JSON storage)
-CREATE TABLE IF NOT EXISTS conversations (
-    session_id    TEXT PRIMARY KEY,
-    system_prompt TEXT,
-    model_id      TEXT NOT NULL,
-    provider_id   TEXT NOT NULL,
-    created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL,
-    data          TEXT NOT NULL
+-- Schema version tracking
+CREATE TABLE IF NOT EXISTS schema_version (
+    version    INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
+-- ---------------------------------------------------------------------------
+-- Knowledge
+-- ---------------------------------------------------------------------------
 
--- Knowledge entries
 CREATE TABLE IF NOT EXISTS knowledge (
     id            TEXT PRIMARY KEY,
     kind          TEXT NOT NULL,
@@ -60,8 +56,79 @@ CREATE TRIGGER IF NOT EXISTS knowledge_au AFTER UPDATE ON knowledge BEGIN
     VALUES (new.rowid, new.content, new.tags, new.kind);
 END;
 
--- Schema version tracking
-CREATE TABLE IF NOT EXISTS schema_version (
-    version    INTEGER PRIMARY KEY,
-    applied_at TEXT NOT NULL
+-- ---------------------------------------------------------------------------
+-- Conversation Events (immutable event log with per-session HMAC chain)
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS conversation_events (
+    event_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id     TEXT NOT NULL,
+    sequence       INTEGER NOT NULL,
+    event_type     TEXT NOT NULL,
+    event_data     TEXT NOT NULL,
+    timestamp      TEXT NOT NULL,
+    previous_hmac  TEXT NOT NULL DEFAULT '',
+    hmac           TEXT NOT NULL,
+    UNIQUE(session_id, sequence)
 );
+
+CREATE INDEX IF NOT EXISTS idx_events_session ON conversation_events(session_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_events_session_type ON conversation_events(session_id, event_type);
+
+-- ---------------------------------------------------------------------------
+-- Session Metadata (denormalized for list/search without full replay)
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS session_metadata (
+    session_id    TEXT PRIMARY KEY,
+    system_prompt TEXT,
+    model_id      TEXT NOT NULL,
+    provider_id   TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    turn_count    INTEGER NOT NULL DEFAULT 0,
+    preview       TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_meta_updated ON session_metadata(updated_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- Conversation FTS5 (text search over event data)
+-- ---------------------------------------------------------------------------
+
+CREATE VIRTUAL TABLE IF NOT EXISTS conversation_fts USING fts5(
+    session_id,
+    content,
+    content=conversation_events,
+    content_rowid=event_id,
+    tokenize='porter unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS events_fts_ai AFTER INSERT ON conversation_events BEGIN
+    INSERT INTO conversation_fts(rowid, session_id, content)
+    VALUES (new.event_id, new.session_id, new.event_data);
+END;
+
+CREATE TRIGGER IF NOT EXISTS events_fts_ad AFTER DELETE ON conversation_events BEGIN
+    INSERT INTO conversation_fts(conversation_fts, rowid, session_id, content)
+    VALUES ('delete', old.event_id, old.session_id, old.event_data);
+END;
+
+-- ---------------------------------------------------------------------------
+-- Audit Events (security audit log with global HMAC chain)
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS audit_events (
+    event_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    sequence       INTEGER NOT NULL UNIQUE,
+    session_id     TEXT,
+    event_type     TEXT NOT NULL,
+    event_data     TEXT NOT NULL,
+    timestamp      TEXT NOT NULL,
+    previous_hmac  TEXT NOT NULL DEFAULT '',
+    hmac           TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_sequence ON audit_events(sequence);
+CREATE INDEX IF NOT EXISTS idx_audit_session ON audit_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_audit_type ON audit_events(event_type);
