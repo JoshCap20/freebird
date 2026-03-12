@@ -86,7 +86,25 @@ pub struct ApprovalRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ApprovalResponse {
     Approved,
-    Denied { reason: Option<String> },
+    Denied {
+        reason: Option<String>,
+    },
+    /// Budget-specific: approve this request AND modify the limit going forward.
+    BudgetOverride {
+        action: BudgetOverrideAction,
+    },
+}
+
+/// How the user wants to handle a budget limit going forward.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum BudgetOverrideAction {
+    /// Approve this one instance only (same as current behavior).
+    ApproveOnce,
+    /// Raise the limit to a new value for the remainder of the session.
+    RaiseLimit { new_limit: u64 },
+    /// Remove the limit entirely for the remainder of the session.
+    DisableLimit,
 }
 
 // ── Errors ────────────────────────────────────────────────────────────
@@ -158,21 +176,21 @@ impl ApprovalGate {
         (gate, request_rx)
     }
 
-    /// Core: send an approval request and await the user's response.
+    /// Core: send an approval request and await the user's raw response.
     ///
-    /// This always sends the request (no threshold check). Use
-    /// [`check_consent`] for risk-level-gated consent, or call this
-    /// directly for security warnings.
+    /// Returns the full [`ApprovalResponse`] on success. Use
+    /// [`request_approval`] for the common case that maps
+    /// `Approved`/`BudgetOverride` to `Ok(())`.
     ///
     /// # Errors
     ///
     /// Returns [`ApprovalError::Denied`], [`ApprovalError::Expired`],
     /// [`ApprovalError::TooManyPending`], or [`ApprovalError::ChannelClosed`].
-    pub async fn request_approval(
+    pub async fn request_approval_raw(
         &self,
         category: ApprovalCategory,
         sender_id: &str,
-    ) -> Result<(), ApprovalError> {
+    ) -> Result<ApprovalResponse, ApprovalError> {
         let context = category.context_label();
         let request_id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
@@ -210,7 +228,9 @@ impl ApprovalGate {
         let timeout_secs = self.approval_ttl.as_secs();
 
         match tokio::time::timeout(self.approval_ttl, response_rx).await {
-            Ok(Ok(ApprovalResponse::Approved)) => Ok(()),
+            Ok(Ok(
+                response @ (ApprovalResponse::Approved | ApprovalResponse::BudgetOverride { .. }),
+            )) => Ok(response),
             Ok(Ok(ApprovalResponse::Denied { reason })) => Err(ApprovalError::Denied {
                 context,
                 reason: reason.unwrap_or_else(|| "user denied".into()),
@@ -224,6 +244,28 @@ impl ApprovalGate {
                 })
             }
         }
+    }
+
+    /// Send an approval request and await the user's response.
+    ///
+    /// This always sends the request (no threshold check). Use
+    /// [`check_consent`] for risk-level-gated consent, or call this
+    /// directly for security warnings.
+    ///
+    /// Maps `Approved` and `BudgetOverride` to `Ok(())`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApprovalError::Denied`], [`ApprovalError::Expired`],
+    /// [`ApprovalError::TooManyPending`], or [`ApprovalError::ChannelClosed`].
+    pub async fn request_approval(
+        &self,
+        category: ApprovalCategory,
+        sender_id: &str,
+    ) -> Result<(), ApprovalError> {
+        self.request_approval_raw(category, sender_id)
+            .await
+            .map(|_| ())
     }
 
     /// Check if a tool invocation requires consent based on risk level.
@@ -263,8 +305,10 @@ impl ApprovalGate {
     /// Request approval for a budget limit exceeded event.
     ///
     /// Always sends the request — the caller has already determined that
-    /// a limit was exceeded. If approved, the caller should force-commit
-    /// the usage or allow the round to proceed.
+    /// a limit was exceeded. Returns the user's chosen override action:
+    /// - `ApproveOnce` — force-commit this usage only
+    /// - `RaiseLimit { new_limit }` — update the limit and force-commit
+    /// - `DisableLimit` — remove the limit and force-commit
     ///
     /// # Errors
     ///
@@ -276,14 +320,19 @@ impl ApprovalGate {
         used: u64,
         limit: u64,
         sender_id: &str,
-    ) -> Result<(), ApprovalError> {
+    ) -> Result<BudgetOverrideAction, ApprovalError> {
         let category = ApprovalCategory::BudgetExceeded {
             resource,
             used,
             limit,
         };
 
-        self.request_approval(category, sender_id).await
+        match self.request_approval_raw(category, sender_id).await? {
+            ApprovalResponse::Approved => Ok(BudgetOverrideAction::ApproveOnce),
+            ApprovalResponse::BudgetOverride { action } => Ok(action),
+            // Denied is already handled as Err by request_approval_raw
+            ApprovalResponse::Denied { .. } => unreachable!(),
+        }
     }
 
     /// Request approval for a security warning (injection detection, etc.).
@@ -868,7 +917,7 @@ mod tests {
             ApprovalResponse::Denied { reason } => {
                 assert_eq!(reason.unwrap(), "too dangerous");
             }
-            ApprovalResponse::Approved => panic!("expected Denied"),
+            other => panic!("expected Denied, got {other:?}"),
         }
     }
 
@@ -936,7 +985,8 @@ mod tests {
         }
 
         let _ = gate.respond(&req.id, ApprovalResponse::Approved).await;
-        assert!(handle.await.unwrap().is_ok());
+        let action = handle.await.unwrap().unwrap();
+        assert_eq!(action, BudgetOverrideAction::ApproveOnce);
     }
 
     #[tokio::test]
@@ -1013,5 +1063,76 @@ mod tests {
         assert!(json.contains(r#""kind":"budget_exceeded""#));
         let back: ApprovalCategory = serde_json::from_str(&json).unwrap();
         assert_eq!(back, budget);
+    }
+
+    // ── Budget override action tests ──────────────────────────────
+
+    #[tokio::test]
+    async fn test_budget_override_raise_limit() {
+        let (gate, mut rx) = ApprovalGate::new(RiskLevel::High, Duration::from_secs(60), 5);
+        let gate = Arc::new(gate);
+
+        let gate_clone = Arc::clone(&gate);
+        let handle = tokio::spawn(async move {
+            gate_clone
+                .check_budget("tokens_per_request".into(), 36000, 32768, "test-sender")
+                .await
+        });
+
+        let req = rx.recv().await.unwrap();
+        let _ = gate
+            .respond(
+                &req.id,
+                ApprovalResponse::BudgetOverride {
+                    action: BudgetOverrideAction::RaiseLimit { new_limit: 65536 },
+                },
+            )
+            .await;
+
+        let action = handle.await.unwrap().unwrap();
+        assert_eq!(
+            action,
+            BudgetOverrideAction::RaiseLimit { new_limit: 65536 }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_budget_override_disable_limit() {
+        let (gate, mut rx) = ApprovalGate::new(RiskLevel::High, Duration::from_secs(60), 5);
+        let gate = Arc::new(gate);
+
+        let gate_clone = Arc::clone(&gate);
+        let handle = tokio::spawn(async move {
+            gate_clone
+                .check_budget("tokens_per_request".into(), 36000, 32768, "test-sender")
+                .await
+        });
+
+        let req = rx.recv().await.unwrap();
+        let _ = gate
+            .respond(
+                &req.id,
+                ApprovalResponse::BudgetOverride {
+                    action: BudgetOverrideAction::DisableLimit,
+                },
+            )
+            .await;
+
+        let action = handle.await.unwrap().unwrap();
+        assert_eq!(action, BudgetOverrideAction::DisableLimit);
+    }
+
+    #[test]
+    fn test_budget_override_action_serde_roundtrip() {
+        let actions = vec![
+            BudgetOverrideAction::ApproveOnce,
+            BudgetOverrideAction::RaiseLimit { new_limit: 65536 },
+            BudgetOverrideAction::DisableLimit,
+        ];
+        for action in actions {
+            let json = serde_json::to_string(&action).unwrap();
+            let back: BudgetOverrideAction = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, action);
+        }
     }
 }

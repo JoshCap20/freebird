@@ -108,6 +108,7 @@ pub fn parse_user_input(line: &str) -> ParseResult {
             request_id: id.to_string(),
             approved: true,
             reason: None,
+            budget_action: None,
         });
     }
     if line == "/approve" {
@@ -125,6 +126,7 @@ pub fn parse_user_input(line: &str) -> ParseResult {
             request_id: id,
             approved: false,
             reason,
+            budget_action: None,
         });
     }
     if line == "/deny" {
@@ -667,6 +669,7 @@ mod tests {
                 request_id: "req-123".into(),
                 approved: true,
                 reason: None,
+                budget_action: None,
             })
         );
     }
@@ -679,6 +682,7 @@ mod tests {
                 request_id: "req-123".into(),
                 approved: false,
                 reason: Some("too risky".into()),
+                budget_action: None,
             })
         );
     }
@@ -691,6 +695,7 @@ mod tests {
                 request_id: "req-456".into(),
                 approved: false,
                 reason: None,
+                budget_action: None,
             })
         );
     }

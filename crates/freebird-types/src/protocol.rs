@@ -20,6 +20,10 @@ pub enum ClientMessage {
         request_id: String,
         approved: bool,
         reason: Option<String>,
+        /// Budget override action (e.g., `"approve_once"`, `"raise_limit:65536"`,
+        /// `"disable_limit"`). Only present for budget exceeded responses.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        budget_action: Option<String>,
     },
 }
 
@@ -119,11 +123,13 @@ mod tests {
                 request_id: "req-42".into(),
                 approved: true,
                 reason: None,
+                budget_action: None,
             },
             ClientMessage::ApprovalResponse {
                 request_id: "req-43".into(),
                 approved: false,
                 reason: Some("too risky".into()),
+                budget_action: None,
             },
         ] {
             let json = serde_json::to_string(&msg).unwrap();
@@ -261,8 +267,10 @@ mod tests {
             request_id: "req-1".into(),
             approved: true,
             reason: None,
+            budget_action: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
+        // budget_action is skipped when None
         assert_eq!(
             json,
             r#"{"type":"approval_response","request_id":"req-1","approved":true,"reason":null}"#
@@ -275,6 +283,7 @@ mod tests {
             request_id: "req-2".into(),
             approved: false,
             reason: Some("dangerous".into()),
+            budget_action: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let back: ClientMessage = serde_json::from_str(&json).unwrap();

@@ -227,6 +227,7 @@ async fn read_client_lines(
                         request_id,
                         approved,
                         reason,
+                        budget_action,
                     }) => {
                         let _ = inbound_tx
                             .send(InboundEvent::ApprovalResponse {
@@ -234,6 +235,7 @@ async fn read_client_lines(
                                 approved,
                                 reason,
                                 sender_id: sender_id.clone(),
+                                budget_action,
                             })
                             .await;
                     }
@@ -918,6 +920,7 @@ mod tests {
                 request_id: "req-42".into(),
                 approved: true,
                 reason: None,
+                budget_action: None,
             },
         )
         .await;
@@ -929,6 +932,7 @@ mod tests {
                 approved,
                 reason,
                 sender_id,
+                ..
             } => {
                 assert_eq!(request_id, "req-42");
                 assert!(approved);
@@ -958,6 +962,7 @@ mod tests {
                 request_id: "req-99".into(),
                 approved: false,
                 reason: Some("too dangerous".into()),
+                budget_action: None,
             },
         )
         .await;

@@ -223,6 +223,7 @@ impl TtyChat {
                         request_id,
                         approved,
                         reason,
+                        budget_action: None,
                     };
                     crate::chat::send_client_message(socket_write, &msg).await?;
                     self.input.render(&mut self.writer)?;
@@ -553,6 +554,7 @@ impl TtyChat {
                 request_id,
                 approved,
                 reason,
+                budget_action: None,
             })
         } else {
             None

@@ -81,6 +81,10 @@ pub enum InboundEvent {
         approved: bool,
         reason: Option<String>,
         sender_id: String,
+        /// Budget override action string (e.g., `"approve_once"`,
+        /// `"raise_limit:65536"`, `"disable_limit"`). `None` for non-budget
+        /// approvals.
+        budget_action: Option<String>,
     },
 }
 
@@ -301,6 +305,7 @@ mod tests {
             approved: false,
             reason: Some("too risky".into()),
             sender_id: "user-1".into(),
+            budget_action: None,
         };
 
         let json = serde_json::to_string(&event).unwrap();

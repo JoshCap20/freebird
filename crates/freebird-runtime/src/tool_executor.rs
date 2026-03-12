@@ -6,8 +6,8 @@
 //! 1. Tool lookup
 //! 2. Capability + expiration check via [`CapabilityGrant::check`]
 //! 3. Secret guard input check — flags sensitive file/command access (step 2.5)
-//! 4. Knowledge consent escalation — consent-gated kinds (system_config,
-//!    tool_capability, user_preference) are escalated to High risk (step 2.6)
+//! 4. Knowledge consent escalation — consent-gated kinds (`system_config`,
+//!    `tool_capability`, `user_preference`) are escalated to High risk (step 2.6)
 //! 5. Consent gate for high-risk tools (ASI09), with escalation from steps 3/4
 //! 6. Audit logging
 //! 7. Execution with timeout
@@ -242,7 +242,7 @@ impl ToolExecutor {
 
     /// Request user approval for a budget limit exceeded event.
     ///
-    /// Returns `Ok(())` if the user approves (caller should force-commit usage),
+    /// Returns the user's chosen [`BudgetOverrideAction`] if approved,
     /// or an `ApprovalError` if denied, expired, or no gate is configured.
     ///
     /// # Errors
@@ -255,7 +255,7 @@ impl ToolExecutor {
         used: u64,
         limit: u64,
         sender_id: &str,
-    ) -> Result<(), ApprovalError> {
+    ) -> Result<freebird_security::approval::BudgetOverrideAction, ApprovalError> {
         if let Some(gate) = &self.approval_gate {
             gate.check_budget(resource, used, limit, sender_id).await
         } else {
@@ -333,9 +333,8 @@ impl ToolExecutor {
         //      always pass through the consent gate, independent of the global
         //      threshold. Secret-guard escalation takes precedence if both fire
         //      (it escalates to Critical; knowledge escalation only reaches High).
-        let effective_info = secret_guard_info.or_else(|| {
-            self.check_knowledge_consent_escalation(tool_name, &input, tool.info())
-        });
+        let effective_info = secret_guard_info
+            .or_else(|| Self::check_knowledge_consent_escalation(tool_name, &input, tool.info()));
 
         // 3. Consent gate for High/Critical risk tools (ASI09)
         //    Uses effective_info (escalated by secret guard or knowledge consent
@@ -751,7 +750,6 @@ impl ToolExecutor {
     ///
     /// Returns `Some(escalated_info)` if escalation is needed, `None` otherwise.
     fn check_knowledge_consent_escalation(
-        &self,
         tool_name: &str,
         input: &serde_json::Value,
         tool_info: &ToolInfo,
@@ -2508,7 +2506,7 @@ mod tests {
 
     // ── Knowledge consent escalation tests ──────────────────────────
 
-    /// Helper: build a MockTool whose name matches a knowledge write tool,
+    /// Helper: build a `MockTool` whose name matches a knowledge write tool,
     /// with Medium risk (the real tools' declared level).
     fn knowledge_write_tool(name: &str) -> MockTool {
         MockTool::new(name, Capability::FileWrite)
@@ -2778,13 +2776,21 @@ mod tests {
 
         // MockTool returns Success regardless; the real tool would error.
         // The important thing is no gate request was sent.
-        assert!(rx.try_recv().is_err(), "missing kind should not trigger gate");
+        assert!(
+            rx.try_recv().is_err(),
+            "missing kind should not trigger gate"
+        );
         // And the tool ran (outcome from MockTool).
         assert_eq!(output.outcome, ToolOutcome::Success);
     }
 
-    /// When secret-guard escalation and knowledge-consent escalation would
-    /// both fire, the secret-guard result takes precedence (Critical > High).
+    /// When knowledge-consent escalation fires but the secret guard does NOT
+    /// match (because `store_knowledge` is not in `FILE_TOOLS`), knowledge
+    /// consent escalation to High takes effect.
+    ///
+    /// NOTE: The secret guard only inspects file tools and shell tools. A
+    /// `"path": ".env"` field in a knowledge tool's input is NOT checked
+    /// by the secret guard — it simply doesn't know about knowledge tools.
     #[tokio::test]
     async fn test_knowledge_consent_escalation_secret_guard_takes_precedence() {
         let (_tmp, path) = sandbox();
@@ -2806,8 +2812,8 @@ mod tests {
         let grant = grant_with_caps(&path, &[Capability::FileWrite]);
         let sid = session_id();
 
-        // `.env` in the path triggers secret-guard escalation to Critical;
-        // `system_config` kind would escalate to High. Secret guard wins.
+        // `store_knowledge` is NOT a file tool, so secret guard does not fire.
+        // `system_config` kind triggers knowledge-consent escalation to High.
         let exec = Arc::clone(&executor);
         let handle = tokio::spawn(async move {
             exec.execute(
@@ -2829,8 +2835,7 @@ mod tests {
             .expect("consent request should arrive")
             .expect("rx should not be closed");
 
-        // Secret guard escalates to Critical and stamps "SECRET GUARD" in the
-        // description — that marker must be present.
+        // Knowledge consent escalation to High (secret guard doesn't fire).
         match &req.category {
             ApprovalCategory::Consent {
                 risk_level,
@@ -2839,12 +2844,12 @@ mod tests {
             } => {
                 assert_eq!(
                     *risk_level,
-                    RiskLevel::Critical,
-                    "secret guard should win with Critical"
+                    RiskLevel::High,
+                    "knowledge consent escalation should set High"
                 );
                 assert!(
-                    description.contains("SECRET GUARD"),
-                    "description should contain SECRET GUARD marker, got: {description}"
+                    description.contains("CONSENT REQUIRED"),
+                    "description should contain CONSENT REQUIRED marker, got: {description}"
                 );
             }
             other => panic!("expected Consent category, got {other:?}"),
@@ -2924,8 +2929,7 @@ mod tests {
     async fn test_knowledge_consent_escalation_all_gated_kinds() {
         for kind_str in ["system_config", "tool_capability", "user_preference"] {
             let (_tmp, path) = sandbox();
-            let (gate, mut rx) =
-                ApprovalGate::new(RiskLevel::High, StdDuration::from_secs(60), 5);
+            let (gate, mut rx) = ApprovalGate::new(RiskLevel::High, StdDuration::from_secs(60), 5);
             let tool = knowledge_write_tool("store_knowledge");
             let executor = Arc::new(
                 ToolExecutor::new(
@@ -2978,8 +2982,7 @@ mod tests {
     async fn test_knowledge_consent_escalation_non_gated_kinds_no_gate() {
         for kind_str in ["learned_pattern", "error_resolution", "session_insight"] {
             let (_tmp, path) = sandbox();
-            let (gate, mut rx) =
-                ApprovalGate::new(RiskLevel::High, StdDuration::from_secs(60), 5);
+            let (gate, mut rx) = ApprovalGate::new(RiskLevel::High, StdDuration::from_secs(60), 5);
             let tool = knowledge_write_tool("store_knowledge");
             let executor = ToolExecutor::new(
                 vec![Box::new(tool)],

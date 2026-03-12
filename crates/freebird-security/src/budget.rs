@@ -6,7 +6,7 @@
 //! - Tool rounds per agentic turn
 
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use freebird_traits::provider::TokenUsage;
 use freebird_types::config::BudgetConfig;
@@ -36,12 +36,16 @@ impl fmt::Display for BudgetResource {
 
 /// Enforces token and tool-round budgets for a single agent session.
 ///
-/// Thread-safe via `AtomicU64` — multiple tasks can record usage concurrently.
-/// Only input and output tokens are counted; cache tokens are excluded.
+/// Thread-safe via atomics — multiple tasks can record usage and modify
+/// limits concurrently. Only input and output tokens are counted; cache
+/// tokens are excluded.
+///
+/// Limits can be raised or disabled at runtime (e.g., after user approves
+/// a budget override) via the `set_*` methods.
 pub struct TokenBudget {
-    max_tokens_per_session: u64,
-    max_tokens_per_request: u64,
-    max_tool_rounds_per_turn: u32,
+    max_tokens_per_session: AtomicU64,
+    max_tokens_per_request: AtomicU64,
+    max_tool_rounds_per_turn: AtomicU32,
     tokens_used: AtomicU64,
 }
 
@@ -50,9 +54,9 @@ impl TokenBudget {
     #[must_use]
     pub const fn new(config: &BudgetConfig) -> Self {
         Self {
-            max_tokens_per_session: config.max_tokens_per_session,
-            max_tokens_per_request: config.max_tokens_per_request,
-            max_tool_rounds_per_turn: config.max_tool_rounds_per_turn,
+            max_tokens_per_session: AtomicU64::new(config.max_tokens_per_session),
+            max_tokens_per_request: AtomicU64::new(config.max_tokens_per_request),
+            max_tool_rounds_per_turn: AtomicU32::new(config.max_tool_rounds_per_turn),
             tokens_used: AtomicU64::new(0),
         }
     }
@@ -73,11 +77,12 @@ impl TokenBudget {
         let request_tokens = u64::from(usage.input_tokens) + u64::from(usage.output_tokens);
 
         // Check per-request limit first.
-        if request_tokens > self.max_tokens_per_request {
+        let per_request = self.max_tokens_per_request.load(Ordering::Relaxed);
+        if request_tokens > per_request {
             return Err(SecurityError::BudgetExceeded {
                 resource: BudgetResource::TokensPerRequest,
                 used: request_tokens,
-                limit: self.max_tokens_per_request,
+                limit: per_request,
             });
         }
 
@@ -88,13 +93,14 @@ impl TokenBudget {
         let new_total = previous + request_tokens;
 
         // Check per-session limit — rollback on exceeded.
-        if new_total > self.max_tokens_per_session {
+        let per_session = self.max_tokens_per_session.load(Ordering::Relaxed);
+        if new_total > per_session {
             self.tokens_used
                 .fetch_sub(request_tokens, Ordering::Relaxed);
             return Err(SecurityError::BudgetExceeded {
                 resource: BudgetResource::TokensPerSession,
                 used: new_total,
-                limit: self.max_tokens_per_session,
+                limit: per_session,
             });
         }
 
@@ -111,11 +117,12 @@ impl TokenBudget {
     /// Returns `SecurityError::BudgetExceeded` if `current_round` is at or
     /// beyond the configured maximum.
     pub fn check_tool_rounds(&self, current_round: u32) -> Result<(), SecurityError> {
-        if current_round >= self.max_tool_rounds_per_turn {
+        let max_rounds = self.max_tool_rounds_per_turn.load(Ordering::Relaxed);
+        if current_round >= max_rounds {
             return Err(SecurityError::BudgetExceeded {
                 resource: BudgetResource::ToolRoundsPerTurn,
                 used: u64::from(current_round),
-                limit: u64::from(self.max_tool_rounds_per_turn),
+                limit: u64::from(max_rounds),
             });
         }
         Ok(())
@@ -125,6 +132,7 @@ impl TokenBudget {
     #[must_use]
     pub fn remaining_tokens(&self) -> u64 {
         self.max_tokens_per_session
+            .load(Ordering::Relaxed)
             .saturating_sub(self.tokens_used.load(Ordering::Relaxed))
     }
 
@@ -136,8 +144,44 @@ impl TokenBudget {
 
     /// Returns the configured maximum tool rounds per turn.
     #[must_use]
-    pub const fn max_tool_rounds(&self) -> u32 {
+    pub fn max_tool_rounds(&self) -> u32 {
+        self.max_tool_rounds_per_turn.load(Ordering::Relaxed)
+    }
+
+    /// Returns the current per-request token limit.
+    #[must_use]
+    pub fn max_tokens_per_request(&self) -> u64 {
+        self.max_tokens_per_request.load(Ordering::Relaxed)
+    }
+
+    /// Returns the current per-session token limit.
+    #[must_use]
+    pub fn max_tokens_per_session(&self) -> u64 {
+        self.max_tokens_per_session.load(Ordering::Relaxed)
+    }
+
+    /// Update the per-request token limit at runtime.
+    ///
+    /// Used after the user approves a budget override (raise or disable).
+    pub fn set_max_tokens_per_request(&self, new_limit: u64) {
+        self.max_tokens_per_request
+            .store(new_limit, Ordering::Relaxed);
+    }
+
+    /// Update the per-session token limit at runtime.
+    ///
+    /// Used after the user approves a budget override (raise or disable).
+    pub fn set_max_tokens_per_session(&self, new_limit: u64) {
+        self.max_tokens_per_session
+            .store(new_limit, Ordering::Relaxed);
+    }
+
+    /// Update the maximum tool rounds per turn at runtime.
+    ///
+    /// Used after the user approves a budget override (raise or disable).
+    pub fn set_max_tool_rounds_per_turn(&self, new_limit: u32) {
         self.max_tool_rounds_per_turn
+            .store(new_limit, Ordering::Relaxed);
     }
 
     /// Record token usage unconditionally, bypassing per-request and
@@ -500,5 +544,63 @@ mod tests {
         // Force bypasses the limit.
         budget.force_record_usage(&over_usage);
         assert_eq!(budget.tokens_used(), 1100);
+    }
+
+    // ── Runtime limit mutation tests ──────────────────────────────
+
+    #[test]
+    fn set_max_tokens_per_request_raises_limit() {
+        let budget = TokenBudget::new(&small_config());
+        // 250 exceeds per-request limit of 200.
+        assert!(budget.record_usage(&usage(150, 100)).is_err());
+
+        // Raise the limit.
+        budget.set_max_tokens_per_request(400);
+        assert_eq!(budget.max_tokens_per_request(), 400);
+
+        // Now 250 fits within the new limit.
+        assert!(budget.record_usage(&usage(150, 100)).is_ok());
+    }
+
+    #[test]
+    fn set_max_tokens_per_session_raises_limit() {
+        let budget = TokenBudget::new(&small_config());
+        // Fill to 900.
+        for _ in 0..9 {
+            budget.record_usage(&usage(50, 50)).unwrap();
+        }
+        // 200 more would exceed 1000 session limit.
+        assert!(budget.record_usage(&usage(100, 100)).is_err());
+
+        // Double the session limit.
+        budget.set_max_tokens_per_session(2000);
+        assert_eq!(budget.max_tokens_per_session(), 2000);
+
+        // Now 200 more fits (900 + 200 = 1100 ≤ 2000).
+        assert!(budget.record_usage(&usage(100, 100)).is_ok());
+    }
+
+    #[test]
+    fn set_max_tool_rounds_per_turn_raises_limit() {
+        let budget = TokenBudget::new(&small_config());
+        // Round 3 exceeds limit of 3 (0-indexed).
+        assert!(budget.check_tool_rounds(3).is_err());
+
+        // Raise to 10.
+        budget.set_max_tool_rounds_per_turn(10);
+        assert_eq!(budget.max_tool_rounds(), 10);
+
+        // Round 3 now allowed.
+        assert!(budget.check_tool_rounds(3).is_ok());
+    }
+
+    #[test]
+    fn set_max_tokens_per_request_to_max_disables_limit() {
+        let budget = TokenBudget::new(&small_config());
+        budget.set_max_tokens_per_request(u64::MAX);
+        budget.set_max_tokens_per_session(u64::MAX);
+
+        // Any request size should pass.
+        assert!(budget.record_usage(&usage(u32::MAX, 0)).is_ok());
     }
 }

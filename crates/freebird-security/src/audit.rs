@@ -117,6 +117,14 @@ pub enum AuditEventType {
         /// Whether the user approved the budget override (`true`) or
         /// it was denied/expired (`false`).
         approved: bool,
+        /// What override action the user chose (e.g., `"approve_once"`,
+        /// `"raise_limit"`, `"disable_limit"`). `None` for denials.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        override_action: Option<String>,
+        /// The new limit value if the user chose to raise or disable
+        /// the limit. `None` for approve-once and denials.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_limit: Option<u64>,
     },
     SecretAccessBlocked {
         tool_name: String,
@@ -909,6 +917,8 @@ mod tests {
                 used: 600_000,
                 limit: 500_000,
                 approved: false,
+                override_action: None,
+                new_limit: None,
             },
         ];
 
@@ -1364,6 +1374,8 @@ mod tests {
                 used: 600_000,
                 limit: 500_000,
                 approved: false,
+                override_action: None,
+                new_limit: None,
             },
         ];
 

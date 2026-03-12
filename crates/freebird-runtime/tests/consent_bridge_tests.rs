@@ -251,6 +251,7 @@ async fn test_consent_request_forwarded_to_channel() {
             approved: true,
             reason: None,
             sender_id: "alice".into(),
+            budget_action: None,
         })
         .await
         .unwrap();
@@ -346,6 +347,7 @@ async fn test_consent_approved_executes_tool() {
                         approved: true,
                         reason: None,
                         sender_id: "alice".into(),
+                        budget_action: None,
                     })
                     .await
                     .unwrap();
@@ -475,6 +477,7 @@ async fn test_consent_denied_returns_error_to_provider() {
                         approved: false,
                         reason: Some("Not authorized".into()),
                         sender_id: "alice".into(),
+                        budget_action: None,
                     })
                     .await
                     .unwrap();
@@ -768,6 +771,7 @@ async fn test_consent_response_unknown_id_logged() {
             approved: true,
             reason: None,
             sender_id: "alice".into(),
+            budget_action: None,
         })
         .await
         .unwrap();

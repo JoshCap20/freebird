@@ -252,10 +252,16 @@ impl AgentRuntime {
                         event = inbound.next() => {
                             match event {
                                 Some(InboundEvent::ApprovalResponse {
-                                    request_id, approved, reason, sender_id,
+                                    request_id, approved, reason, sender_id, budget_action,
                                 }) if has_approval_gate => {
                                     if let Some(ref resp) = approval_responder {
-                                        let response = if approved {
+                                        let response = if let Some(ref action_str) = budget_action {
+                                            match parse_budget_action(action_str) {
+                                                Some(action) => freebird_security::approval::ApprovalResponse::BudgetOverride { action },
+                                                None if approved => freebird_security::approval::ApprovalResponse::Approved,
+                                                None => freebird_security::approval::ApprovalResponse::Denied { reason },
+                                            }
+                                        } else if approved {
                                             freebird_security::approval::ApprovalResponse::Approved
                                         } else {
                                             freebird_security::approval::ApprovalResponse::Denied { reason }
@@ -964,6 +970,44 @@ impl AgentRuntime {
         .await;
     }
 
+    /// Resolve the override action string and new limit value for audit/logging.
+    fn resolve_budget_override(
+        action: &freebird_security::approval::BudgetOverrideAction,
+        resource: &freebird_security::budget::BudgetResource,
+    ) -> (&'static str, Option<u64>) {
+        use freebird_security::approval::BudgetOverrideAction;
+        use freebird_security::budget::BudgetResource;
+
+        match action {
+            BudgetOverrideAction::ApproveOnce => ("approve_once", None),
+            BudgetOverrideAction::RaiseLimit { new_limit } => ("raise_limit", Some(*new_limit)),
+            BudgetOverrideAction::DisableLimit => {
+                let max = match resource {
+                    BudgetResource::ToolRoundsPerTurn => u64::from(u32::MAX),
+                    _ => u64::MAX,
+                };
+                ("disable_limit", Some(max))
+            }
+        }
+    }
+
+    /// Apply a budget limit change to the given budget.
+    fn apply_budget_limit(
+        budget: &freebird_security::budget::TokenBudget,
+        resource: &freebird_security::budget::BudgetResource,
+        new_limit: u64,
+    ) {
+        use freebird_security::budget::BudgetResource;
+
+        match resource {
+            BudgetResource::TokensPerRequest => budget.set_max_tokens_per_request(new_limit),
+            BudgetResource::TokensPerSession => budget.set_max_tokens_per_session(new_limit),
+            BudgetResource::ToolRoundsPerTurn => {
+                budget.set_max_tool_rounds_per_turn(u32::try_from(new_limit).unwrap_or(u32::MAX));
+            }
+        }
+    }
+
     /// Handle a budget exceeded error: request user approval to continue.
     ///
     /// Returns `true` if the user approves (caller should continue the loop),
@@ -975,17 +1019,18 @@ impl AgentRuntime {
         current_turn: &mut Turn,
         sender_id: &str,
         outbound: &mpsc::Sender<OutboundEvent>,
+        budget: Option<&freebird_security::budget::TokenBudget>,
     ) -> bool {
         tracing::warn!(%session_id, %error, "token budget exceeded — requesting approval");
 
-        let (resource_str, used_val, limit_val) =
+        let (resource, resource_str, used_val, limit_val) =
             if let freebird_security::error::SecurityError::BudgetExceeded {
                 resource,
                 used,
                 limit,
             } = error
             {
-                (resource.to_string(), *used, *limit)
+                (resource.clone(), resource.to_string(), *used, *limit)
             } else {
                 return false;
             };
@@ -996,8 +1041,24 @@ impl AgentRuntime {
             .check_budget_approval(resource_str.clone(), used_val, limit_val, sender_id)
             .await
         {
-            Ok(()) => {
-                tracing::info!(%session_id, resource = %resource_str, "budget override approved by user");
+            Ok(action) => {
+                let (override_action_str, new_limit_val) =
+                    Self::resolve_budget_override(&action, &resource);
+
+                if let (Some(new_lim), Some(b)) = (new_limit_val, budget) {
+                    Self::apply_budget_limit(b, &resource, new_lim);
+                    tracing::info!(
+                        %session_id, resource = %resource_str,
+                        action = %override_action_str, new_limit = new_lim,
+                        "budget limit updated by user override"
+                    );
+                } else {
+                    tracing::info!(
+                        %session_id, resource = %resource_str,
+                        "budget override approved by user (once)"
+                    );
+                }
+
                 self.audit(
                     session_id,
                     AuditEventType::BudgetExceeded {
@@ -1005,6 +1066,8 @@ impl AgentRuntime {
                         used: used_val,
                         limit: limit_val,
                         approved: true,
+                        override_action: Some(override_action_str.into()),
+                        new_limit: new_limit_val,
                     },
                 )
                 .await;
@@ -1012,9 +1075,7 @@ impl AgentRuntime {
             }
             Err(approval_err) => {
                 tracing::warn!(
-                    %session_id,
-                    resource = %resource_str,
-                    %approval_err,
+                    %session_id, resource = %resource_str, %approval_err,
                     "budget override denied"
                 );
                 self.audit(
@@ -1024,6 +1085,8 @@ impl AgentRuntime {
                         used: used_val,
                         limit: limit_val,
                         approved: false,
+                        override_action: None,
+                        new_limit: None,
                     },
                 )
                 .await;
@@ -1082,6 +1145,7 @@ impl AgentRuntime {
                             &mut current_turn,
                             sender_id,
                             outbound,
+                            budget.as_deref(),
                         )
                         .await
                     {
@@ -1123,6 +1187,7 @@ impl AgentRuntime {
                             &mut current_turn,
                             sender_id,
                             outbound,
+                            budget.as_deref(),
                         )
                         .await
                     {
@@ -1545,6 +1610,7 @@ impl AgentRuntime {
                             &mut current_turn,
                             sender_id,
                             outbound,
+                            budget.as_deref(),
                         )
                         .await
                     {
@@ -1603,6 +1669,7 @@ impl AgentRuntime {
                             &mut current_turn,
                             sender_id,
                             outbound,
+                            budget.as_deref(),
                         )
                         .await
                     {
@@ -1770,6 +1837,22 @@ impl AgentRuntime {
         if scanned.injection_detected() {
             self.audit_model_injection(session_id).await;
         }
+    }
+}
+
+/// Parse a budget action string from the wire protocol into a typed action.
+///
+/// Wire format: `"approve_once"`, `"raise_limit:<u64>"`, `"disable_limit"`.
+fn parse_budget_action(s: &str) -> Option<freebird_security::approval::BudgetOverrideAction> {
+    use freebird_security::approval::BudgetOverrideAction;
+    match s {
+        "approve_once" => Some(BudgetOverrideAction::ApproveOnce),
+        "disable_limit" => Some(BudgetOverrideAction::DisableLimit),
+        other if other.starts_with("raise_limit:") => {
+            let val = other.strip_prefix("raise_limit:")?.parse::<u64>().ok()?;
+            Some(BudgetOverrideAction::RaiseLimit { new_limit: val })
+        }
+        _ => None,
     }
 }
 
