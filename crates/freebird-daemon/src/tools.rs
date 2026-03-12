@@ -27,6 +27,7 @@ use freebird_types::config::AppConfig;
 ///   `config.security.egress`
 /// - Repo map tool (`repo_map`) — AST-based codebase overview
 /// - Cargo verify tool (`cargo_verify`) — Rust build/test/lint/fmt pipeline
+/// - Session recall tools (`list_sessions`, `search_sessions`, `recall_session`)
 pub fn build_tool_registry(config: &AppConfig) -> Result<ToolRegistry> {
     let mut registry = ToolRegistry::new();
 
@@ -76,6 +77,9 @@ pub fn build_tool_registry(config: &AppConfig) -> Result<ToolRegistry> {
 
     // Cargo verify tool — Rust build/test/lint/fmt verification pipeline.
     registry.register_all(freebird_tools::cargo_verify::cargo_verify_tools());
+
+    // Session recall tools — list, search, and replay past conversations.
+    registry.register_all(freebird_tools::session::session_tools());
 
     tracing::info!(
         tool_count = registry.tool_count(),
@@ -204,8 +208,20 @@ format = "pretty"
         );
         assert!(registry.get("bash_exec").is_some(), "missing bash_exec");
         assert!(
-            registry.tool_count() >= 16,
-            "expected at least 16 tools, got {}",
+            registry.get("list_sessions").is_some(),
+            "missing list_sessions"
+        );
+        assert!(
+            registry.get("search_sessions").is_some(),
+            "missing search_sessions"
+        );
+        assert!(
+            registry.get("recall_session").is_some(),
+            "missing recall_session"
+        );
+        assert!(
+            registry.tool_count() >= 19,
+            "expected at least 19 tools, got {}",
             registry.tool_count()
         );
     }
