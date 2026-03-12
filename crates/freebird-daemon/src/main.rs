@@ -121,15 +121,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
         let event = freebird_security::audit::AuditEventType::DaemonStarted {
             version: env!("CARGO_PKG_VERSION").to_string(),
         };
-        let event_value = serde_json::to_value(&event).unwrap_or_default();
-        let event_type = event_value
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-        let event_json = event_value.to_string();
-        if let Err(e) = sink.record(None, event_type, &event_json).await {
-            tracing::warn!(error = %e, "failed to record DaemonStarted audit event");
-        }
+        emit_audit_event(sink.as_ref(), None, &event).await;
     }
 
     // 7. TOOLS — build registry before moving config.tools
@@ -279,15 +271,7 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
             Err(e) => format!("runtime error: {e}"),
         };
         let event = freebird_security::audit::AuditEventType::DaemonShutdown { reason };
-        let event_value = serde_json::to_value(&event).unwrap_or_default();
-        let event_type = event_value
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-        let event_json = event_value.to_string();
-        if let Err(e) = sink.record(None, event_type, &event_json).await {
-            tracing::warn!(error = %e, "failed to record DaemonShutdown audit event");
-        }
+        emit_audit_event(sink.as_ref(), None, &event).await;
     }
 
     // 15. DRAIN
@@ -300,6 +284,32 @@ async fn cmd_serve(allow_dirs: Vec<PathBuf>) -> Result<()> {
 
     tracing::info!("freebird stopped");
     run_result.map_err(Into::into)
+}
+
+/// Emit an audit event to the sink, handling serialization errors gracefully.
+///
+/// Logs a warning on failure rather than propagating — audit emission is
+/// non-fatal (availability over consistency for daemon lifecycle events).
+async fn emit_audit_event(
+    sink: &dyn freebird_traits::audit::AuditSink,
+    session_id: Option<&str>,
+    event: &freebird_security::audit::AuditEventType,
+) {
+    let event_json = match serde_json::to_string(event) {
+        Ok(json) => json,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to serialize audit event — event lost");
+            return;
+        }
+    };
+    // Extract the serde tag discriminator from the already-serialized JSON.
+    let event_type = serde_json::from_str::<serde_json::Value>(&event_json)
+        .ok()
+        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(String::from))
+        .unwrap_or_else(|| "unknown".to_owned());
+    if let Err(e) = sink.record(session_id, &event_type, &event_json).await {
+        tracing::warn!(error = %e, %event_type, "failed to record audit event");
+    }
 }
 
 /// `freebird chat` — interactive client that connects to the daemon.
