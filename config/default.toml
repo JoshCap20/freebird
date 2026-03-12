@@ -44,6 +44,7 @@ max_shell_output_bytes = 1048576
 [tools.edit]
 diff_preview = true
 diff_context_lines = 3
+syntax_validation = true
 
 [memory]
 db_path = "~/.freebird/freebird.db"

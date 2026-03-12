@@ -192,7 +192,7 @@ pub struct ToolsConfig {
     pub edit: EditConfig,
 }
 
-/// Configuration for the search/replace edit tool's diff preview.
+/// Configuration for the search/replace edit tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditConfig {
     /// Whether to append a compact diff preview to the edit tool output.
@@ -201,6 +201,10 @@ pub struct EditConfig {
     /// Number of unchanged context lines shown before/after the change.
     #[serde(default = "default_diff_context_lines")]
     pub diff_context_lines: usize,
+    /// Whether to run tree-sitter syntax validation after each edit.
+    /// Invalid edits are rejected and the original file is preserved.
+    #[serde(default = "default_syntax_validation")]
+    pub syntax_validation: bool,
 }
 
 impl Default for EditConfig {
@@ -208,6 +212,7 @@ impl Default for EditConfig {
         Self {
             diff_preview: default_diff_preview(),
             diff_context_lines: default_diff_context_lines(),
+            syntax_validation: default_syntax_validation(),
         }
     }
 }
@@ -218,6 +223,10 @@ const fn default_diff_preview() -> bool {
 
 const fn default_diff_context_lines() -> usize {
     3
+}
+
+const fn default_syntax_validation() -> bool {
+    true
 }
 
 fn default_allowed_shell_commands() -> Vec<String> {

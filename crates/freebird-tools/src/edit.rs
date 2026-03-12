@@ -8,6 +8,7 @@
 //! over unified diff and line-based diff formats (Meta agentic repair paper).
 
 use std::fmt::Write;
+use std::path::Path;
 
 use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
@@ -37,6 +38,7 @@ struct SearchReplaceEditTool {
     info: ToolInfo,
     diff_preview: bool,
     diff_context_lines: usize,
+    syntax_validation: bool,
 }
 
 impl SearchReplaceEditTool {
@@ -46,6 +48,7 @@ impl SearchReplaceEditTool {
         Self {
             diff_preview: config.diff_preview,
             diff_context_lines: config.diff_context_lines,
+            syntax_validation: config.syntax_validation,
             info: ToolInfo {
                 name: Self::NAME.into(),
                 description: "Replace an exact string in a file with new content. \
@@ -327,32 +330,12 @@ impl Tool for SearchReplaceEditTool {
         let relative = relative_path_display(&safe_path);
         let result = find_and_replace(&file_content, old_str, new_str, &relative)?;
 
-        // Atomic write: temp file + rename
-        let file_name = safe_path
-            .as_path()
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("file");
-        let tmp_path = safe_path.as_path().with_file_name(format!(
-            ".{}.{}.tmp",
-            file_name,
-            std::process::id()
-        ));
-
-        tokio::fs::write(&tmp_path, &result.content)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool: Self::NAME.into(),
-                reason: e.to_string(),
-            })?;
-
-        if let Err(e) = tokio::fs::rename(&tmp_path, safe_path.as_path()).await {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            return Err(ToolError::ExecutionFailed {
-                tool: Self::NAME.into(),
-                reason: e.to_string(),
-            });
+        // Syntax validation before write — original file untouched on failure.
+        if self.syntax_validation {
+            validate_syntax(safe_path.as_path(), &result.content)?;
         }
+
+        atomic_write(safe_path.as_path(), &result.content).await?;
 
         let mut message = format!(
             "Edited {relative}: replaced {} lines starting at line {}",
@@ -378,6 +361,29 @@ impl Tool for SearchReplaceEditTool {
             metadata: None,
         })
     }
+}
+
+/// Write content to a file atomically via temp file + rename.
+async fn atomic_write(path: &Path, content: &str) -> Result<(), ToolError> {
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let tmp_path = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
+
+    tokio::fs::write(&tmp_path, content)
+        .await
+        .map_err(|e| ToolError::ExecutionFailed {
+            tool: SearchReplaceEditTool::NAME.into(),
+            reason: e.to_string(),
+        })?;
+
+    if let Err(e) = tokio::fs::rename(&tmp_path, path).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(ToolError::ExecutionFailed {
+            tool: SearchReplaceEditTool::NAME.into(),
+            reason: e.to_string(),
+        });
+    }
+
+    Ok(())
 }
 
 /// Compute relative path display string, stripping the sandbox root.
@@ -658,6 +664,109 @@ fn find_and_replace(
     }
 }
 
+// ── Syntax Validation ────────────────────────────────────────────
+
+/// A syntax error found by tree-sitter.
+struct SyntaxError {
+    /// 1-indexed line number.
+    line: usize,
+    /// 1-indexed column number.
+    column: usize,
+    /// Node kind: `"ERROR"` or `"MISSING"`.
+    kind: &'static str,
+}
+
+/// Maximum syntax errors to collect before stopping the walk.
+const MAX_SYNTAX_ERRORS: usize = 5;
+
+/// Resolve a file extension to a tree-sitter language.
+///
+/// Returns `None` for unsupported extensions — validation is skipped.
+fn language_for_path(path: &Path) -> Option<tree_sitter::Language> {
+    let ext = path.extension().and_then(|e| e.to_str())?;
+    match ext {
+        "rs" => Some(tree_sitter_rust::LANGUAGE.into()),
+        _ => None,
+    }
+}
+
+/// Walk the tree collecting ERROR and MISSING nodes via depth-first traversal.
+fn collect_syntax_errors(tree: &tree_sitter::Tree) -> Vec<SyntaxError> {
+    let mut errors = Vec::with_capacity(MAX_SYNTAX_ERRORS);
+    let mut cursor = tree.walk();
+
+    loop {
+        let node = cursor.node();
+        if node.is_error() || node.is_missing() {
+            let pos = node.start_position();
+            errors.push(SyntaxError {
+                line: pos.row + 1,
+                column: pos.column + 1,
+                kind: if node.is_error() { "ERROR" } else { "MISSING" },
+            });
+            if errors.len() >= MAX_SYNTAX_ERRORS {
+                break;
+            }
+        }
+
+        // Depth-first: try child → sibling → parent's sibling
+        if cursor.goto_first_child() {
+            continue;
+        }
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                return errors;
+            }
+        }
+    }
+
+    errors
+}
+
+/// Validate that edited content has no syntax errors for supported languages.
+///
+/// Returns `Ok(())` for unsupported file types (validation skipped).
+fn validate_syntax(path: &Path, content: &str) -> Result<(), ToolError> {
+    let Some(language) = language_for_path(path) else {
+        return Ok(());
+    };
+
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&language)
+        .map_err(|_| ToolError::ExecutionFailed {
+            tool: SearchReplaceEditTool::NAME.into(),
+            reason: "failed to initialize syntax parser".into(),
+        })?;
+
+    let Some(tree) = parser.parse(content.as_bytes(), None) else {
+        // parse() returns None on cancellation — treat as skip
+        return Ok(());
+    };
+
+    let errors = collect_syntax_errors(&tree);
+    if errors.is_empty() {
+        return Ok(());
+    }
+
+    let error_count = errors.len();
+    let mut msg = String::from("Edit rejected — syntax errors detected (file not modified):\n");
+    for err in &errors {
+        let _ = writeln!(msg, "  line {}:{} — {}", err.line, err.column, err.kind);
+    }
+
+    tracing::debug!(
+        path = %path.display(),
+        error_count,
+        "syntax validation rejected edit"
+    );
+
+    Err(ToolError::ExecutionFailed {
+        tool: SearchReplaceEditTool::NAME.into(),
+        reason: msg,
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
@@ -706,11 +815,20 @@ mod tests {
         }
     }
 
+    /// Config for tests that don't exercise syntax validation.
+    /// Validation is off so edits to Rust snippets don't need to be full programs.
+    fn test_config() -> EditConfig {
+        EditConfig {
+            syntax_validation: false,
+            ..EditConfig::default()
+        }
+    }
+
     // ── Factory test ─────────────────────────────────────────────
 
     #[test]
     fn test_edit_tool_info() {
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         let info = tool.info();
         assert_eq!(info.name, "search_replace_edit");
         assert_eq!(info.required_capability, Capability::FileWrite);
@@ -729,7 +847,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         let output = tool
             .execute(
                 serde_json::json!({
@@ -753,7 +871,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("file.rs"), "fn main() {}\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         let err = tool
             .execute(
                 serde_json::json!({
@@ -783,7 +901,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         let err = tool
             .execute(
                 serde_json::json!({
@@ -809,7 +927,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("file.rs"), "line1\nDELETE_ME\nline3\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         let output = tool
             .execute(
                 serde_json::json!({
@@ -832,7 +950,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("file.rs"), "content\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         let err = tool
             .execute(
                 serde_json::json!({
@@ -859,7 +977,7 @@ mod tests {
         let original = "fn main() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n    let d = 4;\n    let e = 5;\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         let output = tool
             .execute(
                 serde_json::json!({
@@ -886,7 +1004,7 @@ mod tests {
         let original = "BEFORE\nTARGET\nAFTER\n";
         std::fs::write(h.path().join("file.txt"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         tool.execute(
             serde_json::json!({
                 "path": "file.txt",
@@ -912,7 +1030,7 @@ mod tests {
         // File has single spaces
         std::fs::write(h.path().join("file.rs"), "fn main() {\n    let x = 1;\n}\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         // old_string has extra spaces — exact match fails, normalized match succeeds
         let output = tool
             .execute(
@@ -937,7 +1055,7 @@ mod tests {
         // File has 2-space indent
         std::fs::write(h.path().join("file.rs"), "fn main() {\n  let x = 1;\n}\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         // old_string has 4-space indent — normalized match should work
         let output = tool
             .execute(
@@ -966,7 +1084,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         // All three lines normalize to "let x = 1;"
         let err = tool
             .execute(
@@ -999,7 +1117,7 @@ mod tests {
         let original = "fn main() {\n    if true {\n        let x = 1;\n    }\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1025,7 +1143,7 @@ mod tests {
             "fn main() {\n    if true {\n        old_line_1\n        old_line_2\n    }\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         // new_string has no indentation — indentation preservation should add 8 spaces
         let output = tool
             .execute(
@@ -1053,7 +1171,7 @@ mod tests {
     #[tokio::test]
     async fn test_path_traversal_rejected() {
         let h = TestHarness::new();
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
 
         let err = tool
             .execute(
@@ -1076,7 +1194,7 @@ mod tests {
     #[tokio::test]
     async fn test_nonexistent_file_returns_error() {
         let h = TestHarness::new();
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
 
         let err = tool
             .execute(
@@ -1101,7 +1219,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("src.rs"), "old\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1134,7 +1252,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("clean.rs"), "old_text\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         tool.execute(
             serde_json::json!({
                 "path": "clean.rs",
@@ -1163,7 +1281,7 @@ mod tests {
         let original = "unchanged content\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         let _ = tool
             .execute(
                 serde_json::json!({
@@ -1191,7 +1309,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         // Use normalized fallback (extra spaces)
         let output = tool
             .execute(
@@ -1218,7 +1336,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("file.rs"), "content\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         let err = tool
             .execute(
                 serde_json::json!({
@@ -1242,7 +1360,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_edit_tools_factory() {
-        let tools = edit_tools(&EditConfig::default());
+        let tools = edit_tools(&test_config());
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].info().name, "search_replace_edit");
 
@@ -1265,7 +1383,7 @@ mod tests {
             f.set_len((super::MAX_EDIT_FILE_BYTES + 1) as u64).unwrap();
         }
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         let err = tool
             .execute(
                 serde_json::json!({
@@ -1299,7 +1417,7 @@ mod tests {
             f.write_all(&[0xFF, 0xFE, 0x00, 0x01]).unwrap();
         }
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         let err = tool
             .execute(
                 serde_json::json!({
@@ -1335,7 +1453,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1366,7 +1484,7 @@ mod tests {
             "fn main() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n    let w = 4;\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         // old_string has one line wrong ("let y = 999" instead of "let y = 2")
         // 4 out of 5 lines match (80%) — should fuzzy match
         let output = tool
@@ -1393,7 +1511,7 @@ mod tests {
         let original = "fn main() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         // old_string has 2 out of 3 lines wrong — below 60% threshold
         let err = tool
             .execute(
@@ -1422,7 +1540,7 @@ mod tests {
         let original = "fn a() {\n    let x = 1;\n    let y = 2;\n}\nfn b() {\n    let x = 1;\n    let y = 2;\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         // Fuzzy search with one wrong line — matches both blocks equally
         let err = tool
             .execute(
@@ -1534,7 +1652,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1572,6 +1690,7 @@ mod tests {
         let tool = SearchReplaceEditTool::new(&EditConfig {
             diff_preview: true,
             diff_context_lines: 3,
+            syntax_validation: false,
         });
         let output = tool
             .execute(
@@ -1612,7 +1731,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1638,7 +1757,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("src.rs"), "aaa\nbbb\nccc\nddd\neee\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1664,7 +1783,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("src.rs"), "aaa\nbbb\nccc\nddd\neee\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1689,7 +1808,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("src.rs"), "aaa\nbbb\nccc\nddd\neee\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1722,7 +1841,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1754,6 +1873,7 @@ mod tests {
         let tool = SearchReplaceEditTool::new(&EditConfig {
             diff_preview: false,
             diff_context_lines: 3,
+            syntax_validation: false,
         });
         let output = tool
             .execute(
@@ -1799,7 +1919,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1830,7 +1950,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig::default());
+        let tool = SearchReplaceEditTool::new(&test_config());
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1860,6 +1980,7 @@ mod tests {
         let tool = SearchReplaceEditTool::new(&EditConfig {
             diff_preview: true,
             diff_context_lines: 0,
+            syntax_validation: false,
         });
         let output = tool
             .execute(
@@ -1926,7 +2047,7 @@ mod tests {
                     .unwrap();
                 rt.block_on(async {
                     let h = TestHarness::new();
-                    let tool = SearchReplaceEditTool::new(&EditConfig::default());
+                    let tool = SearchReplaceEditTool::new(&test_config());
 
                     let traversal = format!("{}{}", "../".repeat(depth), suffix);
                     let result = tool
@@ -1971,7 +2092,7 @@ mod tests {
                     let content = format!("{prefix}\n{old_text}\n{suffix}\n");
                     std::fs::write(h.path().join(&name), &content).unwrap();
 
-                    let tool = SearchReplaceEditTool::new(&EditConfig::default());
+                    let tool = SearchReplaceEditTool::new(&test_config());
                     let result = tool
                         .execute(
                             serde_json::json!({
@@ -2008,7 +2129,7 @@ mod tests {
                     let h = TestHarness::new();
                     std::fs::write(h.path().join(&name), "old_unique_sentinel\n").unwrap();
 
-                    let tool = SearchReplaceEditTool::new(&EditConfig::default());
+                    let tool = SearchReplaceEditTool::new(&test_config());
                     let output = tool
                         .execute(
                             serde_json::json!({
@@ -2050,6 +2171,241 @@ mod tests {
                         "offset {} len {} doesn't match", sl.byte_offset, sl.text.len());
                 }
             }
+
+            /// validate_syntax never panics on arbitrary input.
+            #[test]
+            fn validate_syntax_never_panics(content in "\\PC{0,2000}") {
+                let path = Path::new("test.rs");
+                // Must not panic — may return Ok or Err, both are fine
+                let _ = validate_syntax(path, &content);
+            }
         }
+    }
+
+    // ── Syntax validation unit tests ─────────────────────────────
+
+    #[test]
+    fn test_language_for_path_rs() {
+        let path = Path::new("src/main.rs");
+        assert!(language_for_path(path).is_some());
+    }
+
+    #[test]
+    fn test_language_for_path_unknown() {
+        assert!(language_for_path(Path::new("file.txt")).is_none());
+        assert!(language_for_path(Path::new("file.py")).is_none());
+        assert!(language_for_path(Path::new("file.js")).is_none());
+        assert!(language_for_path(Path::new("no_extension")).is_none());
+    }
+
+    #[test]
+    fn test_validate_syntax_valid_rust() {
+        let path = Path::new("test.rs");
+        let content = "fn main() {\n    let x = 42;\n}\n";
+        assert!(validate_syntax(path, content).is_ok());
+    }
+
+    #[test]
+    fn test_validate_syntax_invalid_rust() {
+        let path = Path::new("test.rs");
+        let content = "fn main( {\n    let x = 42;\n}\n";
+        let err = validate_syntax(path, content).unwrap_err();
+        match err {
+            ToolError::ExecutionFailed { reason, .. } => {
+                assert!(reason.contains("syntax errors detected"), "got: {reason}");
+                assert!(reason.contains("file not modified"), "got: {reason}");
+            }
+            other => panic!("expected ExecutionFailed, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_syntax_unknown_extension() {
+        let path = Path::new("readme.txt");
+        let content = "this is not valid rust at all fn {{{";
+        assert!(validate_syntax(path, content).is_ok());
+    }
+
+    #[test]
+    fn test_validate_syntax_empty_content() {
+        let path = Path::new("empty.rs");
+        assert!(validate_syntax(path, "").is_ok());
+    }
+
+    #[test]
+    fn test_collect_syntax_errors_multiple() {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
+            .unwrap();
+        // Multiple syntax errors: broken function signatures
+        let content = "fn a( { } fn b( { } fn c( { } fn d( { } fn e( { } fn f( { }";
+        let tree = parser.parse(content.as_bytes(), None).unwrap();
+        let errors = collect_syntax_errors(&tree);
+        assert!(
+            !errors.is_empty(),
+            "should detect syntax errors in broken code"
+        );
+        assert!(
+            errors.len() <= MAX_SYNTAX_ERRORS,
+            "should cap at {MAX_SYNTAX_ERRORS}, got {}",
+            errors.len()
+        );
+    }
+
+    #[test]
+    fn test_error_message_includes_line_column() {
+        let path = Path::new("test.rs");
+        // Missing closing paren on line 2
+        let content = "fn main() {\n    let x = foo(;\n}\n";
+        let err = validate_syntax(path, content).unwrap_err();
+        match err {
+            ToolError::ExecutionFailed { reason, .. } => {
+                // Should contain "line N:M" format
+                assert!(
+                    reason.contains("line "),
+                    "error should include line numbers, got: {reason}"
+                );
+            }
+            other => panic!("expected ExecutionFailed, got: {other:?}"),
+        }
+    }
+
+    // ── Syntax validation integration tests ──────────────────────
+
+    #[tokio::test]
+    async fn test_edit_rejects_syntax_breaking_change() {
+        let h = TestHarness::new();
+        let original = "fn hello() {\n    println!(\"hi\");\n}\n";
+        std::fs::write(h.path().join("code.rs"), original).unwrap();
+
+        let tool = SearchReplaceEditTool::new(&EditConfig {
+            syntax_validation: true,
+            ..EditConfig::default()
+        });
+
+        // Remove the closing brace — breaks syntax
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": "code.rs",
+                    "old_string": "}\n",
+                    "new_string": ""
+                }),
+                &h.context(),
+            )
+            .await;
+
+        assert!(result.is_err(), "edit should be rejected");
+        // Original file must be untouched
+        let on_disk = std::fs::read_to_string(h.path().join("code.rs")).unwrap();
+        assert_eq!(on_disk, original, "original file must be preserved exactly");
+    }
+
+    #[tokio::test]
+    async fn test_edit_allows_valid_syntax_change() {
+        let h = TestHarness::new();
+        std::fs::write(
+            h.path().join("valid.rs"),
+            "fn hello() {\n    println!(\"hi\");\n}\n",
+        )
+        .unwrap();
+
+        let tool = SearchReplaceEditTool::new(&EditConfig {
+            syntax_validation: true,
+            ..EditConfig::default()
+        });
+
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "path": "valid.rs",
+                    "old_string": "fn hello()",
+                    "new_string": "fn greet()"
+                }),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(output.outcome, ToolOutcome::Success));
+        let content = std::fs::read_to_string(h.path().join("valid.rs")).unwrap();
+        assert!(content.contains("fn greet()"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_skips_validation_for_non_rust() {
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("notes.txt"), "hello world").unwrap();
+
+        let tool = SearchReplaceEditTool::new(&EditConfig {
+            syntax_validation: true,
+            ..EditConfig::default()
+        });
+
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "path": "notes.txt",
+                    "old_string": "hello world",
+                    "new_string": "fn broken( {{{"
+                }),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(output.outcome, ToolOutcome::Success));
+    }
+
+    #[tokio::test]
+    async fn test_edit_skips_validation_when_disabled() {
+        let h = TestHarness::new();
+        let original = "fn hello() {\n    println!(\"hi\");\n}\n";
+        std::fs::write(h.path().join("code.rs"), original).unwrap();
+
+        let tool = SearchReplaceEditTool::new(&EditConfig {
+            syntax_validation: false,
+            ..EditConfig::default()
+        });
+
+        // Remove closing brace — breaks syntax, but validation is off
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "path": "code.rs",
+                    "old_string": "}\n",
+                    "new_string": ""
+                }),
+                &h.context(),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(output.outcome, ToolOutcome::Success));
+    }
+
+    #[test]
+    fn test_syntax_validation_latency() {
+        // Generate a large valid Rust file
+        let mut content = String::with_capacity(300_000);
+        for i in 0..10_000 {
+            use std::fmt::Write;
+            let _ = writeln!(content, "fn func_{i}() {{ let _x = {i}; }}");
+        }
+
+        let path = Path::new("big.rs");
+        let start = std::time::Instant::now();
+        let result = validate_syntax(path, &content);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok(), "valid large file should pass");
+        // In release mode tree-sitter parses this in <10ms.
+        // Debug builds are ~20x slower, so use a generous threshold.
+        assert!(
+            elapsed.as_millis() < 500,
+            "validation took {}ms, expected <500ms (debug)",
+            elapsed.as_millis()
+        );
     }
 }
