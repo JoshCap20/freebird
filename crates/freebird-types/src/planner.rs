@@ -344,10 +344,7 @@ fn dfs_find_cycle(
     path.push(node_id(slots, start));
     stack.push((start, 0));
 
-    loop {
-        let Some(&mut (node, ref mut cursor)) = stack.last_mut() else {
-            break;
-        };
+    while let Some(&mut (node, ref mut cursor)) = stack.last_mut() {
         let neighbors = forward.get(node).map_or(&[] as &[usize], Vec::as_slice);
         if *cursor < neighbors.len() {
             let Some(&next) = neighbors.get(*cursor) else {
@@ -377,7 +374,7 @@ fn dfs_find_cycle(
                 stack.push((next, 0));
             }
         } else {
-            // Backtrack
+            // Backtrack — `node` is a copy (usize), safe to use after pop.
             stack.pop();
             path.pop();
             if let Some(v) = on_stack.get_mut(node) {
