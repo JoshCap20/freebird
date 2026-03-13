@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
-use freebird_security::taint::TaintedToolInput;
+use freebird_security::safe_types::SafeFilePath;
+use freebird_security::taint::Tainted;
 use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
     ToolOutput,
@@ -176,7 +177,11 @@ struct InputChange {
     crate_kind: Option<CrateKind>,
 }
 
-fn parse_input(input: &serde_json::Value) -> Result<(Vec<InputChange>, bool), ToolError> {
+fn parse_input(
+    input: &serde_json::Value,
+    sandbox_root: &Path,
+    allowed_dirs: &[PathBuf],
+) -> Result<(Vec<InputChange>, bool), ToolError> {
     let auto_detect = input
         .get("auto_detect")
         .and_then(serde_json::Value::as_bool)
@@ -190,7 +195,6 @@ fn parse_input(input: &serde_json::Value) -> Result<(Vec<InputChange>, bool), To
             reason: "missing or invalid 'changes' array".into(),
         })?;
 
-    let tainted = TaintedToolInput::new(input.clone());
     let mut changes = Vec::with_capacity(changes_arr.len());
 
     for (i, entry) in changes_arr.iter().enumerate() {
@@ -210,6 +214,20 @@ fn parse_input(input: &serde_json::Value) -> Result<(Vec<InputChange>, bool), To
                 tool: PlanEditsTool::NAME.into(),
                 reason: format!("change[{i}]: missing or invalid 'file_path'"),
             })?;
+
+        // Validate path through taint boundary — rejects traversal, symlinks, etc.
+        // Uses `for_creation` variant because the planner orders *future* edits;
+        // the target files may not exist yet.
+        let tainted_path = Tainted::new(file_path_str);
+        let safe_path = SafeFilePath::from_tainted_for_creation_multi_root(
+            &tainted_path,
+            sandbox_root,
+            allowed_dirs,
+        )
+        .map_err(|e| ToolError::InvalidInput {
+            tool: PlanEditsTool::NAME.into(),
+            reason: format!("change[{i}]: {e}"),
+        })?;
 
         let description = entry
             .get("description")
@@ -257,12 +275,9 @@ fn parse_input(input: &serde_json::Value) -> Result<(Vec<InputChange>, bool), To
             }
         }
 
-        // Use TaintedToolInput to extract the file path safely
-        let _ = &tainted;
-
         changes.push(InputChange {
             id,
-            file_path: PathBuf::from(file_path_str),
+            file_path: safe_path.as_path().to_path_buf(),
             description,
             depends_on,
             change_kind,
@@ -347,8 +362,10 @@ impl Tool for PlanEditsTool {
         input: serde_json::Value,
         context: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError> {
-        let (input_changes, auto_detect) = parse_input(&input)?;
+        let (input_changes, auto_detect) =
+            parse_input(&input, context.sandbox_root, context.allowed_directories)?;
 
+        // Paths are already resolved to absolute by SafeFilePath validation
         let file_paths: Vec<PathBuf> = input_changes.iter().map(|c| c.file_path.clone()).collect();
 
         // Auto-detection: parse files, build reference graph
@@ -361,40 +378,29 @@ impl Tool for PlanEditsTool {
         // Build file_path → change_id mapping for dependency inference
         let file_id_map: HashMap<PathBuf, usize> = input_changes
             .iter()
-            .map(|c| {
-                let abs = if c.file_path.is_absolute() {
-                    c.file_path.clone()
-                } else {
-                    context.sandbox_root.join(&c.file_path)
-                };
-                (abs, c.id)
-            })
+            .map(|c| (c.file_path.clone(), c.id))
             .collect();
 
         // Resolve each change: merge explicit + inferred values
         let mut planned: Vec<PlannedChange> = Vec::with_capacity(input_changes.len());
         for ic in input_changes {
-            let abs_path = if ic.file_path.is_absolute() {
-                ic.file_path.clone()
-            } else {
-                context.sandbox_root.join(&ic.file_path)
-            };
-
             // Infer change_kind from tags if not explicit
             let change_kind = ic.change_kind.unwrap_or_else(|| {
                 tags_by_file
-                    .get(&abs_path)
+                    .get(&ic.file_path)
                     .map_or(ChangeKind::Consumer, |tags| {
-                        infer_change_kind(tags, &abs_path)
+                        infer_change_kind(tags, &ic.file_path)
                     })
             });
 
             // Infer crate_kind from path if not explicit
-            let crate_kind = ic.crate_kind.unwrap_or_else(|| infer_crate_kind(&abs_path));
+            let crate_kind = ic
+                .crate_kind
+                .unwrap_or_else(|| infer_crate_kind(&ic.file_path));
 
             // Infer + merge dependencies
             let depends_on = if auto_detect {
-                let inferred = infer_dependencies(&abs_path, &graph, &file_id_map);
+                let inferred = infer_dependencies(&ic.file_path, &graph, &file_id_map);
                 if let Some(explicit) = ic.depends_on {
                     // Union of explicit + inferred, deduplicated
                     let mut merged = explicit;
@@ -428,7 +434,12 @@ impl Tool for PlanEditsTool {
         // Run the topological sort
         match freebird_types::planner::plan_changes(planned) {
             Ok(plan) => {
-                let json = serde_json::to_string_pretty(&plan).unwrap_or_default();
+                let json = serde_json::to_string_pretty(&plan).map_err(|e| {
+                    ToolError::ExecutionFailed {
+                        tool: Self::NAME.into(),
+                        reason: format!("failed to serialize plan: {e}"),
+                    }
+                })?;
                 Ok(ToolOutput {
                     content: json,
                     outcome: ToolOutcome::Success,
@@ -681,6 +692,9 @@ mod tests {
 
     #[test]
     fn test_auto_detect_false_requires_all_fields() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sandbox = tmp.path();
+
         let input = serde_json::json!({
             "changes": [{
                 "id": 0,
@@ -691,7 +705,7 @@ mod tests {
             "auto_detect": false
         });
 
-        let err = parse_input(&input).unwrap_err();
+        let err = parse_input(&input, sandbox, &[]).unwrap_err();
         assert!(matches!(err, ToolError::InvalidInput { .. }));
     }
 }

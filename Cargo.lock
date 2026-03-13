@@ -601,8 +601,10 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "freebird-traits",
+ "proptest",
  "serde",
  "serde_json",
+ "thiserror",
  "toml",
  "uuid",
 ]
