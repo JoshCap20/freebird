@@ -33,6 +33,7 @@ pub struct FreebirdApp {
     pub(crate) runtime: freebird_runtime::agent::AgentRuntime,
     pub(crate) audit_sink: Option<Arc<dyn freebird_traits::audit::AuditSink>>,
     pub(crate) memory: Arc<dyn freebird_traits::memory::Memory>,
+    pub(crate) revocation_list: Arc<freebird_security::capability::RevocationList>,
 }
 
 impl FreebirdApp {
@@ -55,5 +56,10 @@ impl FreebirdApp {
     /// Access the memory backend (e.g. for replay).
     pub fn memory(&self) -> &Arc<dyn freebird_traits::memory::Memory> {
         &self.memory
+    }
+
+    /// Access the revocation list for immediate session capability revocation.
+    pub const fn revocation_list(&self) -> &Arc<freebird_security::capability::RevocationList> {
+        &self.revocation_list
     }
 }
