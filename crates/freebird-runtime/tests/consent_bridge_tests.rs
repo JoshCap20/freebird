@@ -182,8 +182,9 @@ async fn test_consent_request_forwarded_to_channel() {
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
         vec![],
         Some(gate),
-        None,
-        None,
+        Some(Arc::new(helpers::NoopKnowledgeStore)
+            as Arc<dyn freebird_traits::knowledge::KnowledgeStore>),
+        Some(Arc::new(helpers::NoopMemory) as Arc<dyn freebird_traits::memory::Memory>),
         None,
         InjectionConfig::default(),
         Some(Arc::new(
@@ -309,8 +310,9 @@ async fn test_consent_approved_executes_tool() {
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
         vec![],
         Some(gate),
-        None,
-        None,
+        Some(Arc::new(helpers::NoopKnowledgeStore)
+            as Arc<dyn freebird_traits::knowledge::KnowledgeStore>),
+        Some(Arc::new(helpers::NoopMemory) as Arc<dyn freebird_traits::memory::Memory>),
         None,
         InjectionConfig::default(),
         Some(Arc::new(
@@ -445,8 +447,9 @@ async fn test_consent_denied_returns_error_to_provider() {
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
         vec![],
         Some(gate),
-        None,
-        None,
+        Some(Arc::new(helpers::NoopKnowledgeStore)
+            as Arc<dyn freebird_traits::knowledge::KnowledgeStore>),
+        Some(Arc::new(helpers::NoopMemory) as Arc<dyn freebird_traits::memory::Memory>),
         None,
         InjectionConfig::default(),
         Some(Arc::new(
@@ -580,8 +583,9 @@ async fn test_consent_low_risk_no_prompt() {
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
         vec![],
         Some(gate),
-        None,
-        None,
+        Some(Arc::new(helpers::NoopKnowledgeStore)
+            as Arc<dyn freebird_traits::knowledge::KnowledgeStore>),
+        Some(Arc::new(helpers::NoopMemory) as Arc<dyn freebird_traits::memory::Memory>),
         None,
         InjectionConfig::default(),
         Some(Arc::new(
@@ -685,8 +689,9 @@ async fn test_consent_no_gate_executes_freely() {
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
         vec![],
         None,
-        None,
-        None,
+        Some(Arc::new(helpers::NoopKnowledgeStore)
+            as Arc<dyn freebird_traits::knowledge::KnowledgeStore>),
+        Some(Arc::new(helpers::NoopMemory) as Arc<dyn freebird_traits::memory::Memory>),
         None,
         InjectionConfig::default(),
         Some(Arc::new(
@@ -774,8 +779,9 @@ async fn test_consent_response_unknown_id_logged() {
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
         vec![],
         Some(gate),
-        None,
-        None,
+        Some(Arc::new(helpers::NoopKnowledgeStore)
+            as Arc<dyn freebird_traits::knowledge::KnowledgeStore>),
+        Some(Arc::new(helpers::NoopMemory) as Arc<dyn freebird_traits::memory::Memory>),
         None,
         InjectionConfig::default(),
         Some(Arc::new(

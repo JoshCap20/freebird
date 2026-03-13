@@ -697,8 +697,9 @@ async fn test_tool_use_timeout() {
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
         vec![],
         None,
-        None,
-        None,
+        Some(Arc::new(helpers::NoopKnowledgeStore)
+            as Arc<dyn freebird_traits::knowledge::KnowledgeStore>),
+        Some(Arc::new(helpers::NoopMemory) as Arc<dyn freebird_traits::memory::Memory>),
         None,
         InjectionConfig::default(),
         Some(Arc::new(
