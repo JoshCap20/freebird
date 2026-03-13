@@ -513,8 +513,8 @@ fn make_stream_runtime(
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     )
 }
 
@@ -691,8 +691,8 @@ async fn test_streaming_fallback_on_stream_setup_failure() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -729,8 +729,8 @@ async fn test_non_streaming_channel_uses_non_streaming_path() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -819,8 +819,8 @@ async fn test_streaming_conversation_persisted() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     );
 
     let _events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi there").await;
@@ -983,8 +983,8 @@ async fn test_streaming_max_tool_rounds_exceeded() {
             ..BudgetConfig::default()
         },
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Loop forever").await;
@@ -1030,8 +1030,8 @@ async fn test_streaming_stop_sequence() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -1124,8 +1124,8 @@ async fn test_non_streaming_provider_uses_complete_path() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -1169,8 +1169,8 @@ async fn test_streaming_empty_done() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;

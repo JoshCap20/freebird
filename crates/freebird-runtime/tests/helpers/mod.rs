@@ -18,10 +18,13 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use freebird_runtime::registry::ProviderRegistry;
 use freebird_runtime::tool_executor::ToolExecutor;
+use freebird_traits::audit::AuditSink;
 use freebird_traits::channel::{
     AuthRequirement, Channel, ChannelError, ChannelHandle, ChannelInfo, InboundEvent, OutboundEvent,
 };
-use freebird_traits::id::{ChannelId, ModelId, ProviderId};
+use freebird_traits::event::{ConversationEvent, EventSink};
+use freebird_traits::id::{ChannelId, ModelId, ProviderId, SessionId};
+use freebird_traits::memory::MemoryError;
 use freebird_traits::provider::{
     CompletionRequest, CompletionResponse, Provider, ProviderError, ProviderFeature, ProviderInfo,
     StreamEvent,
@@ -196,6 +199,81 @@ impl Provider for ArcProvider {
 }
 
 // ---------------------------------------------------------------------------
+// MockEventSink — records events for test inspection
+// ---------------------------------------------------------------------------
+
+/// Records every appended event so tests can verify event emission.
+pub struct MockEventSink {
+    events: TokioMutex<Vec<(SessionId, ConversationEvent)>>,
+}
+
+impl MockEventSink {
+    pub fn new() -> Self {
+        Self {
+            events: TokioMutex::new(Vec::new()),
+        }
+    }
+
+    pub async fn events(&self) -> Vec<(SessionId, ConversationEvent)> {
+        self.events.lock().await.clone()
+    }
+}
+
+#[async_trait]
+impl EventSink for MockEventSink {
+    async fn append(
+        &self,
+        session_id: &SessionId,
+        event: ConversationEvent,
+    ) -> Result<(), MemoryError> {
+        self.events.lock().await.push((session_id.clone(), event));
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockAuditSink — records audit events for test inspection
+// ---------------------------------------------------------------------------
+
+/// Records every audit event so tests can verify audit logging.
+pub struct MockAuditSink {
+    events: TokioMutex<Vec<(Option<String>, String, String)>>,
+}
+
+impl MockAuditSink {
+    pub fn new() -> Self {
+        Self {
+            events: TokioMutex::new(Vec::new()),
+        }
+    }
+
+    pub async fn events(&self) -> Vec<(Option<String>, String, String)> {
+        self.events.lock().await.clone()
+    }
+}
+
+#[async_trait]
+impl AuditSink for MockAuditSink {
+    async fn record(
+        &self,
+        session_id: Option<&str>,
+        event_type: &str,
+        event_json: &str,
+    ) -> Result<(), MemoryError> {
+        self.events.lock().await.push((
+            session_id.map(String::from),
+            event_type.to_owned(),
+            event_json.to_owned(),
+        ));
+        Ok(())
+    }
+
+    async fn verify_chain(&self) -> Result<(), MemoryError> {
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Config + runtime helpers
 // ---------------------------------------------------------------------------
 
@@ -225,10 +303,17 @@ pub fn default_tools_config() -> ToolsConfig {
 }
 
 pub fn make_tool_executor(tools: Vec<Box<dyn Tool>>) -> ToolExecutor {
+    make_tool_executor_with_audit(tools, Arc::new(MockAuditSink::new()))
+}
+
+pub fn make_tool_executor_with_audit(
+    tools: Vec<Box<dyn Tool>>,
+    audit_sink: Arc<MockAuditSink>,
+) -> ToolExecutor {
     ToolExecutor::new(
         tools,
         Duration::from_secs(30),
-        None,
+        Some(audit_sink as Arc<dyn AuditSink>),
         vec![],
         None,
         None,

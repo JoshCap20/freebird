@@ -179,7 +179,7 @@ async fn test_consent_request_forwarded_to_channel() {
     let executor = ToolExecutor::new(
         vec![Box::new(tool)],
         Duration::from_secs(30),
-        None,
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
         vec![],
         Some(gate),
         None,
@@ -202,8 +202,8 @@ async fn test_consent_request_forwarded_to_channel() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     );
 
     // Send message that triggers the high-risk tool
@@ -304,7 +304,7 @@ async fn test_consent_approved_executes_tool() {
     let executor = ToolExecutor::new(
         vec![Box::new(tool)],
         Duration::from_secs(30),
-        None,
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
         vec![],
         Some(gate),
         None,
@@ -327,8 +327,8 @@ async fn test_consent_approved_executes_tool() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     );
 
     inbound_tx
@@ -438,7 +438,7 @@ async fn test_consent_denied_returns_error_to_provider() {
     let executor = ToolExecutor::new(
         vec![Box::new(tool)],
         Duration::from_secs(30),
-        None,
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
         vec![],
         Some(gate),
         None,
@@ -461,8 +461,8 @@ async fn test_consent_denied_returns_error_to_provider() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     );
 
     inbound_tx
@@ -571,7 +571,7 @@ async fn test_consent_low_risk_no_prompt() {
     let executor = ToolExecutor::new(
         vec![Box::new(tool)],
         Duration::from_secs(30),
-        None,
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
         vec![],
         Some(gate),
         None,
@@ -594,8 +594,8 @@ async fn test_consent_low_risk_no_prompt() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     );
 
     inbound_tx
@@ -674,7 +674,7 @@ async fn test_consent_no_gate_executes_freely() {
     let executor = ToolExecutor::new(
         vec![Box::new(tool)],
         Duration::from_secs(30),
-        None,
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
         vec![],
         None,
         None,
@@ -697,8 +697,8 @@ async fn test_consent_no_gate_executes_freely() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     );
 
     inbound_tx
@@ -761,7 +761,7 @@ async fn test_consent_response_unknown_id_logged() {
     let executor = ToolExecutor::new(
         vec![],
         Duration::from_secs(30),
-        None,
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
         vec![],
         Some(gate),
         None,
@@ -784,8 +784,8 @@ async fn test_consent_response_unknown_id_logged() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     );
 
     // Send a bogus approval response

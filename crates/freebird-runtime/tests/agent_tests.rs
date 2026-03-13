@@ -80,8 +80,8 @@ fn make_runtime(channel: MockChannel) -> AgentRuntime {
         },
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     )
 }
 
