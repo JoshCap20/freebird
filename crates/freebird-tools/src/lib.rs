@@ -9,6 +9,7 @@ pub mod bash;
 pub mod cargo_verify;
 mod common;
 pub mod edit;
+pub(crate) mod edit_history;
 pub mod filesystem;
 pub mod glob_find;
 pub mod grep;

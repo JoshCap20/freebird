@@ -7,12 +7,15 @@
 //! Research shows search/replace format has a 23–27 percentage point improvement
 //! over unified diff and line-based diff formats (Meta agentic repair paper).
 
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::path::Path;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 
+use crate::edit_history::EditHistory;
 use freebird_security::taint::TaintedToolInput;
 use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
@@ -26,10 +29,19 @@ use freebird_types::config::EditConfig;
 /// context window can't usefully represent files larger than this anyway.
 const MAX_EDIT_FILE_BYTES: usize = 10 * 1024 * 1024;
 
-/// Returns the search/replace edit tool as a trait object.
+/// Returns the edit, undo, and checkpoint tools as trait objects.
+///
+/// All tools share an `Arc<EditHistory>` for session-scoped undo and
+/// checkpoint state.
 #[must_use]
 pub fn edit_tools(config: &EditConfig) -> Vec<Box<dyn Tool>> {
-    vec![Box::new(SearchReplaceEditTool::new(config))]
+    let history = Arc::new(EditHistory::new());
+    vec![
+        Box::new(SearchReplaceEditTool::new(config, Arc::clone(&history))),
+        Box::new(UndoEditTool::new(Arc::clone(&history))),
+        Box::new(CreateCheckpointTool::new(Arc::clone(&history))),
+        Box::new(RollbackToCheckpointTool::new(Arc::clone(&history))),
+    ]
 }
 
 // ── SearchReplaceEditTool ──────────────────────────────────────────
@@ -39,16 +51,18 @@ struct SearchReplaceEditTool {
     diff_preview: bool,
     diff_context_lines: usize,
     syntax_validation: bool,
+    history: Arc<EditHistory>,
 }
 
 impl SearchReplaceEditTool {
     const NAME: &str = "search_replace_edit";
 
-    fn new(config: &EditConfig) -> Self {
+    fn new(config: &EditConfig, history: Arc<EditHistory>) -> Self {
         Self {
             diff_preview: config.diff_preview,
             diff_context_lines: config.diff_context_lines,
             syntax_validation: config.syntax_validation,
+            history,
             info: ToolInfo {
                 name: Self::NAME.into(),
                 description: "Replace an exact string in a file with new content. \
@@ -335,7 +349,7 @@ impl Tool for SearchReplaceEditTool {
             validate_syntax(safe_path.as_path(), &result.content)?;
         }
 
-        atomic_write(safe_path.as_path(), &result.content).await?;
+        atomic_write(safe_path.as_path(), &result.content, Self::NAME).await?;
 
         let mut message = format!(
             "Edited {relative}: replaced {} lines starting at line {}",
@@ -355,6 +369,14 @@ impl Tool for SearchReplaceEditTool {
             message.push_str(&diff);
         }
 
+        // Record pre-edit content for undo support — AFTER successful write,
+        // so failed writes don't create phantom undo entries.
+        self.history.record_pre_edit(
+            context.session_id,
+            safe_path.as_path().to_path_buf(),
+            file_content,
+        );
+
         Ok(ToolOutput {
             content: message,
             outcome: ToolOutcome::Success,
@@ -364,21 +386,21 @@ impl Tool for SearchReplaceEditTool {
 }
 
 /// Write content to a file atomically via temp file + rename.
-async fn atomic_write(path: &Path, content: &str) -> Result<(), ToolError> {
+async fn atomic_write(path: &Path, content: &str, tool_name: &str) -> Result<(), ToolError> {
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     let tmp_path = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
 
     tokio::fs::write(&tmp_path, content)
         .await
         .map_err(|e| ToolError::ExecutionFailed {
-            tool: SearchReplaceEditTool::NAME.into(),
+            tool: tool_name.into(),
             reason: e.to_string(),
         })?;
 
     if let Err(e) = tokio::fs::rename(&tmp_path, path).await {
         let _ = tokio::fs::remove_file(&tmp_path).await;
         return Err(ToolError::ExecutionFailed {
-            tool: SearchReplaceEditTool::NAME.into(),
+            tool: tool_name.into(),
             reason: e.to_string(),
         });
     }
@@ -767,6 +789,318 @@ fn validate_syntax(path: &Path, content: &str) -> Result<(), ToolError> {
     })
 }
 
+// ── Checkpoint Name Validation ──────────────────────────────────
+
+/// Validate a checkpoint name: alphanumeric, hyphens, underscores, 1–64 chars.
+fn validate_checkpoint_name(name: &str, tool_name: &str) -> Result<(), ToolError> {
+    if name.is_empty() || name.len() > 64 {
+        return Err(ToolError::InvalidInput {
+            tool: tool_name.into(),
+            reason: "checkpoint name must be 1–64 characters".into(),
+        });
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(ToolError::InvalidInput {
+            tool: tool_name.into(),
+            reason: "checkpoint name must contain only alphanumeric characters, hyphens, and underscores".into(),
+        });
+    }
+    Ok(())
+}
+
+// ── UndoEditTool ────────────────────────────────────────────────
+
+struct UndoEditTool {
+    info: ToolInfo,
+    history: Arc<EditHistory>,
+}
+
+impl UndoEditTool {
+    const NAME: &str = "undo_edit";
+
+    fn new(history: Arc<EditHistory>) -> Self {
+        Self {
+            history,
+            info: ToolInfo {
+                name: Self::NAME.into(),
+                description: "Undo the last edit made to a file by search_replace_edit. \
+                    Restores the file to its state before the most recent edit. \
+                    Can be called multiple times to undo up to 10 edits per file."
+                    .into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the file to undo the last edit on"
+                        }
+                    },
+                    "required": ["path"]
+                }),
+                required_capability: Capability::FileWrite,
+                risk_level: RiskLevel::Medium,
+                side_effects: SideEffects::HasSideEffects,
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for UndoEditTool {
+    fn info(&self) -> &ToolInfo {
+        &self.info
+    }
+
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        context: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        let tainted = TaintedToolInput::new(input);
+
+        let safe_path = tainted
+            .extract_path_multi_root("path", context.sandbox_root, context.allowed_directories)
+            .map_err(|e| ToolError::InvalidInput {
+                tool: Self::NAME.into(),
+                reason: e.to_string(),
+            })?;
+
+        let canonical = safe_path.as_path().to_path_buf();
+        let previous = self
+            .history
+            .pop_last_version(context.session_id, &canonical)
+            .ok_or_else(|| ToolError::ExecutionFailed {
+                tool: Self::NAME.into(),
+                reason: format!("no edit history for {}", relative_path_display(&safe_path)),
+            })?;
+
+        atomic_write(safe_path.as_path(), &previous, Self::NAME).await?;
+
+        let remaining = self.history.version_count(context.session_id, &canonical);
+        let relative = relative_path_display(&safe_path);
+        Ok(ToolOutput {
+            content: format!(
+                "Restored {relative} to previous version ({remaining} undo steps remaining)"
+            ),
+            outcome: ToolOutcome::Success,
+            metadata: None,
+        })
+    }
+}
+
+// ── CreateCheckpointTool ────────────────────────────────────────
+
+struct CreateCheckpointTool {
+    info: ToolInfo,
+    history: Arc<EditHistory>,
+}
+
+impl CreateCheckpointTool {
+    const NAME: &str = "create_checkpoint";
+
+    fn new(history: Arc<EditHistory>) -> Self {
+        Self {
+            history,
+            info: ToolInfo {
+                name: Self::NAME.into(),
+                description: "Create a named checkpoint that snapshots all files modified \
+                    by search_replace_edit in this session. Use rollback_to_checkpoint \
+                    to restore files to this state later. Max 5 checkpoints per session; \
+                    checkpoints expire after 1 hour."
+                    .into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Checkpoint name (e.g., 'before-refactor'). Alphanumeric, hyphens, underscores, 1–64 chars."
+                        }
+                    },
+                    "required": ["name"]
+                }),
+                required_capability: Capability::FileRead,
+                risk_level: RiskLevel::Low,
+                side_effects: SideEffects::None,
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for CreateCheckpointTool {
+    fn info(&self) -> &ToolInfo {
+        &self.info
+    }
+
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        context: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        let tainted = TaintedToolInput::new(input);
+
+        let name_content =
+            tainted
+                .extract_file_content("name")
+                .map_err(|e| ToolError::InvalidInput {
+                    tool: Self::NAME.into(),
+                    reason: e.to_string(),
+                })?;
+        let name = name_content.as_str();
+        validate_checkpoint_name(name, Self::NAME)?;
+
+        let modified = self.history.modified_files(context.session_id);
+        if modified.is_empty() {
+            return Err(ToolError::ExecutionFailed {
+                tool: Self::NAME.into(),
+                reason: "no files have been modified in this session".into(),
+            });
+        }
+
+        // Read current content of each modified file
+        let mut files = HashMap::new();
+        for file_path in &modified {
+            match tokio::fs::read_to_string(file_path).await {
+                Ok(data) => {
+                    files.insert(file_path.clone(), data);
+                }
+                // File was deleted since edit — skip
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(ToolError::ExecutionFailed {
+                        tool: Self::NAME.into(),
+                        reason: format!("failed to read {}: {e}", file_path.display()),
+                    });
+                }
+            }
+        }
+
+        let file_list: Vec<String> = files.keys().map(|p| p.display().to_string()).collect();
+
+        self.history
+            .create_checkpoint(context.session_id, name.to_string(), files)
+            .map_err(|reason| ToolError::ExecutionFailed {
+                tool: Self::NAME.into(),
+                reason: reason.into(),
+            })?;
+        Ok(ToolOutput {
+            content: format!(
+                "Checkpoint '{}' created with {} files: {}",
+                name,
+                file_list.len(),
+                file_list.join(", ")
+            ),
+            outcome: ToolOutcome::Success,
+            metadata: None,
+        })
+    }
+}
+
+// ── RollbackToCheckpointTool ────────────────────────────────────
+
+struct RollbackToCheckpointTool {
+    info: ToolInfo,
+    history: Arc<EditHistory>,
+}
+
+impl RollbackToCheckpointTool {
+    const NAME: &str = "rollback_to_checkpoint";
+
+    fn new(history: Arc<EditHistory>) -> Self {
+        Self {
+            history,
+            info: ToolInfo {
+                name: Self::NAME.into(),
+                description: "Restore all files to the state captured by a named checkpoint. \
+                    The checkpoint is consumed (removed) after rollback. Continues restoring \
+                    remaining files on partial failure."
+                    .into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Name of the checkpoint to restore"
+                        }
+                    },
+                    "required": ["name"]
+                }),
+                required_capability: Capability::FileWrite,
+                risk_level: RiskLevel::High,
+                side_effects: SideEffects::HasSideEffects,
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for RollbackToCheckpointTool {
+    fn info(&self) -> &ToolInfo {
+        &self.info
+    }
+
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        context: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        let tainted = TaintedToolInput::new(input);
+
+        let name_content =
+            tainted
+                .extract_file_content("name")
+                .map_err(|e| ToolError::InvalidInput {
+                    tool: Self::NAME.into(),
+                    reason: e.to_string(),
+                })?;
+        let name = name_content.as_str();
+        validate_checkpoint_name(name, Self::NAME)?;
+
+        let files = self
+            .history
+            .take_checkpoint(context.session_id, name)
+            .map_err(|reason| ToolError::ExecutionFailed {
+                tool: Self::NAME.into(),
+                reason: reason.into(),
+            })?;
+
+        let mut restored = Vec::with_capacity(files.len());
+        let mut failed = Vec::new();
+
+        for (path, content) in &files {
+            match atomic_write(path, content, Self::NAME).await {
+                Ok(()) => restored.push(path.display().to_string()),
+                Err(e) => failed.push(format!("{}: {e}", path.display())),
+            }
+        }
+
+        if restored.is_empty() && !failed.is_empty() {
+            return Err(ToolError::ExecutionFailed {
+                tool: Self::NAME.into(),
+                reason: format!("rollback failed for all files: {}", failed.join("; ")),
+            });
+        }
+
+        let mut message = format!(
+            "Rolled back to checkpoint '{}': restored {} files",
+            name,
+            restored.len()
+        );
+        if !failed.is_empty() {
+            let _ = write!(message, " (failed: {})", failed.join("; "));
+        }
+
+        Ok(ToolOutput {
+            content: message,
+            outcome: ToolOutcome::Success,
+            metadata: None,
+        })
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
@@ -828,7 +1162,7 @@ mod tests {
 
     #[test]
     fn test_edit_tool_info() {
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         let info = tool.info();
         assert_eq!(info.name, "search_replace_edit");
         assert_eq!(info.required_capability, Capability::FileWrite);
@@ -847,7 +1181,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         let output = tool
             .execute(
                 serde_json::json!({
@@ -871,7 +1205,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("file.rs"), "fn main() {}\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         let err = tool
             .execute(
                 serde_json::json!({
@@ -901,7 +1235,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         let err = tool
             .execute(
                 serde_json::json!({
@@ -927,7 +1261,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("file.rs"), "line1\nDELETE_ME\nline3\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         let output = tool
             .execute(
                 serde_json::json!({
@@ -950,7 +1284,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("file.rs"), "content\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         let err = tool
             .execute(
                 serde_json::json!({
@@ -977,7 +1311,7 @@ mod tests {
         let original = "fn main() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n    let d = 4;\n    let e = 5;\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1004,7 +1338,7 @@ mod tests {
         let original = "BEFORE\nTARGET\nAFTER\n";
         std::fs::write(h.path().join("file.txt"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         tool.execute(
             serde_json::json!({
                 "path": "file.txt",
@@ -1030,7 +1364,7 @@ mod tests {
         // File has single spaces
         std::fs::write(h.path().join("file.rs"), "fn main() {\n    let x = 1;\n}\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         // old_string has extra spaces — exact match fails, normalized match succeeds
         let output = tool
             .execute(
@@ -1055,7 +1389,7 @@ mod tests {
         // File has 2-space indent
         std::fs::write(h.path().join("file.rs"), "fn main() {\n  let x = 1;\n}\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         // old_string has 4-space indent — normalized match should work
         let output = tool
             .execute(
@@ -1084,7 +1418,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         // All three lines normalize to "let x = 1;"
         let err = tool
             .execute(
@@ -1117,7 +1451,7 @@ mod tests {
         let original = "fn main() {\n    if true {\n        let x = 1;\n    }\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1143,7 +1477,7 @@ mod tests {
             "fn main() {\n    if true {\n        old_line_1\n        old_line_2\n    }\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         // new_string has no indentation — indentation preservation should add 8 spaces
         let output = tool
             .execute(
@@ -1171,7 +1505,7 @@ mod tests {
     #[tokio::test]
     async fn test_path_traversal_rejected() {
         let h = TestHarness::new();
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
 
         let err = tool
             .execute(
@@ -1194,7 +1528,7 @@ mod tests {
     #[tokio::test]
     async fn test_nonexistent_file_returns_error() {
         let h = TestHarness::new();
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
 
         let err = tool
             .execute(
@@ -1219,7 +1553,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("src.rs"), "old\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1252,7 +1586,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("clean.rs"), "old_text\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         tool.execute(
             serde_json::json!({
                 "path": "clean.rs",
@@ -1281,7 +1615,7 @@ mod tests {
         let original = "unchanged content\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         let _ = tool
             .execute(
                 serde_json::json!({
@@ -1309,7 +1643,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         // Use normalized fallback (extra spaces)
         let output = tool
             .execute(
@@ -1336,7 +1670,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("file.rs"), "content\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         let err = tool
             .execute(
                 serde_json::json!({
@@ -1361,14 +1695,19 @@ mod tests {
     #[tokio::test]
     async fn test_edit_tools_factory() {
         let tools = edit_tools(&test_config());
-        assert_eq!(tools.len(), 1);
+        assert_eq!(tools.len(), 4);
         assert_eq!(tools[0].info().name, "search_replace_edit");
+        assert_eq!(tools[1].info().name, "undo_edit");
+        assert_eq!(tools[2].info().name, "create_checkpoint");
+        assert_eq!(tools[3].info().name, "rollback_to_checkpoint");
 
         // Verify to_definition() produces a valid tool definition
-        let def = tools[0].to_definition();
-        assert_eq!(def.name, "search_replace_edit");
-        assert!(!def.description.is_empty());
-        assert!(def.input_schema.is_object());
+        for tool in &tools {
+            let def = tool.to_definition();
+            assert!(!def.name.is_empty());
+            assert!(!def.description.is_empty());
+            assert!(def.input_schema.is_object());
+        }
     }
 
     // ── File size limit tests ────────────────────────────────────
@@ -1383,7 +1722,7 @@ mod tests {
             f.set_len((super::MAX_EDIT_FILE_BYTES + 1) as u64).unwrap();
         }
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         let err = tool
             .execute(
                 serde_json::json!({
@@ -1417,7 +1756,7 @@ mod tests {
             f.write_all(&[0xFF, 0xFE, 0x00, 0x01]).unwrap();
         }
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         let err = tool
             .execute(
                 serde_json::json!({
@@ -1453,7 +1792,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1484,7 +1823,7 @@ mod tests {
             "fn main() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n    let w = 4;\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         // old_string has one line wrong ("let y = 999" instead of "let y = 2")
         // 4 out of 5 lines match (80%) — should fuzzy match
         let output = tool
@@ -1511,7 +1850,7 @@ mod tests {
         let original = "fn main() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         // old_string has 2 out of 3 lines wrong — below 60% threshold
         let err = tool
             .execute(
@@ -1540,7 +1879,7 @@ mod tests {
         let original = "fn a() {\n    let x = 1;\n    let y = 2;\n}\nfn b() {\n    let x = 1;\n    let y = 2;\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         // Fuzzy search with one wrong line — matches both blocks equally
         let err = tool
             .execute(
@@ -1652,7 +1991,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1687,11 +2026,14 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig {
-            diff_preview: true,
-            diff_context_lines: 3,
-            syntax_validation: false,
-        });
+        let tool = SearchReplaceEditTool::new(
+            &EditConfig {
+                diff_preview: true,
+                diff_context_lines: 3,
+                syntax_validation: false,
+            },
+            Arc::new(EditHistory::new()),
+        );
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1731,7 +2073,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1757,7 +2099,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("src.rs"), "aaa\nbbb\nccc\nddd\neee\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1783,7 +2125,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("src.rs"), "aaa\nbbb\nccc\nddd\neee\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1808,7 +2150,7 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("src.rs"), "aaa\nbbb\nccc\nddd\neee\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1841,7 +2183,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1870,11 +2212,14 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("src.rs"), "aaa\nbbb\nccc\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig {
-            diff_preview: false,
-            diff_context_lines: 3,
-            syntax_validation: false,
-        });
+        let tool = SearchReplaceEditTool::new(
+            &EditConfig {
+                diff_preview: false,
+                diff_context_lines: 3,
+                syntax_validation: false,
+            },
+            Arc::new(EditHistory::new()),
+        );
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1919,7 +2264,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1950,7 +2295,7 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new(&test_config());
+        let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1977,11 +2322,14 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("src.rs"), "aaa\nbbb\nccc\nddd\neee\n").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig {
-            diff_preview: true,
-            diff_context_lines: 0,
-            syntax_validation: false,
-        });
+        let tool = SearchReplaceEditTool::new(
+            &EditConfig {
+                diff_preview: true,
+                diff_context_lines: 0,
+                syntax_validation: false,
+            },
+            Arc::new(EditHistory::new()),
+        );
         let output = tool
             .execute(
                 serde_json::json!({
@@ -2047,7 +2395,7 @@ mod tests {
                     .unwrap();
                 rt.block_on(async {
                     let h = TestHarness::new();
-                    let tool = SearchReplaceEditTool::new(&test_config());
+                    let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
 
                     let traversal = format!("{}{}", "../".repeat(depth), suffix);
                     let result = tool
@@ -2092,7 +2440,7 @@ mod tests {
                     let content = format!("{prefix}\n{old_text}\n{suffix}\n");
                     std::fs::write(h.path().join(&name), &content).unwrap();
 
-                    let tool = SearchReplaceEditTool::new(&test_config());
+                    let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
                     let result = tool
                         .execute(
                             serde_json::json!({
@@ -2129,7 +2477,7 @@ mod tests {
                     let h = TestHarness::new();
                     std::fs::write(h.path().join(&name), "old_unique_sentinel\n").unwrap();
 
-                    let tool = SearchReplaceEditTool::new(&test_config());
+                    let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
                     let output = tool
                         .execute(
                             serde_json::json!({
@@ -2279,10 +2627,13 @@ mod tests {
         let original = "fn hello() {\n    println!(\"hi\");\n}\n";
         std::fs::write(h.path().join("code.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig {
-            syntax_validation: true,
-            ..EditConfig::default()
-        });
+        let tool = SearchReplaceEditTool::new(
+            &EditConfig {
+                syntax_validation: true,
+                ..EditConfig::default()
+            },
+            Arc::new(EditHistory::new()),
+        );
 
         // Remove the closing brace — breaks syntax
         let result = tool
@@ -2311,10 +2662,13 @@ mod tests {
         )
         .unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig {
-            syntax_validation: true,
-            ..EditConfig::default()
-        });
+        let tool = SearchReplaceEditTool::new(
+            &EditConfig {
+                syntax_validation: true,
+                ..EditConfig::default()
+            },
+            Arc::new(EditHistory::new()),
+        );
 
         let output = tool
             .execute(
@@ -2338,10 +2692,13 @@ mod tests {
         let h = TestHarness::new();
         std::fs::write(h.path().join("notes.txt"), "hello world").unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig {
-            syntax_validation: true,
-            ..EditConfig::default()
-        });
+        let tool = SearchReplaceEditTool::new(
+            &EditConfig {
+                syntax_validation: true,
+                ..EditConfig::default()
+            },
+            Arc::new(EditHistory::new()),
+        );
 
         let output = tool
             .execute(
@@ -2364,10 +2721,13 @@ mod tests {
         let original = "fn hello() {\n    println!(\"hi\");\n}\n";
         std::fs::write(h.path().join("code.rs"), original).unwrap();
 
-        let tool = SearchReplaceEditTool::new(&EditConfig {
-            syntax_validation: false,
-            ..EditConfig::default()
-        });
+        let tool = SearchReplaceEditTool::new(
+            &EditConfig {
+                syntax_validation: false,
+                ..EditConfig::default()
+            },
+            Arc::new(EditHistory::new()),
+        );
 
         // Remove closing brace — breaks syntax, but validation is off
         let output = tool
@@ -2407,5 +2767,377 @@ mod tests {
             "validation took {}ms, expected <500ms (debug)",
             elapsed.as_millis()
         );
+    }
+
+    // ── Undo tool tests ─────────────────────────────────────────
+
+    /// Create an edit tool and undo tool sharing the same history.
+    fn edit_undo_pair() -> (SearchReplaceEditTool, UndoEditTool) {
+        let history = Arc::new(EditHistory::new());
+        let edit = SearchReplaceEditTool::new(&test_config(), Arc::clone(&history));
+        let undo = UndoEditTool::new(history);
+        (edit, undo)
+    }
+
+    #[tokio::test]
+    async fn test_undo_restores_previous() {
+        let h = TestHarness::new();
+        let original = "line 1\nline 2\nline 3\n";
+        std::fs::write(h.path().join("file.rs"), original).unwrap();
+
+        let (edit, undo) = edit_undo_pair();
+        let ctx = h.context();
+
+        // Edit the file
+        edit.execute(
+            serde_json::json!({
+                "path": "file.rs",
+                "old_string": "line 2",
+                "new_string": "CHANGED"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        // Verify edit took effect
+        let content = std::fs::read_to_string(h.path().join("file.rs")).unwrap();
+        assert!(content.contains("CHANGED"));
+
+        // Undo
+        let output = undo
+            .execute(serde_json::json!({"path": "file.rs"}), &ctx)
+            .await
+            .unwrap();
+
+        assert!(matches!(output.outcome, ToolOutcome::Success));
+        assert!(output.content.contains("Restored"));
+
+        // Verify undo restored original content
+        let content = std::fs::read_to_string(h.path().join("file.rs")).unwrap();
+        assert_eq!(content, original);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_undos() {
+        let h = TestHarness::new();
+        let v0 = "original\n";
+        std::fs::write(h.path().join("f.rs"), v0).unwrap();
+
+        let (edit, undo) = edit_undo_pair();
+        let ctx = h.context();
+
+        // Edit 3 times
+        edit.execute(
+            serde_json::json!({"path": "f.rs", "old_string": "original", "new_string": "v1"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        edit.execute(
+            serde_json::json!({"path": "f.rs", "old_string": "v1", "new_string": "v2"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        edit.execute(
+            serde_json::json!({"path": "f.rs", "old_string": "v2", "new_string": "v3"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        // Undo 3 times, each should restore the prior version
+        undo.execute(serde_json::json!({"path": "f.rs"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(h.path().join("f.rs")).unwrap(),
+            "v2\n"
+        );
+
+        undo.execute(serde_json::json!({"path": "f.rs"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(h.path().join("f.rs")).unwrap(),
+            "v1\n"
+        );
+
+        undo.execute(serde_json::json!({"path": "f.rs"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(h.path().join("f.rs")).unwrap(), v0);
+    }
+
+    #[tokio::test]
+    async fn test_undo_unedited_file_error() {
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("untouched.rs"), "content").unwrap();
+
+        let undo = UndoEditTool::new(Arc::new(EditHistory::new()));
+        let result = undo
+            .execute(serde_json::json!({"path": "untouched.rs"}), &h.context())
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ToolError::ExecutionFailed { reason, .. } => {
+                assert!(reason.contains("no edit history"), "got: {reason}");
+            }
+            other => panic!("expected ExecutionFailed, got: {other:?}"),
+        }
+    }
+
+    // ── Checkpoint tool tests ───────────────────────────────────
+
+    /// Create edit, checkpoint, and rollback tools sharing the same history.
+    fn edit_checkpoint_triple() -> (
+        SearchReplaceEditTool,
+        CreateCheckpointTool,
+        RollbackToCheckpointTool,
+    ) {
+        let history = Arc::new(EditHistory::new());
+        let edit = SearchReplaceEditTool::new(&test_config(), Arc::clone(&history));
+        let checkpoint = CreateCheckpointTool::new(Arc::clone(&history));
+        let rollback = RollbackToCheckpointTool::new(history);
+        (edit, checkpoint, rollback)
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_captures_state() {
+        let h = TestHarness::new();
+        let original = "before\n";
+        std::fs::write(h.path().join("file.rs"), original).unwrap();
+
+        let (edit, checkpoint, rollback) = edit_checkpoint_triple();
+        let ctx = h.context();
+
+        // Edit to trigger tracking
+        edit.execute(
+            serde_json::json!({"path": "file.rs", "old_string": "before", "new_string": "after-edit"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        // Checkpoint
+        checkpoint
+            .execute(serde_json::json!({"name": "cp1"}), &ctx)
+            .await
+            .unwrap();
+
+        // Edit again
+        edit.execute(
+            serde_json::json!({"path": "file.rs", "old_string": "after-edit", "new_string": "further-edit"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert!(
+            std::fs::read_to_string(h.path().join("file.rs"))
+                .unwrap()
+                .contains("further-edit")
+        );
+
+        // Rollback to checkpoint
+        let output = rollback
+            .execute(serde_json::json!({"name": "cp1"}), &ctx)
+            .await
+            .unwrap();
+
+        assert!(matches!(output.outcome, ToolOutcome::Success));
+        assert!(output.content.contains("Rolled back"));
+
+        // File should be at checkpoint state (after first edit, before second)
+        let content = std::fs::read_to_string(h.path().join("file.rs")).unwrap();
+        assert!(content.contains("after-edit"));
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_restores_multiple_files() {
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("a.rs"), "a-original\n").unwrap();
+        std::fs::write(h.path().join("b.rs"), "b-original\n").unwrap();
+        std::fs::write(h.path().join("c.rs"), "c-original\n").unwrap();
+
+        let (edit, checkpoint, rollback) = edit_checkpoint_triple();
+        let ctx = h.context();
+
+        // Edit all 3 files
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            let original = format!("{}-original", name.strip_suffix(".rs").unwrap_or(name));
+            let edited = format!("{}-edited", name.strip_suffix(".rs").unwrap_or(name));
+            edit.execute(
+                serde_json::json!({"path": name, "old_string": original, "new_string": edited}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        }
+
+        // Checkpoint
+        checkpoint
+            .execute(serde_json::json!({"name": "multi"}), &ctx)
+            .await
+            .unwrap();
+
+        // Edit again
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            let edited = format!("{}-edited", name.strip_suffix(".rs").unwrap_or(name));
+            let further = format!("{}-further", name.strip_suffix(".rs").unwrap_or(name));
+            edit.execute(
+                serde_json::json!({"path": name, "old_string": edited, "new_string": further}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        }
+
+        // Rollback
+        rollback
+            .execute(serde_json::json!({"name": "multi"}), &ctx)
+            .await
+            .unwrap();
+
+        // All 3 files should be at checkpoint state
+        assert!(
+            std::fs::read_to_string(h.path().join("a.rs"))
+                .unwrap()
+                .contains("a-edited")
+        );
+        assert!(
+            std::fs::read_to_string(h.path().join("b.rs"))
+                .unwrap()
+                .contains("b-edited")
+        );
+        assert!(
+            std::fs::read_to_string(h.path().join("c.rs"))
+                .unwrap()
+                .contains("c-edited")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_not_found_error() {
+        let h = TestHarness::new();
+        let rollback = RollbackToCheckpointTool::new(Arc::new(EditHistory::new()));
+
+        let result = rollback
+            .execute(serde_json::json!({"name": "nonexistent"}), &h.context())
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ToolError::ExecutionFailed { reason, .. } => {
+                assert!(
+                    reason.contains("no checkpoints") || reason.contains("not found"),
+                    "got: {reason}"
+                );
+            }
+            other => panic!("expected ExecutionFailed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_max_checkpoints_enforced() {
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("f.rs"), "content\n").unwrap();
+
+        let (edit, checkpoint, rollback) = edit_checkpoint_triple();
+        let ctx = h.context();
+
+        // Edit to track the file
+        edit.execute(
+            serde_json::json!({"path": "f.rs", "old_string": "content", "new_string": "modified"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        // Create 6 checkpoints — 1st should be evicted
+        for i in 0..6 {
+            // Need to update file content so checkpoint tool can read it
+            let prev = if i == 0 {
+                "modified".to_string()
+            } else {
+                format!("v{}", i - 1)
+            };
+            edit.execute(
+                serde_json::json!({"path": "f.rs", "old_string": prev, "new_string": format!("v{i}")}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+            checkpoint
+                .execute(serde_json::json!({"name": format!("cp{i}")}), &ctx)
+                .await
+                .unwrap();
+        }
+
+        // cp0 should be evicted
+        let result = rollback
+            .execute(serde_json::json!({"name": "cp0"}), &ctx)
+            .await;
+        assert!(result.is_err());
+
+        // cp5 (latest) should still work
+        let output = rollback
+            .execute(serde_json::json!({"name": "cp5"}), &ctx)
+            .await
+            .unwrap();
+        assert!(matches!(output.outcome, ToolOutcome::Success));
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_expiry() {
+        use std::time::{Duration, Instant};
+
+        let h = TestHarness::new();
+        std::fs::write(h.path().join("f.rs"), "content\n").unwrap();
+
+        let history = Arc::new(EditHistory::new());
+        let rollback = RollbackToCheckpointTool::new(Arc::clone(&history));
+        let ctx = h.context();
+
+        // Insert an expired checkpoint via test helper
+        let mut files = HashMap::new();
+        files.insert(h.path().join("f.rs"), "old-content".to_string());
+        history.insert_checkpoint_at(
+            ctx.session_id,
+            "expired-cp".to_string(),
+            files,
+            Instant::now()
+                .checked_sub(Duration::from_secs(7200))
+                .unwrap(),
+        );
+
+        let result = rollback
+            .execute(serde_json::json!({"name": "expired-cp"}), &ctx)
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ToolError::ExecutionFailed { reason, .. } => {
+                assert!(reason.contains("expired"), "got: {reason}");
+            }
+            other => panic!("expected ExecutionFailed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_name_validation() {
+        let h = TestHarness::new();
+        let checkpoint = CreateCheckpointTool::new(Arc::new(EditHistory::new()));
+        let ctx = h.context();
+
+        // Invalid names
+        for name in ["", "has spaces", "has;semicolons", "has/slash"] {
+            let result = checkpoint
+                .execute(serde_json::json!({"name": name}), &ctx)
+                .await;
+            assert!(result.is_err(), "expected error for name: {name:?}");
+        }
     }
 }
