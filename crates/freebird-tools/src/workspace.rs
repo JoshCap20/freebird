@@ -446,6 +446,43 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_porcelain_both_staged_and_modified() {
+        // MM = modified in index AND working tree — file appears in both lists
+        let output = "MM both.rs\n";
+        let (modified, staged, untracked) = parse_porcelain_status(output);
+        assert_eq!(modified, vec!["both.rs"]);
+        assert_eq!(staged, vec!["both.rs"]);
+        assert_eq!(untracked, 0);
+    }
+
+    #[test]
+    fn test_parse_porcelain_renamed() {
+        // R = renamed in index; porcelain shows "R  old -> new"
+        let output = "R  old.rs -> new.rs\n";
+        let (modified, staged, untracked) = parse_porcelain_status(output);
+        assert!(modified.is_empty());
+        assert_eq!(staged, vec!["old.rs -> new.rs"]);
+        assert_eq!(untracked, 0);
+    }
+
+    #[test]
+    fn test_parse_porcelain_deleted() {
+        let output = " D removed.rs\nD  staged_delete.rs\n";
+        let (modified, staged, untracked) = parse_porcelain_status(output);
+        assert_eq!(modified, vec!["removed.rs"]);
+        assert_eq!(staged, vec!["staged_delete.rs"]);
+        assert_eq!(untracked, 0);
+    }
+
+    #[test]
+    fn test_parse_porcelain_empty_input() {
+        let (modified, staged, untracked) = parse_porcelain_status("");
+        assert!(modified.is_empty());
+        assert!(staged.is_empty());
+        assert_eq!(untracked, 0);
+    }
+
+    #[test]
     fn test_config_git_timeout_default() {
         let tool = WorkspaceStatusTool::new(5);
         assert_eq!(tool.timeout, Duration::from_secs(5));
