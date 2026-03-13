@@ -41,7 +41,7 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use freebird_memory::sqlite_summary::SummaryStore;
+use freebird_traits::summary::SummarySink;
 
 use crate::history::conversation_to_messages;
 use crate::registry::ProviderRegistry;
@@ -101,7 +101,7 @@ pub struct AgentRuntime {
     default_session_ttl_hours: u64,
     event_sink: Option<Arc<dyn EventSink>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
-    summary_store: Option<Arc<SummaryStore>>,
+    summary_store: Option<Arc<dyn SummarySink>>,
     summarization_config: SummarizationConfig,
     sessions: SessionManager,
 }
@@ -127,7 +127,7 @@ impl AgentRuntime {
         default_session_ttl_hours: u64,
         event_sink: Option<Arc<dyn EventSink>>,
         audit_sink: Option<Arc<dyn AuditSink>>,
-        summary_store: Option<Arc<SummaryStore>>,
+        summary_store: Option<Arc<dyn SummarySink>>,
         summarization_config: SummarizationConfig,
     ) -> Self {
         let sessions = SessionManager::with_config(config.session.clone());

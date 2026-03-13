@@ -11,7 +11,6 @@ description = "Agent runtime loop, session management, and orchestration for Fre
 freebird-traits = { workspace = true }
 freebird-types = { workspace = true }
 freebird-security = { workspace = true }
-freebird-memory = { path = "../freebird-memory" }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 futures = { workspace = true }

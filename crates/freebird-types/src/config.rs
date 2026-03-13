@@ -3,8 +3,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
-use chrono::{DateTime, Utc};
-use freebird_traits::id::{ChannelId, ModelId, ProviderId, SessionId};
+use freebird_traits::id::{ChannelId, ModelId, ProviderId};
 use freebird_traits::tool::RiskLevel;
 use serde::{Deserialize, Serialize};
 
@@ -360,27 +359,9 @@ const fn default_max_context_tokens() -> usize {
 // Conversation Summarization
 // ---------------------------------------------------------------------------
 
-/// Persistent summary of compressed conversation history.
-///
-/// Stored in a separate `SQLite` table, keyed by `session_id`. Only one summary
-/// exists per session — re-summarization replaces the previous summary
-/// (incorporating its text into the new one).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConversationSummary {
-    /// Which session this summary belongs to.
-    pub session_id: SessionId,
-    /// The generated summary text (injected as a user message when building
-    /// the completion request).
-    pub text: String,
-    /// Index of the last turn that was summarized (inclusive).
-    /// Turns `0..=summarized_through_turn` are skipped during message building;
-    /// turns after this index are included in full.
-    pub summarized_through_turn: usize,
-    /// Approximate token count of the original content that was compressed.
-    pub original_token_estimate: usize,
-    /// When the summary was generated.
-    pub generated_at: DateTime<Utc>,
-}
+/// Re-export from `freebird-traits` where the canonical definition lives
+/// (required by the `SummarySink` trait).
+pub use freebird_traits::summary::ConversationSummary;
 
 /// Conversation summarization configuration.
 ///
@@ -735,6 +716,8 @@ pub struct LoggingConfig {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use freebird_traits::id::SessionId;
     use std::net::{IpAddr, Ipv4Addr};
 
     /// Build a minimal valid TOML config with customizable sections.

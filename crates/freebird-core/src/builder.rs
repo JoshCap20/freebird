@@ -201,8 +201,8 @@ impl FreebirdBuilder {
         .context("failed to construct ToolExecutor (duplicate tool names?)")
         .map_err(CoreError::ToolRegistry)?;
 
-        // 12. SUMMARY STORE
-        let summary_store = Some(Arc::new(
+        // 12. SUMMARY STORE (cast to trait object for runtime DAG compliance)
+        let summary_store: Option<Arc<dyn freebird_traits::summary::SummarySink>> = Some(Arc::new(
             freebird_memory::sqlite_summary::SummaryStore::new(Arc::clone(&db)),
         ));
 

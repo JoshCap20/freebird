@@ -5,10 +5,11 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use chrono::DateTime;
 use freebird_traits::id::SessionId;
 use freebird_traits::memory::MemoryError;
-use freebird_types::config::ConversationSummary;
+use freebird_traits::summary::{ConversationSummary, SummarySink};
 
 use crate::sqlite::SqliteDb;
 
@@ -115,6 +116,24 @@ impl SummaryStore {
             .map_err(|e| to_io("delete summary", &e))?;
 
         Ok(())
+    }
+}
+
+#[async_trait]
+impl SummarySink for SummaryStore {
+    async fn load(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<ConversationSummary>, MemoryError> {
+        Self::load(self, session_id).await
+    }
+
+    async fn save(&self, summary: &ConversationSummary) -> Result<(), MemoryError> {
+        Self::save(self, summary).await
+    }
+
+    async fn delete(&self, session_id: &SessionId) -> Result<(), MemoryError> {
+        Self::delete(self, session_id).await
     }
 }
 
