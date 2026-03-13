@@ -121,7 +121,9 @@ fn check_password_assignments(content: &str) -> bool {
     let content_lower = content.to_lowercase();
     for pattern in PATTERNS {
         if let Some(pos) = content_lower.find(pattern) {
-            let after = &content[pos + pattern.len()..];
+            // Index into content_lower (not content) to avoid byte-offset
+            // mismatch when to_lowercase() changes byte length (e.g. İ → i\u{0307}).
+            let after = &content_lower[pos + pattern.len()..];
             let value = after.trim();
             // Only flag if there's an actual value (not empty or a placeholder)
             if !value.is_empty()
