@@ -14,7 +14,7 @@ use freebird_traits::memory::Conversation;
 use freebird_traits::provider::{CompletionRequest, ContentBlock, Message, Role};
 use freebird_types::config::{ConversationSummary, SummarizationConfig};
 
-use crate::history::conversation_to_messages;
+use crate::history::{conversation_to_messages, estimate_token_count, messages_per_turn};
 
 /// Hardcoded system prompt for summarization requests.
 /// Never includes user-controlled content.
@@ -30,31 +30,6 @@ Produce a concise summary that preserves:
 
 Be factual and specific. Include exact file paths and code identifiers.
 Do not include raw tool output content — only what was done and the result.";
-
-/// Estimate token count for a message list using the ~4 chars/token heuristic.
-///
-/// Intentionally conservative (overestimates) to trigger summarization
-/// before actually hitting context limits.
-#[must_use]
-pub fn estimate_token_count(messages: &[Message]) -> usize {
-    messages
-        .iter()
-        .map(|msg| {
-            msg.content
-                .iter()
-                .map(|block| match block {
-                    ContentBlock::Text { text } => text.len(),
-                    ContentBlock::ToolUse { name, input, .. } => {
-                        name.len() + input.to_string().len()
-                    }
-                    ContentBlock::ToolResult { content, .. } => content.len(),
-                    ContentBlock::Image { data, .. } => data.len(),
-                })
-                .sum::<usize>()
-        })
-        .sum::<usize>()
-        / 4
-}
 
 /// Check whether summarization should trigger.
 ///
@@ -238,19 +213,7 @@ fn compute_turn_message_ranges(conversation: &Conversation) -> Vec<(usize, usize
     let mut offset = 0;
 
     for turn in &conversation.turns {
-        // Each turn produces: 1 user message + N assistant messages +
-        // 1 tool-result message per assistant message with ToolUse blocks
-        let tool_result_messages = turn
-            .assistant_messages
-            .iter()
-            .filter(|msg| {
-                msg.content
-                    .iter()
-                    .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
-            })
-            .count();
-
-        let msg_count = 1 + turn.assistant_messages.len() + tool_result_messages;
+        let msg_count = messages_per_turn(turn);
         ranges.push((offset, offset + msg_count));
         offset += msg_count;
     }
