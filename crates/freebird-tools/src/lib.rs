@@ -15,6 +15,7 @@ pub mod glob_find;
 pub mod grep;
 pub mod knowledge;
 pub mod network;
+pub mod planner;
 pub mod repo_map;
 pub mod session;
 pub mod shell;

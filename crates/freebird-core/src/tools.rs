@@ -29,6 +29,7 @@ use freebird_types::config::AppConfig;
 /// - Cargo verify tool (`cargo_verify`) — Rust build/test/lint/fmt pipeline
 /// - Session recall tools (`list_sessions`, `search_sessions`, `recall_session`)
 /// - Workspace status tool (`workspace_status`) — on-demand git status
+/// - Planner tool (`plan_edits`) — dependency-aware multi-file edit ordering
 pub fn build_tool_registry(config: &AppConfig) -> Result<ToolRegistry> {
     let mut registry = ToolRegistry::new();
 
@@ -90,6 +91,9 @@ pub fn build_tool_registry(config: &AppConfig) -> Result<ToolRegistry> {
     registry.register_all(freebird_tools::workspace::workspace_tools(
         config.tools.git_timeout_secs,
     ));
+
+    // Planner tool — dependency-aware multi-file edit ordering.
+    registry.register_all(freebird_tools::planner::planner_tools());
 
     tracing::info!(
         tool_count = registry.tool_count(),
@@ -246,9 +250,10 @@ format = "pretty"
             registry.get("workspace_status").is_some(),
             "missing workspace_status"
         );
+        assert!(registry.get("plan_edits").is_some(), "missing plan_edits");
         assert!(
-            registry.tool_count() >= 23,
-            "expected at least 23 tools, got {}",
+            registry.tool_count() >= 24,
+            "expected at least 24 tools, got {}",
             registry.tool_count()
         );
     }

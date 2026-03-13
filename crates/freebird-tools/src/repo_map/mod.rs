@@ -7,8 +7,8 @@
 //! In **ranked** mode, builds a cross-file reference graph and runs `PageRank`
 //! to surface the most important symbols first within a token budget.
 
-mod cache;
-mod graph;
+pub(crate) mod cache;
+pub(crate) mod graph;
 mod pagerank;
 
 use std::collections::{HashMap, VecDeque};

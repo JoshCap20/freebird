@@ -10,4 +10,5 @@
 
 pub mod config;
 pub mod id;
+pub mod planner;
 pub mod protocol;
