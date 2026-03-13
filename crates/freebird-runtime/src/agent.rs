@@ -43,7 +43,7 @@ use tokio_util::sync::CancellationToken;
 
 use freebird_traits::summary::SummarySink;
 
-use crate::history::conversation_to_messages;
+use crate::history::{conversation_to_messages, estimate_token_count};
 use crate::registry::ProviderRegistry;
 use crate::stream::StreamAccumulator;
 use crate::summarize;
@@ -163,16 +163,9 @@ impl AgentRuntime {
     /// Look up `max_context_tokens` for the conversation's model from the
     /// provider registry. Returns `None` if no matching model is found.
     fn get_max_context_tokens(&self, conversation: &Conversation) -> Option<u32> {
-        for pid in self.provider_registry.provider_ids() {
-            if let Some(provider) = self.provider_registry.get(pid) {
-                for model in &provider.info().supported_models {
-                    if model.id == conversation.model_id {
-                        return Some(model.max_context_tokens);
-                    }
-                }
-            }
-        }
-        None
+        self.provider_registry
+            .get_model_info(&conversation.model_id)
+            .map(|m| m.max_context_tokens)
     }
 
     /// Attempt to summarize older conversation turns.
@@ -246,7 +239,7 @@ impl AgentRuntime {
             AuditEventType::SummarizationTriggered {
                 summarized_through_turn: new_summarized_through,
                 total_turns: conversation.turns.len(),
-                original_token_estimate: summarize::estimate_token_count(&messages),
+                original_token_estimate: estimate_token_count(&messages),
             },
         )
         .await;
@@ -311,7 +304,7 @@ impl AgentRuntime {
         }
 
         // Build and save the summary
-        let original_token_estimate = summarize::estimate_token_count(&messages);
+        let original_token_estimate = estimate_token_count(&messages);
         let summary = ConversationSummary {
             session_id: session_id.clone(),
             text: scanned.content().to_owned(),
