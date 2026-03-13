@@ -10,7 +10,6 @@ use std::sync::Arc;
 use chrono::Utc;
 use freebird_security::approval::ApprovalRequest;
 use freebird_security::audit::{AuditEventType, InjectionSource};
-use freebird_security::budget::TokenBudget;
 use freebird_security::capability::CapabilityGrant;
 use freebird_security::error::Severity;
 use freebird_security::injection;
@@ -28,7 +27,7 @@ use freebird_traits::provider::{
     CompletionRequest, CompletionResponse, ContentBlock, Message, ProviderError, Role, StopReason,
     StreamEvent, TokenUsage, ToolDefinition,
 };
-use freebird_traits::tool::{Capability, ToolOutcome};
+use freebird_traits::tool::ToolOutcome;
 use freebird_types::config::{
     BudgetConfig, InjectionResponse, KnowledgeConfig, RuntimeConfig, ToolsConfig,
 };
@@ -150,46 +149,6 @@ impl AgentRuntime {
     #[must_use]
     pub const fn sessions(&self) -> &SessionManager {
         &self.sessions
-    }
-
-    /// Create a default [`CapabilityGrant`] for a new session.
-    ///
-    /// Grants all capabilities scoped to the configured sandbox root with a
-    /// time-limited expiration based on `default_session_ttl_hours`. Logs a
-    /// warning because this is a permissive fallback — per-session auth
-    /// should scope grants from the authenticated credential.
-    fn create_default_grant(
-        &self,
-    ) -> Result<CapabilityGrant, freebird_security::error::SecurityError> {
-        tracing::warn!(
-            ttl_hours = self.default_session_ttl_hours,
-            "using permissive default capability grant — per-session auth not yet wired"
-        );
-        let ttl_hours = i64::try_from(self.default_session_ttl_hours).map_err(|_| {
-            freebird_security::error::SecurityError::InvalidCredential {
-                reason: format!(
-                    "default_session_ttl_hours value {} exceeds maximum representable duration",
-                    self.default_session_ttl_hours
-                ),
-            }
-        })?;
-        let expires_at = Utc::now() + chrono::Duration::hours(ttl_hours);
-        CapabilityGrant::new(
-            [
-                Capability::FileRead,
-                Capability::FileWrite,
-                Capability::FileDelete,
-                Capability::ShellExecute,
-                Capability::ProcessSpawn,
-                Capability::NetworkOutbound,
-                Capability::NetworkListen,
-                Capability::EnvRead,
-            ]
-            .into_iter()
-            .collect(),
-            self.tools_config.sandbox_root.clone(),
-            Some(expires_at),
-        )
     }
 
     /// Run the event loop until shutdown.
@@ -390,26 +349,24 @@ impl AgentRuntime {
         sender_id: &str,
         outbound: &mpsc::Sender<OutboundEvent>,
     ) {
-        if self.sessions.get_budget(session_id).await.is_none() {
-            self.sessions
-                .set_budget(session_id, TokenBudget::new(&self.budget_config))
+        if let Err(e) = self
+            .sessions
+            .initialize_session_state(
+                session_id,
+                &self.budget_config,
+                &self.tools_config.sandbox_root,
+                self.default_session_ttl_hours,
+                false,
+            )
+            .await
+        {
+            tracing::error!(error = %e, "cannot create capability grant");
+            let _ = outbound
+                .send(OutboundEvent::Error {
+                    text: "Internal error: sandbox root is not accessible".into(),
+                    recipient_id: sender_id.into(),
+                })
                 .await;
-        }
-        if self.sessions.get_grant(session_id).await.is_none() {
-            match self.create_default_grant() {
-                Ok(grant) => {
-                    self.sessions.set_grant(session_id, grant).await;
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "cannot create capability grant");
-                    let _ = outbound
-                        .send(OutboundEvent::Error {
-                            text: "Internal error: sandbox root is not accessible".into(),
-                            recipient_id: sender_id.into(),
-                        })
-                        .await;
-                }
-            }
         }
     }
 
@@ -438,14 +395,18 @@ impl AgentRuntime {
                     .sessions
                     .new_session(self.channel.info().id.as_str(), sender_id)
                     .await;
-                // Create a fresh budget for the new session.
-                self.sessions
-                    .set_budget(&session_id, TokenBudget::new(&self.budget_config))
-                    .await;
-                // Create a fresh capability grant for the new session.
-                match self.create_default_grant() {
-                    Ok(grant) => {
-                        self.sessions.set_grant(&session_id, grant).await;
+                match self
+                    .sessions
+                    .initialize_session_state(
+                        &session_id,
+                        &self.budget_config,
+                        &self.tools_config.sandbox_root,
+                        self.default_session_ttl_hours,
+                        true,
+                    )
+                    .await
+                {
+                    Ok(()) => {
                         let _ = outbound
                             .send(OutboundEvent::Message {
                                 text: format!("New session started: {session_id}"),
@@ -760,9 +721,12 @@ impl AgentRuntime {
                 )
                 .await;
 
-                // Record session creation in the security audit log
-                let grant = self.create_default_grant();
-                let capabilities: Vec<String> = grant
+                // Record session creation in the security audit log.
+                // Read the grant already stored by ensure_session_state().
+                let capabilities: Vec<String> = self
+                    .sessions
+                    .get_grant(session_id)
+                    .await
                     .map(|g| g.capabilities().iter().map(|c| format!("{c:?}")).collect())
                     .unwrap_or_default();
                 self.audit(session_id, AuditEventType::SessionStarted { capabilities })

@@ -8,13 +8,17 @@
 //! Supports TTL-based expiration and LRU eviction to bound memory usage.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
+use chrono::Utc;
 use freebird_security::budget::TokenBudget;
 use freebird_security::capability::CapabilityGrant;
+use freebird_security::error::SecurityError;
 use freebird_traits::id::SessionId;
-use freebird_types::config::SessionConfig;
+use freebird_traits::tool::Capability;
+use freebird_types::config::{BudgetConfig, SessionConfig};
 use freebird_types::id::new_session_id;
 use tokio::sync::RwLock;
 
@@ -238,6 +242,66 @@ impl SessionManager {
                 .entry(session_id.clone())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
         )
+    }
+
+    /// Initialize budget and capability grant for a session.
+    ///
+    /// When `force` is `false` (normal message path), existing budget/grant are
+    /// preserved — this is the idempotent "ensure" path. When `force` is `true`
+    /// (the `/new` command), both are unconditionally replaced.
+    ///
+    /// **Must be called inside the per-session `Mutex<()>`** to prevent TOCTOU
+    /// races where two concurrent first-messages both see `budget=None` and both
+    /// create one (the second would overwrite the first, losing recorded usage).
+    ///
+    /// # Errors
+    ///
+    /// Returns `SecurityError` if the `ttl_hours` value overflows or the
+    /// sandbox root is not accessible.
+    pub async fn initialize_session_state(
+        &self,
+        session_id: &SessionId,
+        budget_config: &BudgetConfig,
+        sandbox_root: &Path,
+        ttl_hours: u64,
+        force: bool,
+    ) -> Result<(), SecurityError> {
+        if force || self.get_budget(session_id).await.is_none() {
+            self.set_budget(session_id, TokenBudget::new(budget_config))
+                .await;
+        }
+        if force || self.get_grant(session_id).await.is_none() {
+            tracing::warn!(
+                ttl_hours,
+                "using permissive default capability grant — per-session auth not yet wired"
+            );
+            let ttl_hours_i64 = i64::try_from(ttl_hours).map_err(|_| {
+                SecurityError::InvalidCredential {
+                    reason: format!(
+                        "default_session_ttl_hours value {ttl_hours} exceeds maximum representable duration"
+                    ),
+                }
+            })?;
+            let expires_at = Utc::now() + chrono::Duration::hours(ttl_hours_i64);
+            let grant = CapabilityGrant::new(
+                [
+                    Capability::FileRead,
+                    Capability::FileWrite,
+                    Capability::FileDelete,
+                    Capability::ShellExecute,
+                    Capability::ProcessSpawn,
+                    Capability::NetworkOutbound,
+                    Capability::NetworkListen,
+                    Capability::EnvRead,
+                ]
+                .into_iter()
+                .collect(),
+                sandbox_root.to_path_buf(),
+                Some(expires_at),
+            )?;
+            self.set_grant(session_id, grant).await;
+        }
+        Ok(())
     }
 
     /// Returns the number of active session mappings.
