@@ -833,6 +833,11 @@ impl Provider for AnthropicProvider {
         &self.info
     }
 
+    /// Validates API credentials by sending a minimal completion request.
+    ///
+    /// **Note**: This consumes a small number of tokens (~10 input + 1 output)
+    /// by sending a minimal "ping" message. This call bypasses `TokenBudget`
+    /// accounting since it does not go through the agentic loop.
     async fn validate_credentials(&self) -> Result<(), ProviderError> {
         let body = serde_json::json!({
             "model": self.default_model,
