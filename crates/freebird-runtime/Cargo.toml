@@ -23,7 +23,7 @@ thiserror = { workspace = true }
 tokio-util = { workspace = true }
 
 [dev-dependencies]
-freebird-memory = { path = "../freebird-memory" }
+freebird-memory = { workspace = true }
 tempfile = { workspace = true }
 ring = { workspace = true }
 tokio = { version = "1", features = ["full", "test-util"] }
