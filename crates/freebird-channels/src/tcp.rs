@@ -180,8 +180,6 @@ async fn accept_loop(
     }
 }
 
-/// Handle a single TCP connection: read JSON lines → inbound events, and
-/// write server messages from `writer_rx` → JSON lines.
 /// Read JSON lines from a single client connection and forward as `InboundEvent`s.
 ///
 /// Uses `LinesCodec` with `MAX_LINE_BYTES` to bound per-line memory allocation,
