@@ -93,15 +93,17 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> Result<KnowledgeEntry, rusqlite::Err
 }
 
 /// Serialize a [`KnowledgeKind`] to its serde string (e.g. `"system_config"`).
-fn kind_str(kind: &KnowledgeKind) -> String {
-    let json = serde_json::to_string(kind).unwrap_or_default();
-    json.trim_matches('"').to_owned()
+fn kind_str(kind: &KnowledgeKind) -> Result<String, KnowledgeError> {
+    let json = serde_json::to_string(kind)
+        .map_err(|e| KnowledgeError::Serialization(format!("kind: {e}")))?;
+    Ok(json.trim_matches('"').to_owned())
 }
 
 /// Serialize a [`KnowledgeSource`] to its serde string.
-fn source_str(source: &KnowledgeSource) -> String {
-    let json = serde_json::to_string(source).unwrap_or_default();
-    json.trim_matches('"').to_owned()
+fn source_str(source: &KnowledgeSource) -> Result<String, KnowledgeError> {
+    let json = serde_json::to_string(source)
+        .map_err(|e| KnowledgeError::Serialization(format!("source: {e}")))?;
+    Ok(json.trim_matches('"').to_owned())
 }
 
 /// All columns for SELECT queries.
@@ -123,10 +125,10 @@ const fn limit_i64(limit: usize) -> i64 {
 impl KnowledgeStore for SqliteKnowledgeStore {
     async fn store(&self, entry: KnowledgeEntry) -> Result<KnowledgeId, KnowledgeError> {
         let id_str = entry.id.as_str().to_owned();
-        let kind = kind_str(&entry.kind);
+        let kind = kind_str(&entry.kind)?;
         let tags_json = serde_json::to_string(&entry.tags)
             .map_err(|e| KnowledgeError::Serialization(e.to_string()))?;
-        let source = source_str(&entry.source);
+        let source = source_str(&entry.source)?;
         let sid = entry.session_id.as_ref().map(|s| s.as_str().to_owned());
         let cat = entry.created_at.to_rfc3339();
         let uat = entry.updated_at.to_rfc3339();
@@ -273,7 +275,7 @@ impl KnowledgeStore for SqliteKnowledgeStore {
 
         let rows = stmt
             .query_map(
-                rusqlite::params![kind_str(kind), limit_i64(limit)],
+                rusqlite::params![kind_str(kind)?, limit_i64(limit)],
                 row_to_entry,
             )
             .map_err(|e| db_err("list_by_kind", &e))?;
@@ -315,7 +317,7 @@ impl KnowledgeStore for SqliteKnowledgeStore {
         kind: &KnowledgeKind,
         entries: Vec<KnowledgeEntry>,
     ) -> Result<(), KnowledgeError> {
-        let kind_s = kind_str(kind);
+        let kind_s = kind_str(kind)?;
         let conn = self.db.conn().await;
 
         conn.execute_batch("BEGIN IMMEDIATE")
@@ -342,7 +344,7 @@ impl KnowledgeStore for SqliteKnowledgeStore {
                     kind_s,
                     entry.content,
                     tags_json,
-                    source_str(&entry.source),
+                    source_str(&entry.source)?,
                     f64::from(entry.confidence),
                     entry.session_id.as_ref().map(|s| s.as_str().to_owned()),
                     entry.created_at.to_rfc3339(),
