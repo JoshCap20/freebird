@@ -130,6 +130,13 @@ pub fn plan_changes(changes: Vec<PlannedChange>) -> Result<ChangePlan, PlanError
 
     while !queue.is_empty() {
         depth += 1;
+        if depth > MAX_DEPTH {
+            return Err(PlanError::TooDeep {
+                max: MAX_DEPTH,
+                actual: depth,
+            });
+        }
+
         let mut level: Vec<usize> = queue.into_iter().collect();
         queue = VecDeque::new();
 
@@ -141,13 +148,6 @@ pub fn plan_changes(changes: Vec<PlannedChange>) -> Result<ChangePlan, PlanError
     if ordered.len() < n {
         let cycle = extract_cycle(&slots, &in_degree, &id_to_index);
         return Err(PlanError::CycleDetected { cycle });
-    }
-
-    if depth > MAX_DEPTH {
-        return Err(PlanError::TooDeep {
-            max: MAX_DEPTH,
-            actual: depth,
-        });
     }
 
     Ok(ChangePlan {
@@ -224,12 +224,13 @@ fn enqueue_next_level(
     queue: &mut VecDeque<usize>,
 ) {
     for &idx in level {
-        let neighbors: Vec<usize> = adjacency.get(idx).cloned().unwrap_or_default();
-        for neighbor in neighbors {
-            if let Some(deg) = in_degree.get_mut(neighbor) {
-                *deg -= 1;
-                if *deg == 0 {
-                    queue.push_back(neighbor);
+        if let Some(neighbors) = adjacency.get(idx) {
+            for &neighbor in neighbors {
+                if let Some(deg) = in_degree.get_mut(neighbor) {
+                    *deg -= 1;
+                    if *deg == 0 {
+                        queue.push_back(neighbor);
+                    }
                 }
             }
         }
@@ -273,7 +274,9 @@ fn extract_cycle(
         if visited.contains(&current) {
             let cycle_start_id = change.id;
             if let Some(pos) = path.iter().position(|&id| id == cycle_start_id) {
-                let mut cycle: Vec<usize> = path.get(pos..).unwrap_or_default().to_vec();
+                // pos is guaranteed valid — it comes from Iterator::position on path
+                let mut cycle: Vec<usize> =
+                    path.get(pos..).map_or_else(Vec::new, <[usize]>::to_vec);
                 cycle.push(cycle_start_id);
                 return cycle;
             }
