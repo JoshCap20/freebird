@@ -42,17 +42,8 @@ use crate::history::conversation_to_messages;
 use crate::registry::ProviderRegistry;
 use crate::stream::StreamAccumulator;
 
+use crate::command_handler::LoopAction;
 use crate::session::SessionManager;
-
-/// Controls the event loop after handling an event.
-///
-/// Private — callers of `run()` see `Result<(), RuntimeError>`.
-enum LoopAction {
-    /// Continue processing events.
-    Continue,
-    /// Exit the event loop gracefully (e.g., `/quit` command).
-    Exit,
-}
 
 /// Errors that can occur in the agent runtime.
 #[derive(Debug, thiserror::Error)]
@@ -285,9 +276,17 @@ impl AgentRuntime {
                 args,
                 sender_id,
             } => {
-                let action = self
-                    .handle_command(&name, &args, &sender_id, outbound)
-                    .await;
+                let cmd_ctx = crate::command_handler::CommandContext {
+                    channel_id: self.channel.info().id.as_str(),
+                    sessions: &self.sessions,
+                    budget_config: &self.budget_config,
+                    sandbox_root: &self.tools_config.sandbox_root,
+                    ttl_hours: self.default_session_ttl_hours,
+                    outbound,
+                };
+                let action =
+                    crate::command_handler::handle_command(&name, &args, &sender_id, &cmd_ctx)
+                        .await;
                 send_outbound(
                     outbound,
                     OutboundEvent::TurnComplete {
@@ -367,91 +366,6 @@ impl AgentRuntime {
                     recipient_id: sender_id.into(),
                 })
                 .await;
-        }
-    }
-
-    /// Handle a `/command` event.
-    ///
-    /// Returns `LoopAction::Exit` only for `/quit`.
-    async fn handle_command(
-        &self,
-        name: &str,
-        _args: &[String],
-        sender_id: &str,
-        outbound: &mpsc::Sender<OutboundEvent>,
-    ) -> LoopAction {
-        match name {
-            "quit" => {
-                let _ = outbound
-                    .send(OutboundEvent::Message {
-                        text: "Goodbye!".into(),
-                        recipient_id: sender_id.into(),
-                    })
-                    .await;
-                LoopAction::Exit
-            }
-            "new" => {
-                let session_id = self
-                    .sessions
-                    .new_session(self.channel.info().id.as_str(), sender_id)
-                    .await;
-                match self
-                    .sessions
-                    .initialize_session_state(
-                        &session_id,
-                        &self.budget_config,
-                        &self.tools_config.sandbox_root,
-                        self.default_session_ttl_hours,
-                        true,
-                    )
-                    .await
-                {
-                    Ok(()) => {
-                        let _ = outbound
-                            .send(OutboundEvent::Message {
-                                text: format!("New session started: {session_id}"),
-                                recipient_id: sender_id.into(),
-                            })
-                            .await;
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "cannot create capability grant for new session");
-                        let _ = outbound
-                            .send(OutboundEvent::Error {
-                                text: "Failed to start new session: sandbox root is not accessible"
-                                    .into(),
-                                recipient_id: sender_id.into(),
-                            })
-                            .await;
-                    }
-                }
-                LoopAction::Continue
-            }
-            "help" => {
-                let help_text = [
-                    "Available commands:",
-                    "  /quit — exit",
-                    "  /new  — start a new session",
-                    "  /help — show this message",
-                ]
-                .join("\n");
-                let _ = outbound
-                    .send(OutboundEvent::Message {
-                        text: help_text,
-                        recipient_id: sender_id.into(),
-                    })
-                    .await;
-                LoopAction::Continue
-            }
-            unknown => {
-                let _ = outbound
-                    .send(OutboundEvent::Error {
-                        text: format!("Unknown command: /{unknown}"),
-                        recipient_id: sender_id.into(),
-                    })
-                    .await;
-                LoopAction::Continue
-            }
         }
     }
 

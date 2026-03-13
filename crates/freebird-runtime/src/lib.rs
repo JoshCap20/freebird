@@ -7,6 +7,7 @@
 
 pub mod agent;
 mod approval_bridge;
+mod command_handler;
 pub mod history;
 pub mod observation;
 pub mod registry;
