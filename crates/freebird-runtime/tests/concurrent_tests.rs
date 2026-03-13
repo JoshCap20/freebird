@@ -569,3 +569,105 @@ async fn test_shutdown_drains_inflight_with_timeout() {
         "aborted task should not produce a response, got: {events:?}"
     );
 }
+
+/// After a task completes and releases its semaphore permit, the next
+/// message should be processed normally — verifies permits are returned.
+#[tokio::test]
+async fn test_concurrency_limit_recovers_after_completion() {
+    let delay = Duration::from_millis(50);
+    let started = Arc::new(Notify::new());
+    // max_concurrent_tasks = 1, but the first task will finish before the second arrives.
+    let provider = SlowAsyncProvider::new(
+        "test-provider",
+        vec![("Reply 1", delay), ("Reply 2", delay)],
+    )
+    .with_start_notify(Arc::clone(&started));
+
+    let (channel, inbound_tx, mut outbound_rx, _) = MockChannel::new();
+    let runtime = AgentRuntime::new(
+        make_slow_registry("test-provider", provider),
+        Box::new(channel),
+        make_tool_executor(vec![]),
+        None,
+        Arc::new(InMemoryMemory::new()),
+        None,
+        KnowledgeConfig::default(),
+        config_with(1, 5),
+        default_tools_config(),
+        BudgetConfig::default(),
+        24,
+        Some(Arc::new(helpers::MockEventSink::new())),
+        Some(Arc::new(helpers::MockAuditSink::new())),
+        None,
+        SummarizationConfig::default(),
+    );
+
+    let runtime = Arc::new(runtime);
+    let cancel = CancellationToken::new();
+
+    let runtime_handle = {
+        let runtime = Arc::clone(&runtime);
+        let cancel = cancel.clone();
+        tokio::spawn(async move { runtime.run(cancel).await })
+    };
+
+    // Send first message — occupies the single permit.
+    inbound_tx
+        .send(InboundEvent::Message {
+            raw_text: "Hello".into(),
+            sender_id: "alice".into(),
+            attachments: vec![],
+        })
+        .await
+        .unwrap();
+
+    // Wait for the provider to start, then wait for the task to complete.
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("provider should start processing");
+    // Wait for the first task to finish (delay + margin).
+    tokio::time::sleep(delay + Duration::from_millis(200)).await;
+
+    // Now send a second message from a different sender — the permit should be free.
+    inbound_tx
+        .send(InboundEvent::Message {
+            raw_text: "Hello again".into(),
+            sender_id: "bob".into(),
+            attachments: vec![],
+        })
+        .await
+        .unwrap();
+    drop(inbound_tx);
+
+    tokio::time::timeout(Duration::from_secs(5), runtime_handle)
+        .await
+        .expect("runtime should exit within timeout")
+        .unwrap()
+        .unwrap();
+
+    let mut events = Vec::new();
+    while let Ok(event) = outbound_rx.try_recv() {
+        events.push(event);
+    }
+    let events = without_status_events(events);
+    let messages: Vec<_> = events.iter().filter_map(|e| message_text(e)).collect();
+
+    // Both messages should have been processed (no "busy" error).
+    assert!(
+        messages.contains(&"Reply 1"),
+        "first message should succeed, got: {messages:?}"
+    );
+    assert!(
+        messages.contains(&"Reply 2"),
+        "second message should succeed after permit recovery, got: {messages:?}"
+    );
+
+    // No "busy" errors — permits were properly returned.
+    let has_busy_error = events
+        .iter()
+        .any(|e| error_text(e).is_some_and(|t| t.contains("Server is busy")));
+    assert!(
+        !has_busy_error,
+        "no messages should be rejected, got: {events:?}"
+    );
+}
