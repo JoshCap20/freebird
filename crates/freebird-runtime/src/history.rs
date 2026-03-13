@@ -1,9 +1,8 @@
-//! Conversation history reconstruction for provider API submission.
+//! Conversation history utilities.
 //!
 //! Converts the domain-model `Conversation`/`Turn` structure into the flat
-//! `Vec<Message>` format expected by the Anthropic Messages API. This is
-//! the sole translation boundary between the persistence model and the
-//! provider wire format.
+//! `Vec<Message>` format expected by the Anthropic Messages API, and provides
+//! cross-cutting helpers for message counting and token estimation.
 
 use freebird_traits::memory::{Conversation, ToolInvocation, Turn};
 use freebird_traits::provider::{ContentBlock, Message, Role};
@@ -36,27 +35,54 @@ pub fn conversation_to_messages(conversation: &Conversation) -> Vec<Message> {
     messages
 }
 
-/// Estimate total message count for pre-allocation.
+/// Count the number of flat API messages a single turn produces.
 ///
-/// For each turn: 1 user message + N assistant messages + 1 tool-result
-/// message per assistant message that contains `ToolUse` blocks.
-fn estimate_message_count(conversation: &Conversation) -> usize {
-    conversation
-        .turns
+/// Formula: 1 user message + N assistant messages + 1 tool-result message
+/// per assistant message that contains `ToolUse` blocks.
+///
+/// Used by both message pre-allocation and turn-to-message-range mapping.
+#[must_use]
+pub fn messages_per_turn(turn: &Turn) -> usize {
+    let tool_result_messages = turn
+        .assistant_messages
         .iter()
-        .map(|t| {
-            let tool_result_messages = t
-                .assistant_messages
+        .filter(|msg| {
+            msg.content
                 .iter()
-                .filter(|msg| {
-                    msg.content
-                        .iter()
-                        .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
-                })
-                .count();
-            1 + t.assistant_messages.len() + tool_result_messages
+                .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
         })
-        .sum()
+        .count();
+    1 + turn.assistant_messages.len() + tool_result_messages
+}
+
+/// Estimate total message count for pre-allocation.
+fn estimate_message_count(conversation: &Conversation) -> usize {
+    conversation.turns.iter().map(messages_per_turn).sum()
+}
+
+/// Estimate token count for a message list using the ~4 chars/token heuristic.
+///
+/// Intentionally conservative (overestimates) to trigger summarization
+/// before actually hitting context limits.
+#[must_use]
+pub fn estimate_token_count(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .map(|msg| {
+            msg.content
+                .iter()
+                .map(|block| match block {
+                    ContentBlock::Text { text } => text.len(),
+                    ContentBlock::ToolUse { name, input, .. } => {
+                        name.len() + input.to_string().len()
+                    }
+                    ContentBlock::ToolResult { content, .. } => content.len(),
+                    ContentBlock::Image { data, .. } => data.len(),
+                })
+                .sum::<usize>()
+        })
+        .sum::<usize>()
+        / 4
 }
 
 /// Reconstruct a single turn into the message sequence.

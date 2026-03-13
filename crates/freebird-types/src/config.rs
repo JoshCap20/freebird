@@ -17,6 +17,8 @@ pub struct AppConfig {
     pub memory: MemoryConfig,
     #[serde(default)]
     pub knowledge: KnowledgeConfig,
+    #[serde(default)]
+    pub summarization: SummarizationConfig,
     pub security: SecurityConfig,
     pub logging: LoggingConfig,
     #[serde(default)]
@@ -353,6 +355,78 @@ const fn default_max_context_tokens() -> usize {
     2000
 }
 
+// ---------------------------------------------------------------------------
+// Conversation Summarization
+// ---------------------------------------------------------------------------
+
+/// Re-export from `freebird-traits` where the canonical definition lives
+/// (required by the `SummarySink` trait).
+pub use freebird_traits::summary::ConversationSummary;
+
+/// Conversation summarization configuration.
+///
+/// Controls when and how the agent compresses older conversation turns
+/// into summaries to stay within context window limits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SummarizationConfig {
+    /// Whether conversation summarization is enabled.
+    #[serde(default = "default_summarization_enabled")]
+    pub enabled: bool,
+    /// Trigger threshold as a fraction (0.0–1.0) of the model's
+    /// `max_context_tokens`. When estimated token count of the message
+    /// history exceeds this fraction, summarization triggers.
+    /// Default: 0.75 (75%).
+    #[serde(default = "default_trigger_threshold")]
+    pub trigger_threshold: f64,
+    /// Number of recent turns to preserve intact (never summarized).
+    /// These provide the model with immediate working context.
+    /// Default: 5.
+    #[serde(default = "default_preserve_recent_turns")]
+    pub preserve_recent_turns: usize,
+    /// Maximum tokens for the generated summary. Passed as `max_tokens`
+    /// to the summarization provider request.
+    /// Default: 1024.
+    #[serde(default = "default_max_summary_tokens")]
+    pub max_summary_tokens: u32,
+    /// Minimum total turns in a conversation before summarization can
+    /// trigger. Prevents thrashing on short conversations.
+    /// Default: 8.
+    #[serde(default = "default_min_turns_before_summarize")]
+    pub min_turns_before_summarize: usize,
+}
+
+impl Default for SummarizationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_summarization_enabled(),
+            trigger_threshold: default_trigger_threshold(),
+            preserve_recent_turns: default_preserve_recent_turns(),
+            max_summary_tokens: default_max_summary_tokens(),
+            min_turns_before_summarize: default_min_turns_before_summarize(),
+        }
+    }
+}
+
+const fn default_summarization_enabled() -> bool {
+    true
+}
+
+const fn default_trigger_threshold() -> f64 {
+    0.75
+}
+
+const fn default_preserve_recent_turns() -> usize {
+    5
+}
+
+const fn default_max_summary_tokens() -> u32 {
+    1024
+}
+
+const fn default_min_turns_before_summarize() -> usize {
+    8
+}
+
 /// Token and tool-round budget limits (CLAUDE.md §13 — ASI08).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BudgetConfig {
@@ -642,6 +716,8 @@ pub struct LoggingConfig {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use freebird_traits::id::SessionId;
     use std::net::{IpAddr, Ipv4Addr};
 
     /// Build a minimal valid TOML config with customizable sections.
@@ -1288,5 +1364,54 @@ drain_timeout_secs = 1"#,
             "default threshold should be 0.5"
         );
         assert_eq!(config.tools.edit.large_edit_action, LargeEditAction::Warn);
+    }
+
+    // ── Summarization config tests ──────────────────────────────
+
+    #[test]
+    fn test_summarization_config_defaults() {
+        let config = SummarizationConfig::default();
+        assert!(config.enabled);
+        assert!((config.trigger_threshold - 0.75).abs() < f64::EPSILON);
+        assert_eq!(config.preserve_recent_turns, 5);
+        assert_eq!(config.max_summary_tokens, 1024);
+        assert_eq!(config.min_turns_before_summarize, 8);
+    }
+
+    #[test]
+    fn test_summarization_config_from_default_toml() {
+        let toml_str = include_str!("../../../config/default.toml");
+        let config: AppConfig =
+            toml::from_str(toml_str).expect("default.toml should deserialize into AppConfig");
+
+        assert!(config.summarization.enabled);
+        assert!((config.summarization.trigger_threshold - 0.75).abs() < f64::EPSILON);
+        assert_eq!(config.summarization.preserve_recent_turns, 5);
+        assert_eq!(config.summarization.max_summary_tokens, 1024);
+        assert_eq!(config.summarization.min_turns_before_summarize, 8);
+    }
+
+    #[test]
+    fn test_summarization_config_absent_uses_defaults() {
+        // When [summarization] is absent, serde(default) kicks in
+        let toml_str = config_toml(&[]);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert!(config.summarization.enabled);
+        assert_eq!(config.summarization.preserve_recent_turns, 5);
+    }
+
+    #[test]
+    fn test_conversation_summary_serde_roundtrip() {
+        let summary = ConversationSummary {
+            session_id: SessionId::from("test-session"),
+            text: "User asked about Rust. We discussed ownership and borrowing.".into(),
+            summarized_through_turn: 4,
+            original_token_estimate: 2500,
+            generated_at: Utc::now(),
+        };
+
+        let json = serde_json::to_string(&summary).unwrap();
+        let back: ConversationSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, summary);
     }
 }

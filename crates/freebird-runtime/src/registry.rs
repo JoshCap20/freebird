@@ -88,6 +88,24 @@ impl ProviderRegistry {
         self.providers.is_empty()
     }
 
+    /// Look up a model by ID across all registered providers.
+    ///
+    /// Scans every provider's `supported_models` list and returns the first
+    /// match. Returns `None` if no provider advertises this model.
+    #[must_use]
+    pub fn get_model_info(
+        &self,
+        model_id: &freebird_traits::id::ModelId,
+    ) -> Option<&freebird_traits::provider::ModelInfo> {
+        self.providers.values().find_map(|provider| {
+            provider
+                .info()
+                .supported_models
+                .iter()
+                .find(|m| m.id == *model_id)
+        })
+    }
+
     /// Return `true` if any provider in the failover chain advertises streaming support.
     ///
     /// Used as a pre-check before attempting the streaming path — avoids the

@@ -42,7 +42,7 @@ use freebird_traits::tool::{
 };
 use freebird_types::config::{
     BudgetConfig, ContextConfig, EditConfig, InjectionConfig, KnowledgeConfig, RuntimeConfig,
-    ToolsConfig,
+    SummarizationConfig, ToolsConfig,
 };
 
 use helpers::{
@@ -401,6 +401,8 @@ fn make_test_runtime_with_sinks(
         24, // default_session_ttl_hours
         Some(event_sink),
         Some(audit_sink),
+        None,
+        SummarizationConfig::default(),
     )
 }
 
@@ -724,6 +726,8 @@ async fn test_tool_use_timeout() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new())),
         Some(Arc::new(helpers::MockAuditSink::new())),
+        None,
+        SummarizationConfig::default(),
     );
 
     let events = without_status_events(
@@ -787,6 +791,8 @@ async fn test_tool_use_max_rounds_exceeded() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new())),
         Some(Arc::new(helpers::MockAuditSink::new())),
+        None,
+        SummarizationConfig::default(),
     );
 
     let events = without_status_events(
@@ -871,6 +877,8 @@ async fn test_conversation_saved_after_turn() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new())),
         Some(Arc::new(helpers::MockAuditSink::new())),
+        None,
+        SummarizationConfig::default(),
     );
 
     let _events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hello").await;
@@ -913,6 +921,8 @@ async fn test_tool_invocations_recorded_in_turn() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new())),
         Some(Arc::new(helpers::MockAuditSink::new())),
+        None,
+        SummarizationConfig::default(),
     );
 
     let _ = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Use tool").await;
@@ -1042,6 +1052,8 @@ async fn test_tool_output_injection_replaced_with_error() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new())),
         Some(Arc::new(helpers::MockAuditSink::new())),
+        None,
+        SummarizationConfig::default(),
     );
 
     let events = without_status_events(
@@ -1095,6 +1107,8 @@ async fn test_model_output_injection_blocks_delivery() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new())),
         Some(Arc::new(helpers::MockAuditSink::new())),
+        None,
+        SummarizationConfig::default(),
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -1144,6 +1158,8 @@ async fn test_truncated_response_injection_blocks_delivery() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new())),
         Some(Arc::new(helpers::MockAuditSink::new())),
+        None,
+        SummarizationConfig::default(),
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -1218,6 +1234,8 @@ async fn test_memory_load_error_sends_error_event() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new())),
         Some(Arc::new(helpers::MockAuditSink::new())),
+        None,
+        SummarizationConfig::default(),
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -1257,6 +1275,8 @@ async fn test_memory_save_error_does_not_crash() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new())),
         Some(Arc::new(helpers::MockAuditSink::new())),
+        None,
+        SummarizationConfig::default(),
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -1356,6 +1376,8 @@ async fn test_continuing_session_includes_history_in_request() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new())),
         Some(Arc::new(helpers::MockAuditSink::new())),
+        None,
+        SummarizationConfig::default(),
     );
 
     let events =
@@ -1440,6 +1462,8 @@ async fn test_new_conversation_uses_config_values() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new())),
         Some(Arc::new(helpers::MockAuditSink::new())),
+        None,
+        SummarizationConfig::default(),
     );
 
     let _events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -1497,6 +1521,8 @@ async fn test_multi_turn_within_same_session() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new())),
         Some(Arc::new(helpers::MockAuditSink::new())),
+        None,
+        SummarizationConfig::default(),
     );
 
     // Send two messages then quit — runtime processes them sequentially
@@ -1631,6 +1657,8 @@ async fn test_token_budget_per_request_exceeded() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new())),
         Some(Arc::new(helpers::MockAuditSink::new())),
+        None,
+        SummarizationConfig::default(),
     );
 
     let events = without_status_events(
@@ -1677,6 +1705,8 @@ async fn test_token_budget_per_session_exceeded() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new())),
         Some(Arc::new(helpers::MockAuditSink::new())),
+        None,
+        SummarizationConfig::default(),
     );
 
     // Send two messages — first should succeed (300 tokens), second should fail (600 > 500)
@@ -1790,6 +1820,8 @@ async fn test_capability_denial_propagates_to_provider() {
         24,
         Some(Arc::new(helpers::MockEventSink::new())),
         Some(Arc::new(helpers::MockAuditSink::new())),
+        None,
+        SummarizationConfig::default(),
     );
 
     // Pre-seed the session with a restricted grant: only FileRead, no ShellExecute.

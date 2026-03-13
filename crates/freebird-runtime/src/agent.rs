@@ -31,7 +31,8 @@ use freebird_traits::provider::{
 };
 use freebird_traits::tool::{Capability, ToolOutcome};
 use freebird_types::config::{
-    BudgetConfig, InjectionResponse, KnowledgeConfig, RuntimeConfig, ToolsConfig,
+    BudgetConfig, ConversationSummary, InjectionResponse, KnowledgeConfig, RuntimeConfig,
+    SummarizationConfig, ToolsConfig,
 };
 // Re-exported for test module via `use super::*`.
 #[cfg(test)]
@@ -40,9 +41,12 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::history::conversation_to_messages;
+use freebird_traits::summary::SummarySink;
+
+use crate::history::{conversation_to_messages, estimate_token_count};
 use crate::registry::ProviderRegistry;
 use crate::stream::StreamAccumulator;
+use crate::summarize;
 
 use crate::session::SessionManager;
 
@@ -97,6 +101,8 @@ pub struct AgentRuntime {
     default_session_ttl_hours: u64,
     event_sink: Option<Arc<dyn EventSink>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
+    summary_store: Option<Arc<dyn SummarySink>>,
+    summarization_config: SummarizationConfig,
     sessions: SessionManager,
 }
 
@@ -121,6 +127,8 @@ impl AgentRuntime {
         default_session_ttl_hours: u64,
         event_sink: Option<Arc<dyn EventSink>>,
         audit_sink: Option<Arc<dyn AuditSink>>,
+        summary_store: Option<Arc<dyn SummarySink>>,
+        summarization_config: SummarizationConfig,
     ) -> Self {
         let sessions = SessionManager::with_config(config.session.clone());
         Self {
@@ -137,6 +145,8 @@ impl AgentRuntime {
             default_session_ttl_hours,
             event_sink,
             audit_sink,
+            summary_store,
+            summarization_config,
             sessions,
         }
     }
@@ -148,6 +158,173 @@ impl AgentRuntime {
     #[must_use]
     pub const fn sessions(&self) -> &SessionManager {
         &self.sessions
+    }
+
+    /// Look up `max_context_tokens` for the conversation's model from the
+    /// provider registry. Returns `None` if no matching model is found.
+    fn get_max_context_tokens(&self, conversation: &Conversation) -> Option<u32> {
+        self.provider_registry
+            .get_model_info(&conversation.model_id)
+            .map(|m| m.max_context_tokens)
+    }
+
+    /// Attempt to summarize older conversation turns.
+    ///
+    /// Non-fatal: all errors are logged and skipped. Summarization is retried
+    /// on the next turn. Returns the updated summary if one was generated.
+    #[allow(clippy::too_many_lines)]
+    async fn maybe_summarize(
+        &self,
+        session_id: &SessionId,
+        conversation: &Conversation,
+        existing_summary: Option<&ConversationSummary>,
+    ) -> Option<ConversationSummary> {
+        let store = self.summary_store.as_ref()?;
+
+        if !self.summarization_config.enabled {
+            return None;
+        }
+
+        // Need max_context_tokens to evaluate threshold
+        let Some(max_context_tokens) = self.get_max_context_tokens(conversation) else {
+            tracing::debug!(%session_id, "cannot determine max_context_tokens for model — skipping summarization");
+            return None;
+        };
+
+        // Check if summarization is needed
+        let messages = conversation_to_messages(conversation);
+        if !summarize::should_summarize(
+            &self.summarization_config,
+            &messages,
+            max_context_tokens,
+            conversation.turns.len(),
+            existing_summary,
+        ) {
+            return None;
+        }
+
+        // Budget guard: skip if remaining tokens < 2 * max_summary_tokens
+        let budget = self.sessions.get_budget(session_id).await;
+        if let Some(ref b) = budget {
+            let remaining = b.remaining_tokens();
+            let required = u64::from(self.summarization_config.max_summary_tokens) * 2;
+            if remaining < required {
+                tracing::info!(
+                    %session_id, remaining, required,
+                    "insufficient token budget for summarization — skipping"
+                );
+                return None;
+            }
+        }
+
+        // Build the summarization request
+        let Some((request, new_summarized_through)) = summarize::build_summary_request(
+            &self.summarization_config,
+            conversation,
+            existing_summary,
+            &conversation.model_id,
+        ) else {
+            tracing::debug!(%session_id, "not enough turns to summarize");
+            return None;
+        };
+
+        tracing::info!(
+            %session_id,
+            summarized_through = new_summarized_through,
+            "triggering conversation summarization"
+        );
+
+        self.audit(
+            session_id,
+            AuditEventType::SummarizationTriggered {
+                summarized_through_turn: new_summarized_through,
+                total_turns: conversation.turns.len(),
+                original_token_estimate: estimate_token_count(&messages),
+            },
+        )
+        .await;
+
+        // Call the provider
+        let (_provider_id, response) = match self
+            .provider_registry
+            .complete_with_failover(request)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(%session_id, error = %e, "summarization provider call failed — skipping");
+                return None;
+            }
+        };
+
+        // Record token usage (non-fatal if budget exceeded)
+        if let Some(ref b) = budget {
+            if let Err(e) = b.record_usage(&response.usage) {
+                tracing::warn!(%session_id, error = %e, "summarization token usage exceeded budget");
+            }
+        }
+
+        // Extract summary text from response
+        let summary_text = response
+            .message
+            .content
+            .iter()
+            .filter_map(|block| {
+                if let ContentBlock::Text { text } = block {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if summary_text.is_empty() {
+            tracing::warn!(%session_id, "summarization response was empty — skipping");
+            return None;
+        }
+
+        // Scan summary for injection via ScannedModelResponse
+        let scanned = ScannedModelResponse::from_raw(&summary_text);
+        if scanned.injection_detected() {
+            tracing::warn!(
+                %session_id,
+                "injection detected in summarization response — discarding"
+            );
+            self.audit(
+                session_id,
+                AuditEventType::InjectionDetected {
+                    pattern: "injection in summarization response".into(),
+                    source: InjectionSource::ModelResponse,
+                    severity: Severity::Critical,
+                },
+            )
+            .await;
+            return None;
+        }
+
+        // Build and save the summary
+        let original_token_estimate = estimate_token_count(&messages);
+        let summary = ConversationSummary {
+            session_id: session_id.clone(),
+            text: scanned.content().to_owned(),
+            summarized_through_turn: new_summarized_through,
+            original_token_estimate,
+            generated_at: Utc::now(),
+        };
+
+        if let Err(e) = store.save(&summary).await {
+            tracing::warn!(%session_id, error = %e, "failed to persist summary — skipping");
+            return None;
+        }
+
+        tracing::info!(
+            %session_id,
+            summarized_through = new_summarized_through,
+            "conversation summary saved"
+        );
+
+        Some(summary)
     }
 
     /// Create a default [`CapabilityGrant`] for a new session.
@@ -635,6 +812,25 @@ impl AgentRuntime {
             return;
         };
 
+        // 3b. Load existing summary and attempt summarization
+        let existing_summary = if let Some(ref store) = self.summary_store {
+            match store.load(session_id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(%session_id, error = %e, "failed to load summary — proceeding without");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Attempt summarization before the agentic loop. Non-fatal.
+        let summary = self
+            .maybe_summarize(session_id, &conversation, existing_summary.as_ref())
+            .await
+            .or(existing_summary);
+
         // 4. Check streaming support and dispatch to appropriate loop
         let use_streaming = self
             .channel
@@ -651,6 +847,7 @@ impl AgentRuntime {
                 &conversation,
                 &grant,
                 outbound,
+                summary.as_ref(),
             )
             .await
         } else {
@@ -662,11 +859,12 @@ impl AgentRuntime {
                 &grant,
                 outbound,
                 None,
+                summary.as_ref(),
             )
             .await
         };
 
-        // 4. Persist conversation
+        // 5. Persist conversation
         conversation.turns.push(current_turn);
         conversation.updated_at = Utc::now();
 
@@ -955,6 +1153,7 @@ impl AgentRuntime {
         safe_message: &SafeMessage,
         conversation: &Conversation,
         grant: &CapabilityGrant,
+        summary: Option<&ConversationSummary>,
     ) -> (Vec<Message>, Turn, Vec<ToolDefinition>) {
         let user_message = Message {
             role: Role::User,
@@ -966,7 +1165,12 @@ impl AgentRuntime {
 
         let tool_definitions = self.tool_executor.tool_definitions_for_grant(grant);
 
-        let mut messages = conversation_to_messages(conversation);
+        let messages = conversation_to_messages(conversation);
+
+        // Apply summarization: skip summarized turns and prepend summary.
+        // This must happen before observation collapsing so that collapsed
+        // tool outputs are only computed for the unsummarized portion.
+        let mut messages = summarize::apply_summary_to_messages(messages, conversation, summary);
 
         // Collapse stale tool outputs from older turns to free context space.
         // Only affects the wire messages — persisted data retains full output.
@@ -981,6 +1185,7 @@ impl AgentRuntime {
         // CLAUDE.md §14: scan loaded conversation history for context injection
         // before sending to provider. Filter out any messages containing injection
         // patterns to prevent memory poisoning attacks.
+        // This also catches any injection in the prepended summary text.
         messages.retain(|msg| {
             for block in &msg.content {
                 if let ContentBlock::Text { text } = block {
@@ -1201,9 +1406,10 @@ impl AgentRuntime {
         grant: &CapabilityGrant,
         outbound: &mpsc::Sender<OutboundEvent>,
         initial_request: Option<CompletionRequest>,
+        summary: Option<&ConversationSummary>,
     ) -> Turn {
         let (mut messages, mut current_turn, tool_definitions) = self
-            .prepare_agentic_loop(safe_message, conversation, grant)
+            .prepare_agentic_loop(safe_message, conversation, grant, summary)
             .await;
 
         // Emit TurnStarted event
@@ -1792,6 +1998,7 @@ impl AgentRuntime {
     /// Injection scan on accumulated text is audit-only — the text has already
     /// been delivered to the user via `StreamChunk` events.
     #[allow(clippy::too_many_lines)] // budget enforcement adds necessary branches
+    #[allow(clippy::too_many_arguments)]
     async fn run_agentic_loop_streaming(
         &self,
         safe_message: &SafeMessage,
@@ -1800,9 +2007,10 @@ impl AgentRuntime {
         conversation: &Conversation,
         grant: &CapabilityGrant,
         outbound: &mpsc::Sender<OutboundEvent>,
+        summary: Option<&ConversationSummary>,
     ) -> Turn {
         let (mut messages, mut current_turn, tool_definitions) = self
-            .prepare_agentic_loop(safe_message, conversation, grant)
+            .prepare_agentic_loop(safe_message, conversation, grant, summary)
             .await;
 
         let turn_index = conversation.turns.len();
@@ -1868,6 +2076,7 @@ impl AgentRuntime {
                             grant,
                             outbound,
                             Some(request),
+                            summary,
                         )
                         .await;
                 }
@@ -2333,6 +2542,8 @@ mod tests {
             24, // default_session_ttl_hours
             None,
             None,
+            None,
+            SummarizationConfig::default(),
         )
     }
 
