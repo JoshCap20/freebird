@@ -13,5 +13,6 @@ pub mod router;
 pub mod session;
 pub mod shutdown;
 pub mod stream;
+pub mod summarize;
 pub mod tool_executor;
 pub mod tool_registry;
