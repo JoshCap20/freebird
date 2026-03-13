@@ -18,6 +18,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use freebird_runtime::registry::ProviderRegistry;
 use freebird_runtime::tool_executor::ToolExecutor;
+use freebird_security::capability::RevocationList;
 use freebird_traits::audit::AuditSink;
 use freebird_traits::channel::{
     AuthRequirement, Channel, ChannelError, ChannelHandle, ChannelInfo, InboundEvent, OutboundEvent,
@@ -395,7 +396,7 @@ pub fn make_tool_executor_with_audit(
         Some(Arc::new(NoopMemory) as Arc<dyn Memory>),
         None,
         freebird_types::config::InjectionConfig::default(),
-        None,
+        Some(Arc::new(RevocationList::new())),
     )
     .expect("test tool executor construction should not fail")
 }
