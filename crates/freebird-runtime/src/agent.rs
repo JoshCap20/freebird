@@ -241,6 +241,8 @@ impl AgentRuntime {
             "triggering conversation summarization"
         );
 
+        // No dedicated audit variant for summarization — reuse PolicyViolation
+        // at Low severity as an operational log entry (not a true violation).
         self.audit(
             session_id,
             AuditEventType::PolicyViolation {

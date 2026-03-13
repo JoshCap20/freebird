@@ -31,25 +31,6 @@ Produce a concise summary that preserves:
 Be factual and specific. Include exact file paths and code identifiers.
 Do not include raw tool output content — only what was done and the result.";
 
-/// Errors specific to the summarization subsystem.
-#[derive(Debug, thiserror::Error)]
-pub enum SummarizationError {
-    #[error("provider failed to generate summary: {0}")]
-    ProviderFailed(#[from] freebird_traits::provider::ProviderError),
-
-    #[error("generated summary failed injection scan: {pattern}")]
-    InjectionDetected { pattern: String },
-
-    #[error("not enough turns to summarize (need > {preserve_recent}, have {total})")]
-    InsufficientTurns {
-        preserve_recent: usize,
-        total: usize,
-    },
-
-    #[error("session budget too low for summarization (remaining: {remaining}, needed: {needed})")]
-    InsufficientBudget { remaining: u64, needed: u64 },
-}
-
 /// Estimate token count for a message list using the ~4 chars/token heuristic.
 ///
 /// Intentionally conservative (overestimates) to trigger summarization
