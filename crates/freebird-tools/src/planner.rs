@@ -17,6 +17,7 @@ use freebird_traits::tool::{
 };
 use freebird_types::planner::{ChangeKind, CrateKind, PlannedChange};
 
+use crate::common::{extract_optional_bool, extract_optional_usize};
 use crate::repo_map::cache::TagCache;
 use crate::repo_map::graph::{ReferenceGraph, Tag, TagKind, extract_rust_tags};
 
@@ -79,6 +80,26 @@ fn infer_crate_kind(path: &Path) -> CrateKind {
     }
 }
 
+/// Merge explicit and inferred dependencies, deduplicate, and remove self-references.
+fn resolve_dependencies(
+    explicit: Option<Vec<usize>>,
+    inferred: Vec<usize>,
+    self_id: usize,
+) -> Vec<usize> {
+    let mut deps = if let Some(mut explicit) = explicit {
+        for dep in inferred {
+            if !explicit.contains(&dep) {
+                explicit.push(dep);
+            }
+        }
+        explicit
+    } else {
+        inferred
+    };
+    deps.retain(|&d| d != self_id);
+    deps
+}
+
 /// Infer `depends_on` for a file from the reference graph.
 ///
 /// If file[i] references symbols defined in file[j], and file[j] is
@@ -119,27 +140,24 @@ fn analyze_files(
     file_paths: &[PathBuf],
 ) -> (HashMap<PathBuf, Vec<Tag>>, ReferenceGraph) {
     let mut parser = tree_sitter::Parser::new();
-    // Ignore error — if language fails to set, parsing returns no tags
-    let _: Result<(), _> = parser.set_language(&tree_sitter_rust::LANGUAGE.into());
+    if let Err(e) = parser.set_language(&tree_sitter_rust::LANGUAGE.into()) {
+        tracing::warn!(%e, "failed to set tree-sitter language; AST analysis will be skipped");
+    }
 
     let mut cache = TagCache::load(sandbox_root);
     let mut tags_by_file: HashMap<PathBuf, Vec<Tag>> = HashMap::new();
 
     for path in file_paths {
-        let abs_path = if path.is_absolute() {
-            path.clone()
-        } else {
-            sandbox_root.join(path)
-        };
+        // Paths are already resolved to absolute by SafeFilePath validation
 
         // Try cache first
-        if let Some(cached) = cache.get(&abs_path) {
-            tags_by_file.insert(abs_path, cached);
+        if let Some(cached) = cache.get(path) {
+            tags_by_file.insert(path.clone(), cached);
             continue;
         }
 
         // Parse the file
-        let Ok(source) = std::fs::read(&abs_path) else {
+        let Ok(source) = std::fs::read(path) else {
             continue;
         };
 
@@ -147,16 +165,16 @@ fn analyze_files(
             continue;
         };
 
-        let tags = extract_rust_tags(&tree, &source, &abs_path);
+        let tags = extract_rust_tags(&tree, &source, path);
 
         // Update cache
-        if let Ok(meta) = std::fs::metadata(&abs_path) {
+        if let Ok(meta) = std::fs::metadata(path) {
             if let Ok(mtime) = meta.modified() {
-                cache.insert(abs_path.clone(), mtime, &tags);
+                cache.insert(path.clone(), mtime, &tags);
             }
         }
 
-        tags_by_file.insert(abs_path, tags);
+        tags_by_file.insert(path.clone(), tags);
     }
 
     cache.save(sandbox_root);
@@ -182,10 +200,7 @@ fn parse_input(
     sandbox_root: &Path,
     allowed_dirs: &[PathBuf],
 ) -> Result<(Vec<InputChange>, bool), ToolError> {
-    let auto_detect = input
-        .get("auto_detect")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(true);
+    let auto_detect = extract_optional_bool(input, "auto_detect").unwrap_or(true);
 
     let changes_arr = input
         .get("changes")
@@ -198,14 +213,10 @@ fn parse_input(
     let mut changes = Vec::with_capacity(changes_arr.len());
 
     for (i, entry) in changes_arr.iter().enumerate() {
-        let id = entry
-            .get("id")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|v| usize::try_from(v).ok())
-            .ok_or_else(|| ToolError::InvalidInput {
-                tool: PlanEditsTool::NAME.into(),
-                reason: format!("change[{i}]: missing or invalid 'id'"),
-            })?;
+        let id = extract_optional_usize(entry, "id").ok_or_else(|| ToolError::InvalidInput {
+            tool: PlanEditsTool::NAME.into(),
+            reason: format!("change[{i}]: missing or invalid 'id'"),
+        })?;
 
         let file_path_str = entry
             .get("file_path")
@@ -401,22 +412,7 @@ impl Tool for PlanEditsTool {
             // Infer + merge dependencies
             let depends_on = if auto_detect {
                 let inferred = infer_dependencies(&ic.file_path, &graph, &file_id_map);
-                if let Some(explicit) = ic.depends_on {
-                    // Union of explicit + inferred, deduplicated
-                    let mut merged = explicit;
-                    for dep in inferred {
-                        if !merged.contains(&dep) {
-                            merged.push(dep);
-                        }
-                    }
-                    // Remove self-dependencies
-                    merged.retain(|&d| d != ic.id);
-                    merged
-                } else {
-                    let mut deps = inferred;
-                    deps.retain(|&d| d != ic.id);
-                    deps
-                }
+                resolve_dependencies(ic.depends_on, inferred, ic.id)
             } else {
                 ic.depends_on.unwrap_or_default()
             };
@@ -667,12 +663,7 @@ mod tests {
         let inferred = infer_dependencies(&file_a, &graph, &file_id_map);
         let explicit = vec![2usize];
 
-        let mut merged = explicit;
-        for dep in inferred {
-            if !merged.contains(&dep) {
-                merged.push(dep);
-            }
-        }
+        let mut merged = resolve_dependencies(Some(explicit), inferred, 0);
         merged.sort_unstable();
         assert_eq!(merged, vec![1, 2]); // Both B and C
     }
