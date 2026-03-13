@@ -99,7 +99,7 @@ impl FreebirdBuilder {
             knowledge_store,
             event_sink,
             audit_sink,
-            db: _db,
+            db,
         } = database::init_database(&config, &self.passphrase).map_err(CoreError::Database)?;
 
         // 3. VERIFY AUDIT CHAIN
@@ -201,7 +201,12 @@ impl FreebirdBuilder {
         .context("failed to construct ToolExecutor (duplicate tool names?)")
         .map_err(CoreError::ToolRegistry)?;
 
-        // 12. AGENT RUNTIME
+        // 12. SUMMARY STORE
+        let summary_store = Some(Arc::new(
+            freebird_memory::sqlite_summary::SummaryStore::new(Arc::clone(&db)),
+        ));
+
+        // 13. AGENT RUNTIME
         let runtime = AgentRuntime::new(
             registry,
             channel,
@@ -216,6 +221,8 @@ impl FreebirdBuilder {
             config.security.default_session_ttl_hours,
             event_sink,
             audit_sink.clone(),
+            summary_store,
+            config.summarization,
         );
 
         Ok(FreebirdApp {

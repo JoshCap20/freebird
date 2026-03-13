@@ -16,7 +16,8 @@ use freebird_runtime::registry::ProviderRegistry;
 use freebird_traits::channel::InboundEvent;
 use freebird_traits::id::{ModelId, ProviderId};
 use freebird_types::config::{
-    BudgetConfig, ContextConfig, EditConfig, KnowledgeConfig, RuntimeConfig, ToolsConfig,
+    BudgetConfig, ContextConfig, EditConfig, KnowledgeConfig, RuntimeConfig, SummarizationConfig,
+    ToolsConfig,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -60,6 +61,8 @@ fn make_runtime(channel: MockChannel) -> AgentRuntime {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
+        None,
+        SummarizationConfig::default(),
     )
 }
 
