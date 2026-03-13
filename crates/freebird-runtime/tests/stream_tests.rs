@@ -521,9 +521,9 @@ fn make_stream_runtime(
 }
 
 async fn send_message_and_collect(
-    inbound_tx: &mpsc::Sender<InboundEvent>,
+    inbound_tx: mpsc::Sender<InboundEvent>,
     mut outbound_rx: mpsc::Receiver<OutboundEvent>,
-    mut runtime: AgentRuntime,
+    runtime: AgentRuntime,
     text: &str,
 ) -> Vec<OutboundEvent> {
     inbound_tx
@@ -534,17 +534,11 @@ async fn send_message_and_collect(
         })
         .await
         .unwrap();
-    inbound_tx
-        .send(InboundEvent::Command {
-            name: "quit".into(),
-            args: vec![],
-            sender_id: "alice".into(),
-        })
-        .await
-        .unwrap();
+    // Drop sender to trigger EOF — runtime will drain spawned tasks before exiting.
+    drop(inbound_tx);
 
     let cancel = CancellationToken::new();
-    tokio::time::timeout(Duration::from_secs(5), runtime.run(cancel))
+    tokio::time::timeout(Duration::from_secs(5), Arc::new(runtime).run(cancel))
         .await
         .expect("runtime should exit within timeout")
         .unwrap();
@@ -577,7 +571,7 @@ async fn test_streaming_text_delivery() {
     let (channel, inbound_tx, outbound_rx) = StreamingMockChannel::new();
     let runtime = make_stream_runtime(channel, provider, make_tool_executor(vec![]));
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // Expect: StreamChunk("Hello world") + StreamEnd + Message("Goodbye!")
     assert_eq!(stream_chunk_text(&events[0]), Some("Hello world"));
@@ -592,7 +586,7 @@ async fn test_streaming_multiple_deltas() {
     let (channel, inbound_tx, outbound_rx) = StreamingMockChannel::new();
     let runtime = make_stream_runtime(channel, provider, make_tool_executor(vec![]));
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // 3 StreamChunks + 1 StreamEnd + 1 quit Message
     assert_eq!(stream_chunk_text(&events[0]), Some("Hello"));
@@ -620,7 +614,7 @@ async fn test_streaming_tool_use_round() {
         make_tool_executor(vec![Box::new(tool)])
     });
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Read file").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Read file").await;
 
     // Round 1: StreamChunk("Let me check") + StreamEnd (tool use)
     // ToolStart + ToolEnd (tool status events)
@@ -640,7 +634,7 @@ async fn test_streaming_mid_stream_error() {
     let (channel, inbound_tx, outbound_rx) = StreamingMockChannel::new();
     let runtime = make_stream_runtime(channel, provider, make_tool_executor(vec![]));
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // StreamChunk("partial") + StreamEnd + Error + quit
     assert_eq!(stream_chunk_text(&events[0]), Some("partial"));
@@ -656,7 +650,7 @@ async fn test_streaming_max_tokens() {
     let (channel, inbound_tx, outbound_rx) = StreamingMockChannel::new();
     let runtime = make_stream_runtime(channel, provider, make_tool_executor(vec![]));
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // StreamChunk + StreamEnd + Message(truncation notice) + quit
     assert_eq!(stream_chunk_text(&events[0]), Some("truncated response"));
@@ -697,7 +691,7 @@ async fn test_streaming_fallback_on_stream_setup_failure() {
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     );
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // Should get a regular Message (not StreamChunk) since we fell back
     assert_eq!(message_text(&events[0]), Some("fallback response"));
@@ -735,7 +729,7 @@ async fn test_non_streaming_channel_uses_non_streaming_path() {
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     );
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // Should get a Message (non-streaming path), not StreamChunks
     assert_eq!(message_text(&events[0]), Some("non-streaming response"));
@@ -753,7 +747,7 @@ async fn test_streaming_provider_called_via_stream_not_complete() {
     let (channel, inbound_tx, outbound_rx) = StreamingMockChannel::new();
     let runtime = make_stream_runtime(channel, Arc::clone(&provider), make_tool_executor(vec![]));
 
-    let _events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let _events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // stream() should have been called once
     assert_eq!(provider.stream_call_count(), 1);
@@ -787,7 +781,7 @@ async fn test_streaming_multi_tool_rounds() {
         make_tool_executor(vec![Box::new(tool_a), Box::new(tool_b)])
     });
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Use tools").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Use tools").await;
 
     // Round 1: StreamChunk + StreamEnd (tool_a)
     // Round 2: StreamChunk + StreamEnd (tool_b)
@@ -825,7 +819,7 @@ async fn test_streaming_conversation_persisted() {
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     );
 
-    let _events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi there").await;
+    let _events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi there").await;
 
     // Verify conversation was saved
     let sessions = memory.list_sessions(10).await.unwrap();
@@ -846,7 +840,7 @@ async fn test_streaming_empty_stream_reports_error() {
     let (channel, inbound_tx, outbound_rx) = StreamingMockChannel::new();
     let runtime = make_stream_runtime(channel, provider, make_tool_executor(vec![]));
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // Should get StreamEnd + Error about unexpected end
     assert!(is_stream_end(&events[0]));
@@ -863,7 +857,7 @@ async fn test_streaming_injection_audit_only() {
     let (channel, inbound_tx, outbound_rx) = StreamingMockChannel::new();
     let runtime = make_stream_runtime(channel, provider, make_tool_executor(vec![]));
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // Streaming delivers the text via StreamChunk even though it contains injection.
     // The injection scan is audit-only — the text has already been sent to the user.
@@ -934,7 +928,7 @@ async fn test_streaming_multiple_tools_same_round() {
         make_tool_executor(vec![Box::new(tool_a), Box::new(tool_b)])
     });
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Use both").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Use both").await;
 
     // Round 1: StreamChunk("Using both tools") + StreamEnd (tool use, 2 tools executed)
     // ToolStart(tool_a) + ToolEnd(tool_a) + ToolStart(tool_b) + ToolEnd(tool_b)
@@ -989,7 +983,7 @@ async fn test_streaming_max_tool_rounds_exceeded() {
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     );
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Loop forever").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Loop forever").await;
 
     // Budget check fires at round 1 (0-indexed) with max_tool_rounds_per_turn=1.
     assert!(
@@ -1036,7 +1030,7 @@ async fn test_streaming_stop_sequence() {
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     );
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // Should deliver text and send StreamEnd (same as EndTurn)
     assert_eq!(stream_chunk_text(&events[0]), Some("stopped early"));
@@ -1130,7 +1124,7 @@ async fn test_non_streaming_provider_uses_complete_path() {
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     );
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // Should get a Message (not StreamChunks) — non-streaming path
     assert_eq!(message_text(&events[0]), Some("non-streaming response"));
@@ -1175,7 +1169,7 @@ async fn test_streaming_empty_done() {
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     );
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // StreamEnd should be sent even with no text deltas
     assert!(is_stream_end(&events[0]));

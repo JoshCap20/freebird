@@ -41,8 +41,8 @@ impl FreebirdApp {
     ///
     /// Consumes `self` because the runtime takes ownership of the channel
     /// and tool executor.
-    pub async fn run(mut self, token: CancellationToken) -> Result<(), CoreError> {
-        self.runtime
+    pub async fn run(self, token: CancellationToken) -> Result<(), CoreError> {
+        Arc::new(self.runtime)
             .run(token)
             .await
             .map_err(|e| CoreError::Runtime(e.into()))

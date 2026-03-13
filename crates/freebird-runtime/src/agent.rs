@@ -82,8 +82,11 @@ pub struct AgentRuntime {
     channel: Box<dyn Channel>,
     tool_executor: crate::tool_executor::ToolExecutor,
     /// Receives approval requests from the `ToolExecutor`'s `ApprovalGate`.
-    /// Consumed by the approval-forwarder background task.
-    approval_rx: Option<tokio::sync::mpsc::Receiver<ApprovalRequest>>,
+    /// Consumed exactly once via `.lock().take()` at the start of `run()`.
+    ///
+    /// Wrapped in `std::sync::Mutex` because `run()` takes `Arc<Self>`.
+    /// `std::sync::Mutex` is correct here: held for nanoseconds, no `.await`.
+    approval_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<ApprovalRequest>>>,
     memory: Arc<dyn Memory>,
     knowledge_store: Option<Arc<dyn KnowledgeStore>>,
     knowledge_config: KnowledgeConfig,
@@ -127,7 +130,7 @@ impl AgentRuntime {
             provider_registry,
             channel,
             tool_executor,
-            approval_rx,
+            approval_rx: std::sync::Mutex::new(approval_rx),
             memory,
             knowledge_store,
             knowledge_config,
@@ -193,6 +196,10 @@ impl AgentRuntime {
     /// Run the event loop until shutdown.
     ///
     /// Starts the channel, consumes inbound events, routes to handlers.
+    /// Messages from different sessions are handled concurrently via
+    /// `JoinSet`; messages from the same session are serialized via
+    /// per-session `Mutex<()>` in `SessionManager`.
+    ///
     /// Exits when:
     /// - `cancel` token is cancelled (external shutdown signal)
     /// - Inbound stream closes (e.g., stdin EOF)
@@ -203,40 +210,89 @@ impl AgentRuntime {
     /// # Errors
     ///
     /// Returns `RuntimeError::Channel` if the channel fails to start or stop.
-    pub async fn run(&mut self, cancel: CancellationToken) -> Result<(), RuntimeError> {
+    pub async fn run(self: Arc<Self>, cancel: CancellationToken) -> Result<(), RuntimeError> {
         let handle = self.channel.start().await?;
         let outbound = handle.outbound;
 
         tracing::info!("agent runtime started, waiting for messages");
 
+        // Extract approval_rx (consumed exactly once).
+        let approval_rx = match self.approval_rx.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+
         // Fan-out inbound events into a splitter task and optional approval
         // bridge task. See `spawn_approval_bridge` for details.
         let (mut main_rx, splitter_task, approval_task) =
-            self.spawn_approval_bridge(handle.inbound, &outbound, &cancel);
+            self.spawn_approval_bridge(handle.inbound, &outbound, &cancel, approval_rx);
+
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(
+            self.config.max_concurrent_tasks,
+        ));
+        let mut tasks = tokio::task::JoinSet::new();
 
         loop {
             tokio::select! {
                 () = cancel.cancelled() => {
-                    tracing::info!("shutdown signal received, stopping runtime");
+                    tracing::info!("shutdown signal received, draining in-flight tasks");
                     break;
                 }
+                Some(result) = tasks.join_next(), if !tasks.is_empty() => {
+                    if let Err(e) = result {
+                        tracing::error!(error = %e, "message handler task panicked");
+                    }
+                }
                 event = main_rx.recv() => {
-                    if let Some(event) = event {
-                        if matches!(
-                            self.handle_event(event, &outbound).await,
-                            LoopAction::Exit,
-                        ) {
+                    match event {
+                        Some(InboundEvent::Message { raw_text, sender_id, .. }) => {
+                            if let Ok(permit) = semaphore.clone().try_acquire_owned() {
+                                let runtime = Arc::clone(&self);
+                                let outbound = outbound.clone();
+                                let task_cancel = cancel.clone();
+                                tasks.spawn(async move {
+                                    let _permit = permit; // released on drop
+                                    let _ = &task_cancel; // held for future shutdown integration
+                                    let session_id = runtime.sessions
+                                        .resolve(runtime.channel.info().id.as_str(), &sender_id)
+                                        .await;
+                                    // Acquire per-session lock FIRST, then ensure state.
+                                    // Eliminates TOCTOU race on budget/grant init.
+                                    let lock = runtime.sessions
+                                        .get_or_create_lock(&session_id).await;
+                                    let _guard = lock.lock().await;
+                                    runtime.ensure_session_state(&session_id, &sender_id, &outbound).await;
+                                    runtime.handle_message(
+                                        raw_text, sender_id, session_id, &outbound,
+                                    ).await;
+                                });
+                            } else {
+                                tracing::warn!(%sender_id, "concurrent task limit reached, rejecting message");
+                                let _ = outbound.send(OutboundEvent::Error {
+                                    text: "Server is busy. Please try again shortly.".into(),
+                                    recipient_id: sender_id,
+                                }).await;
+                            }
+                        }
+                        Some(other) => {
+                            // Commands and lifecycle events remain synchronous
+                            if matches!(
+                                self.handle_non_message_event(other, &outbound).await,
+                                LoopAction::Exit,
+                            ) {
+                                break;
+                            }
+                        }
+                        None => {
+                            tracing::info!("inbound stream closed");
                             break;
                         }
-                    } else {
-                        tracing::info!("inbound stream closed");
-                        break;
                     }
                 }
             }
         }
 
-        // Clean up spawned tasks
+        Self::drain_tasks(&mut tasks, self.config.drain_timeout_secs).await;
         splitter_task.abort();
         if let Some(task) = approval_task {
             task.abort();
@@ -244,6 +300,34 @@ impl AgentRuntime {
 
         self.channel.stop().await?;
         Ok(())
+    }
+
+    /// Drain in-flight tasks from the `JoinSet`, aborting any that exceed
+    /// the timeout.
+    async fn drain_tasks(tasks: &mut tokio::task::JoinSet<()>, timeout_secs: u64) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        tracing::info!(
+            remaining = tasks.len(),
+            timeout_secs,
+            "draining in-flight tasks"
+        );
+        loop {
+            match tokio::time::timeout_at(deadline, tasks.join_next()).await {
+                Ok(Some(Ok(()))) => {}
+                Ok(Some(Err(e))) => {
+                    tracing::error!(error = %e, "task panicked during drain");
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    tracing::warn!(
+                        remaining = tasks.len(),
+                        "drain timeout expired, aborting remaining tasks"
+                    );
+                    tasks.shutdown().await;
+                    break;
+                }
+            }
+        }
     }
 
     /// Spawn background tasks for approval bridge plumbing.
@@ -255,7 +339,7 @@ impl AgentRuntime {
     /// `ApprovalResponse` events directly to the approval gate's
     /// [`ApprovalResponder`], bypassing the main event loop. All other
     /// events are forwarded to the returned `main_rx`. This is necessary
-    /// because `handle_event()` may block on `check_consent()` (awaiting
+    /// because the message handler may block on `check_consent()` (awaiting
     /// user approval via oneshot), and the `ApprovalResponse` that unblocks
     /// it also arrives as an `InboundEvent`.
     ///
@@ -263,10 +347,11 @@ impl AgentRuntime {
     /// mpsc channel and forwards them as `OutboundEvent::ApprovalRequest` to
     /// the user's channel.
     fn spawn_approval_bridge(
-        &mut self,
+        &self,
         inbound: Pin<Box<dyn futures::Stream<Item = InboundEvent> + Send>>,
         outbound: &mpsc::Sender<OutboundEvent>,
         cancel: &CancellationToken,
+        approval_rx: Option<mpsc::Receiver<ApprovalRequest>>,
     ) -> (
         mpsc::Receiver<InboundEvent>,
         tokio::task::JoinHandle<()>,
@@ -337,7 +422,7 @@ impl AgentRuntime {
             }
         });
 
-        let approval_task = self.approval_rx.take().map(|mut approval_rx| {
+        let approval_task = approval_rx.map(|mut approval_rx| {
             let approval_cancel = cancel.clone();
             let approval_outbound = outbound.clone();
             tokio::spawn(async move {
@@ -374,58 +459,16 @@ impl AgentRuntime {
         (main_rx, splitter_task, approval_task)
     }
 
-    /// Route an inbound event to the appropriate handler.
+    /// Handle non-message events synchronously in the main loop.
     ///
-    /// Returns `LoopAction::Exit` only for `/quit`. All other events
-    /// (including handler errors) return `LoopAction::Continue` — the
-    /// runtime is resilient to individual message failures.
-    async fn handle_event(
+    /// Messages are dispatched separately via `JoinSet` spawning in `run()`.
+    /// Returns `LoopAction::Exit` only for `/quit`.
+    async fn handle_non_message_event(
         &self,
         event: InboundEvent,
         outbound: &mpsc::Sender<OutboundEvent>,
     ) -> LoopAction {
         match event {
-            InboundEvent::Message {
-                raw_text,
-                sender_id,
-                ..
-            } => {
-                let session_id = self
-                    .sessions
-                    .resolve(self.channel.info().id.as_str(), &sender_id)
-                    .await;
-
-                // Ensure per-session TokenBudget and CapabilityGrant exist (idempotent).
-                if self.sessions.get_budget(&session_id).await.is_none() {
-                    self.sessions
-                        .set_budget(&session_id, TokenBudget::new(&self.budget_config))
-                        .await;
-                }
-                if self.sessions.get_grant(&session_id).await.is_none() {
-                    match self.create_default_grant() {
-                        Ok(grant) => {
-                            self.sessions.set_grant(&session_id, grant).await;
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, "cannot create capability grant for session");
-                            send_outbound(
-                                outbound,
-                                OutboundEvent::Error {
-                                    text: "Internal error: sandbox root is not accessible".into(),
-                                    recipient_id: sender_id.clone(),
-                                },
-                            )
-                            .await;
-                            return LoopAction::Continue;
-                        }
-                    }
-                }
-
-                tracing::info!(%session_id, %sender_id, "handling message");
-                self.handle_message(raw_text, sender_id, session_id, outbound)
-                    .await;
-                LoopAction::Continue
-            }
             InboundEvent::Command {
                 name,
                 args,
@@ -468,17 +511,52 @@ impl AgentRuntime {
                 sender_id,
                 ..
             } => {
-                // When an approval gate is configured, ApprovalResponse events
-                // are handled by the splitter task (which runs concurrently
-                // and can deliver responses while handle_event is blocked).
-                // This arm only fires when no approval gate is configured
-                // (the splitter passes them through to the main loop).
                 tracing::warn!(
                     %request_id,
                     %sender_id,
                     "approval response received but no approval gate is configured"
                 );
                 LoopAction::Continue
+            }
+            InboundEvent::Message { .. } => {
+                // Messages are handled in the JoinSet branch of run() — this
+                // arm should never be reached.
+                tracing::error!("message event reached handle_non_message_event — this is a bug");
+                LoopAction::Continue
+            }
+        }
+    }
+
+    /// Ensure per-session budget and capability grant exist (idempotent).
+    ///
+    /// **Must be called inside the per-session lock** to prevent TOCTOU races
+    /// where two concurrent messages both see `budget=None` and both create one
+    /// (second overwrites first, losing any usage the first recorded).
+    async fn ensure_session_state(
+        &self,
+        session_id: &SessionId,
+        sender_id: &str,
+        outbound: &mpsc::Sender<OutboundEvent>,
+    ) {
+        if self.sessions.get_budget(session_id).await.is_none() {
+            self.sessions
+                .set_budget(session_id, TokenBudget::new(&self.budget_config))
+                .await;
+        }
+        if self.sessions.get_grant(session_id).await.is_none() {
+            match self.create_default_grant() {
+                Ok(grant) => {
+                    self.sessions.set_grant(session_id, grant).await;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "cannot create capability grant");
+                    let _ = outbound
+                        .send(OutboundEvent::Error {
+                            text: "Internal error: sandbox root is not accessible".into(),
+                            recipient_id: sender_id.into(),
+                        })
+                        .await;
+                }
             }
         }
     }

@@ -193,7 +193,7 @@ async fn test_consent_request_forwarded_to_channel() {
     )
     .expect("executor construction should succeed");
 
-    let mut runtime = AgentRuntime::new(
+    let runtime = AgentRuntime::new(
         make_registry(provider),
         Box::new(channel),
         executor,
@@ -223,7 +223,7 @@ async fn test_consent_request_forwarded_to_channel() {
     let cancel_clone = cancel.clone();
 
     // Run runtime in background, interact with it via channels
-    let runtime_handle = tokio::spawn(async move { runtime.run(cancel_clone).await });
+    let runtime_handle = tokio::spawn(async move { Arc::new(runtime).run(cancel_clone).await });
 
     // Wait for the ApprovalRequest to appear on the outbound channel
     let mut approval_request_seen = false;
@@ -321,7 +321,7 @@ async fn test_consent_approved_executes_tool() {
     )
     .expect("executor construction should succeed");
 
-    let mut runtime = AgentRuntime::new(
+    let runtime = AgentRuntime::new(
         make_registry(provider),
         Box::new(channel),
         executor,
@@ -348,7 +348,7 @@ async fn test_consent_approved_executes_tool() {
 
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
-    let runtime_handle = tokio::spawn(async move { runtime.run(cancel_clone).await });
+    let runtime_handle = tokio::spawn(async move { Arc::new(runtime).run(cancel_clone).await });
 
     // Wait for approval request, then approve
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -458,7 +458,7 @@ async fn test_consent_denied_returns_error_to_provider() {
     )
     .expect("executor construction should succeed");
 
-    let mut runtime = AgentRuntime::new(
+    let runtime = AgentRuntime::new(
         make_registry(provider),
         Box::new(channel),
         executor,
@@ -485,7 +485,7 @@ async fn test_consent_denied_returns_error_to_provider() {
 
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
-    let runtime_handle = tokio::spawn(async move { runtime.run(cancel_clone).await });
+    let runtime_handle = tokio::spawn(async move { Arc::new(runtime).run(cancel_clone).await });
 
     // Wait for approval request, then deny
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -594,7 +594,7 @@ async fn test_consent_low_risk_no_prompt() {
     )
     .expect("executor construction should succeed");
 
-    let mut runtime = AgentRuntime::new(
+    let runtime = AgentRuntime::new(
         make_registry(provider),
         Box::new(channel),
         executor,
@@ -628,7 +628,7 @@ async fn test_consent_low_risk_no_prompt() {
         .unwrap();
 
     let cancel = CancellationToken::new();
-    tokio::time::timeout(Duration::from_secs(5), runtime.run(cancel))
+    tokio::time::timeout(Duration::from_secs(5), Arc::new(runtime).run(cancel))
         .await
         .expect("runtime should exit within timeout")
         .unwrap();
@@ -700,7 +700,7 @@ async fn test_consent_no_gate_executes_freely() {
     )
     .expect("executor construction should succeed");
 
-    let mut runtime = AgentRuntime::new(
+    let runtime = AgentRuntime::new(
         make_registry(provider),
         Box::new(channel),
         executor,
@@ -734,7 +734,7 @@ async fn test_consent_no_gate_executes_freely() {
         .unwrap();
 
     let cancel = CancellationToken::new();
-    tokio::time::timeout(Duration::from_secs(5), runtime.run(cancel))
+    tokio::time::timeout(Duration::from_secs(5), Arc::new(runtime).run(cancel))
         .await
         .expect("runtime should exit within timeout")
         .unwrap();
@@ -790,7 +790,7 @@ async fn test_consent_response_unknown_id_logged() {
     )
     .expect("executor construction should succeed");
 
-    let mut runtime = AgentRuntime::new(
+    let runtime = AgentRuntime::new(
         make_registry(provider),
         Box::new(channel),
         executor,
@@ -829,7 +829,7 @@ async fn test_consent_response_unknown_id_logged() {
         .unwrap();
 
     let cancel = CancellationToken::new();
-    let result = tokio::time::timeout(Duration::from_secs(5), runtime.run(cancel))
+    let result = tokio::time::timeout(Duration::from_secs(5), Arc::new(runtime).run(cancel))
         .await
         .expect("runtime should exit within timeout");
 
