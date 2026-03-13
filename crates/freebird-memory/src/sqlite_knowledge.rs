@@ -384,7 +384,7 @@ impl KnowledgeStore for SqliteKnowledgeStore {
     }
 }
 
-use crate::helpers::OptionalExt as _;
+use rusqlite::OptionalExtension as _;
 
 #[cfg(test)]
 #[allow(

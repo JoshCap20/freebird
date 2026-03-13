@@ -162,7 +162,8 @@ fn update_session_metadata(
     Ok(())
 }
 
-use crate::helpers::{OptionalExt as _, extract_message_preview, rusqlite_to_io};
+use crate::helpers::{extract_message_preview, rusqlite_to_io};
+use rusqlite::OptionalExtension as _;
 
 #[cfg(test)]
 #[allow(

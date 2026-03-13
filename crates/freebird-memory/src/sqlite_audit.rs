@@ -30,7 +30,8 @@ impl SqliteAuditSink {
     }
 }
 
-use crate::helpers::{OptionalExt as _, rusqlite_to_io};
+use crate::helpers::rusqlite_to_io;
+use rusqlite::OptionalExtension as _;
 
 #[async_trait]
 impl AuditSink for SqliteAuditSink {

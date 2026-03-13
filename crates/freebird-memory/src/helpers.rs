@@ -65,21 +65,3 @@ fn message_contains(msg: &Message, query_lower: &str) -> bool {
         matches!(block, ContentBlock::Text { text } if text.to_lowercase().contains(query_lower))
     })
 }
-
-/// Extension trait for `rusqlite::Result<T>` to handle "no rows" as `Ok(None)`.
-///
-/// Shared by [`crate::sqlite_memory`] and [`crate::sqlite_knowledge`].
-pub trait OptionalExt<T> {
-    /// Convert `QueryReturnedNoRows` to `Ok(None)`, propagate other errors.
-    fn optional(self) -> Result<Option<T>, rusqlite::Error>;
-}
-
-impl<T> OptionalExt<T> for Result<T, rusqlite::Error> {
-    fn optional(self) -> Result<Option<T>, rusqlite::Error> {
-        match self {
-            Ok(val) => Ok(Some(val)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-}
