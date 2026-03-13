@@ -308,8 +308,14 @@ fn extract_cycle(
         }
     }
 
-    // Fallback: should not happen if Kahn's BFS correctly identifies residual nodes
-    Vec::new()
+    // Fallback: should not happen if Kahn's BFS correctly identifies residual nodes.
+    // Collect residual IDs so the error message is still actionable.
+    in_degree
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| **d > 0)
+        .map(|(idx, _)| node_id(slots, idx))
+        .collect()
 }
 
 /// Map a graph index to its change ID (falls back to the index itself).
@@ -926,6 +932,36 @@ mod tests {
 
         let err = PlanError::DuplicateId(7);
         assert_eq!(err.to_string(), "duplicate change id: 7");
+    }
+
+    // ── Boundary / Stress ────────────────────────────────────────────
+
+    #[test]
+    fn test_near_max_changes_succeeds() {
+        // MAX_CHANGES - 1 = 255 changes: one root + 254 fan-out dependents.
+        // Depth is 2 (well within MAX_DEPTH), exercising the size limit boundary.
+        let mut changes = vec![lib_consumer(0, "root.rs", vec![])];
+        for i in 1..MAX_CHANGES {
+            changes.push(lib_consumer(i, &format!("file_{i}.rs"), vec![0]));
+        }
+        let result = plan_changes(changes).unwrap();
+        // 1 root + (MAX_CHANGES - 1) dependents = MAX_CHANGES total (within limit)
+        assert_eq!(result.ordered_changes.len(), MAX_CHANGES);
+        // Root should be first in output
+        assert_eq!(result.ordered_changes[0].id, 0);
+    }
+
+    #[test]
+    fn test_max_changes_exceeded() {
+        // MAX_CHANGES + 1 = 257 independent changes → TooManyChanges error.
+        let count = MAX_CHANGES + 1;
+        let changes: Vec<PlannedChange> = (0..count)
+            .map(|i| lib_consumer(i, &format!("file_{i}.rs"), vec![]))
+            .collect();
+        let err = plan_changes(changes).unwrap_err();
+        assert!(
+            matches!(err, PlanError::TooManyChanges { max, actual } if max == MAX_CHANGES && actual == count)
+        );
     }
 }
 

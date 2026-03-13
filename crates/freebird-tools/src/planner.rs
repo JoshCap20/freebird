@@ -47,12 +47,13 @@ fn infer_change_kind(tags: &[Tag], file_path: &Path) -> ChangeKind {
         }
     }
 
-    // Check for impl blocks by looking for "impl" references
-    // (tree-sitter marks the trait/type being implemented as a reference)
+    // Files with function definitions but no trait/type are classified as
+    // Implementation rather than Consumer. This is intentional: standalone free
+    // functions are edited *after* types but *before* tests in the dependency
+    // order, which matches the typical Rust authoring flow.
     if !has_trait && !has_type {
         for tag in tags {
             if tag.is_definition && matches!(tag.kind, TagKind::Function) {
-                // Functions inside impl blocks still count
                 has_impl = true;
                 break;
             }
@@ -149,6 +150,12 @@ fn analyze_files(
 
     for path in file_paths {
         // Paths are already resolved to absolute by SafeFilePath validation
+        if !path.to_string_lossy().ends_with(".rs") {
+            tracing::debug!(
+                ?path,
+                "non-Rust file; AST-based dependency inference will not apply"
+            );
+        }
 
         // Try cache first
         if let Some(cached) = cache.get(path) {
@@ -314,7 +321,8 @@ impl PlanEditsTool {
                 name: Self::NAME.into(),
                 description: "Plan a dependency-aware execution order for multi-file edits. \
                     Accepts file paths with descriptions, auto-detects dependencies via AST \
-                    analysis, and returns a topologically sorted plan."
+                    analysis, and returns a topologically sorted plan. \
+                    Supports up to 256 changes with dependency chains up to 64 levels deep."
                     .into(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -507,6 +515,31 @@ mod tests {
         assert_eq!(
             infer_change_kind(&tags, Path::new("src/lib.rs")),
             ChangeKind::Implementation
+        );
+    }
+
+    #[test]
+    fn test_infer_change_kind_free_functions_is_implementation() {
+        // Files with only free functions (no struct/trait/enum) are classified as
+        // Implementation, not Consumer. This places them after types but before
+        // tests in the secondary sort — matching typical Rust authoring order.
+        let tags = vec![
+            make_tag("helper_one", TagKind::Function, true),
+            make_tag("helper_two", TagKind::Function, true),
+        ];
+        assert_eq!(
+            infer_change_kind(&tags, Path::new("src/utils.rs")),
+            ChangeKind::Implementation
+        );
+    }
+
+    #[test]
+    fn test_infer_change_kind_no_definitions_is_consumer() {
+        // Files with no definitions at all → Consumer (lowest priority)
+        let tags: Vec<Tag> = vec![];
+        assert_eq!(
+            infer_change_kind(&tags, Path::new("src/lib.rs")),
+            ChangeKind::Consumer
         );
     }
 
