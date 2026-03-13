@@ -99,7 +99,7 @@ impl SqliteDb {
 
     /// Run pending schema migrations.
     fn migrate(conn: &rusqlite::Connection) -> Result<(), MemoryError> {
-        let current_version = Self::get_schema_version(conn);
+        let current_version = Self::get_schema_version(conn)?;
 
         let migrations: &[(i64, &str)] = &[
             (1, include_str!("migrations/001_initial.sql")),
@@ -123,11 +123,25 @@ impl SqliteDb {
     }
 
     /// Get the current schema version (0 if no migrations applied yet).
-    fn get_schema_version(conn: &rusqlite::Connection) -> i64 {
-        conn.query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+    ///
+    /// Returns 0 when the `schema_version` table does not yet exist (first open)
+    /// or contains no rows. Propagates all other database errors.
+    fn get_schema_version(conn: &rusqlite::Connection) -> Result<i64, MemoryError> {
+        match conn.query_row("SELECT MAX(version) FROM schema_version", [], |row| {
             row.get(0)
-        })
-        .unwrap_or(0)
+        }) {
+            Ok(v) => Ok(v),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+            Err(e) => {
+                let msg = e.to_string();
+                // "no such table" means schema_version hasn't been created yet
+                if msg.contains("no such table") {
+                    Ok(0)
+                } else {
+                    Err(rusqlite_io("failed to read schema version", &e))
+                }
+            }
+        }
     }
 }
 
