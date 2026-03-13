@@ -227,9 +227,14 @@ impl AgentRuntime {
         let (mut main_rx, splitter_task, approval_task) =
             self.spawn_approval_bridge(handle.inbound, &outbound, &cancel, approval_rx);
 
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(
-            self.config.max_concurrent_tasks,
-        ));
+        let max_concurrent = self.config.max_concurrent_tasks.max(1);
+        if self.config.max_concurrent_tasks == 0 {
+            tracing::warn!(
+                "max_concurrent_tasks is 0, clamping to 1 — \
+                 set to 0 would reject all messages"
+            );
+        }
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
         let mut tasks = tokio::task::JoinSet::new();
 
         loop {
@@ -249,10 +254,8 @@ impl AgentRuntime {
                             if let Ok(permit) = semaphore.clone().try_acquire_owned() {
                                 let runtime = Arc::clone(&self);
                                 let outbound = outbound.clone();
-                                let task_cancel = cancel.clone();
                                 tasks.spawn(async move {
                                     let _permit = permit; // released on drop
-                                    let _ = &task_cancel; // held for future shutdown integration
                                     let session_id = runtime.sessions
                                         .resolve(runtime.channel.info().id.as_str(), &sender_id)
                                         .await;
