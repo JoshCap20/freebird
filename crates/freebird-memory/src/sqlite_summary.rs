@@ -11,6 +11,7 @@ use freebird_traits::id::SessionId;
 use freebird_traits::memory::MemoryError;
 use freebird_traits::summary::{ConversationSummary, SummarySink};
 
+use crate::helpers::rusqlite_to_io;
 use crate::sqlite::SqliteDb;
 
 /// Persistent storage for conversation summaries.
@@ -70,7 +71,7 @@ impl SummaryStore {
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(to_io("load summary", &e)),
+            Err(e) => Err(rusqlite_to_io("load summary", &e)),
         }
     }
 
@@ -95,7 +96,7 @@ impl SummaryStore {
                     summary.generated_at.to_rfc3339(),
                 ],
             )
-            .map_err(|e| to_io("save summary", &e))?;
+            .map_err(|e| rusqlite_to_io("save summary", &e))?;
 
         Ok(())
     }
@@ -113,7 +114,7 @@ impl SummaryStore {
                 "DELETE FROM conversation_summaries WHERE session_id = ?1",
                 rusqlite::params![session_id.as_str()],
             )
-            .map_err(|e| to_io("delete summary", &e))?;
+            .map_err(|e| rusqlite_to_io("delete summary", &e))?;
 
         Ok(())
     }
@@ -135,11 +136,6 @@ impl SummarySink for SummaryStore {
     async fn delete(&self, session_id: &SessionId) -> Result<(), MemoryError> {
         Self::delete(self, session_id).await
     }
-}
-
-/// Convert a `rusqlite` error into a `MemoryError::Io`.
-fn to_io(context: &str, e: &rusqlite::Error) -> MemoryError {
-    MemoryError::Io(std::io::Error::other(format!("{context}: {e}")))
 }
 
 #[cfg(test)]
