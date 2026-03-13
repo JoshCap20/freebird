@@ -124,6 +124,11 @@ pub enum AuditEventType {
     SecretRedacted {
         tool_name: String,
     },
+    SummarizationTriggered {
+        summarized_through_turn: usize,
+        total_turns: usize,
+        original_token_estimate: usize,
+    },
     ToolExecutionCompleted {
         tool_name: String,
         success: bool,
@@ -240,6 +245,11 @@ mod tests {
                 approved: false,
                 override_action: None,
                 new_limit: None,
+            },
+            AuditEventType::SummarizationTriggered {
+                summarized_through_turn: 5,
+                total_turns: 10,
+                original_token_estimate: 8000,
             },
         ];
 
