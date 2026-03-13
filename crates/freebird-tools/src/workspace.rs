@@ -5,8 +5,9 @@
 //! (branch, modified/staged/untracked files).
 //!
 //! Git commands are executed directly via `tokio::process::Command`
-//! (never through a shell) with environment isolation: all `GIT_*`
-//! env vars cleared, `stdin(null)`, `kill_on_drop(true)`.
+//! (never through a shell) with environment isolation: specific
+//! `GIT_*` env vars removed to prevent discovery interference,
+//! `stdin(null)`, `kill_on_drop(true)`.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -95,7 +96,13 @@ impl Tool for WorkspaceStatusTool {
             }
         };
 
-        let status_output = status_result.unwrap_or_default();
+        let status_output = match status_result {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "git status --porcelain failed; reporting empty status");
+                String::new()
+            }
+        };
         let (modified, staged, untracked) = parse_porcelain_status(&status_output);
 
         let mut output = String::with_capacity(256);
