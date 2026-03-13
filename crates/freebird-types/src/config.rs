@@ -64,6 +64,10 @@ pub struct RuntimeConfig {
     pub max_turns_per_session: usize,
     /// Seconds to wait for in-flight work during graceful shutdown.
     pub drain_timeout_secs: u64,
+    /// Maximum concurrent message-handling tasks (ASI08). Default: 8.
+    /// When the limit is reached, new messages get an immediate error response.
+    #[serde(default = "default_max_concurrent_tasks")]
+    pub max_concurrent_tasks: usize,
     /// In-memory session manager limits.
     #[serde(default)]
     pub session: SessionConfig,
@@ -92,6 +96,10 @@ impl Default for SessionConfig {
             session_ttl_secs: default_session_ttl_secs(),
         }
     }
+}
+
+const fn default_max_concurrent_tasks() -> usize {
+    8
 }
 
 const fn default_max_sessions() -> usize {

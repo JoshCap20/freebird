@@ -26,7 +26,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 
@@ -35,18 +34,14 @@ use freebird_runtime::agent::AgentRuntime;
 use freebird_runtime::tool_executor::ToolExecutor;
 use freebird_security::approval::ApprovalGate;
 use freebird_traits::channel::{InboundEvent, OutboundEvent};
-use freebird_traits::id::ModelId;
-use freebird_traits::provider::{
-    CompletionResponse, ContentBlock, Message, Role, StopReason, TokenUsage,
-};
 use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
     ToolOutput,
 };
 use freebird_types::config::{BudgetConfig, InjectionConfig, KnowledgeConfig, SummarizationConfig};
 use helpers::{
-    MockChannel, QueuedProvider, ResponseFactory, default_config, default_tools_config,
-    make_registry, message_text, without_status_events,
+    MockChannel, QueuedProvider, default_config, default_tools_config, make_registry, message_text,
+    text_response, tool_use_response, without_status_events,
 };
 
 // QueuedProvider, ArcProvider, ResponseFactory imported from helpers
@@ -104,47 +99,8 @@ impl Tool for MockTool {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Response builders (approval-specific response factories)
-// ---------------------------------------------------------------------------
-
-fn text_response(text: &str) -> ResponseFactory {
-    let text = text.to_owned();
-    Box::new(move || {
-        Ok(CompletionResponse {
-            message: Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::Text { text: text.clone() }],
-                timestamp: Utc::now(),
-            },
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage::default(),
-            model: ModelId::from("test-model"),
-        })
-    })
-}
-
-fn tool_use_response(tool_name: &str, input: serde_json::Value) -> ResponseFactory {
-    let tool_name = tool_name.to_owned();
-    Box::new(move || {
-        Ok(CompletionResponse {
-            message: Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "tool-call-1".into(),
-                    name: tool_name.clone(),
-                    input: input.clone(),
-                }],
-                timestamp: Utc::now(),
-            },
-            stop_reason: StopReason::ToolUse,
-            usage: TokenUsage::default(),
-            model: ModelId::from("test-model"),
-        })
-    })
-}
-
-// default_config, default_tools_config, make_registry imported from helpers
+// text_response, tool_use_response, default_config, default_tools_config,
+// make_registry imported from helpers
 
 // ===========================================================================
 // Tests
@@ -193,7 +149,7 @@ async fn test_consent_request_forwarded_to_channel() {
     )
     .expect("executor construction should succeed");
 
-    let mut runtime = AgentRuntime::new(
+    let runtime = AgentRuntime::new(
         make_registry(provider),
         Box::new(channel),
         executor,
@@ -225,7 +181,7 @@ async fn test_consent_request_forwarded_to_channel() {
     let cancel_clone = cancel.clone();
 
     // Run runtime in background, interact with it via channels
-    let runtime_handle = tokio::spawn(async move { runtime.run(cancel_clone).await });
+    let runtime_handle = tokio::spawn(async move { Arc::new(runtime).run(cancel_clone).await });
 
     // Wait for the ApprovalRequest to appear on the outbound channel
     let mut approval_request_seen = false;
@@ -323,7 +279,7 @@ async fn test_consent_approved_executes_tool() {
     )
     .expect("executor construction should succeed");
 
-    let mut runtime = AgentRuntime::new(
+    let runtime = AgentRuntime::new(
         make_registry(provider),
         Box::new(channel),
         executor,
@@ -352,7 +308,7 @@ async fn test_consent_approved_executes_tool() {
 
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
-    let runtime_handle = tokio::spawn(async move { runtime.run(cancel_clone).await });
+    let runtime_handle = tokio::spawn(async move { Arc::new(runtime).run(cancel_clone).await });
 
     // Wait for approval request, then approve
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -462,7 +418,7 @@ async fn test_consent_denied_returns_error_to_provider() {
     )
     .expect("executor construction should succeed");
 
-    let mut runtime = AgentRuntime::new(
+    let runtime = AgentRuntime::new(
         make_registry(provider),
         Box::new(channel),
         executor,
@@ -491,7 +447,7 @@ async fn test_consent_denied_returns_error_to_provider() {
 
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
-    let runtime_handle = tokio::spawn(async move { runtime.run(cancel_clone).await });
+    let runtime_handle = tokio::spawn(async move { Arc::new(runtime).run(cancel_clone).await });
 
     // Wait for approval request, then deny
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -600,7 +556,7 @@ async fn test_consent_low_risk_no_prompt() {
     )
     .expect("executor construction should succeed");
 
-    let mut runtime = AgentRuntime::new(
+    let runtime = AgentRuntime::new(
         make_registry(provider),
         Box::new(channel),
         executor,
@@ -636,7 +592,7 @@ async fn test_consent_low_risk_no_prompt() {
         .unwrap();
 
     let cancel = CancellationToken::new();
-    tokio::time::timeout(Duration::from_secs(5), runtime.run(cancel))
+    tokio::time::timeout(Duration::from_secs(5), Arc::new(runtime).run(cancel))
         .await
         .expect("runtime should exit within timeout")
         .unwrap();
@@ -708,7 +664,7 @@ async fn test_consent_no_gate_executes_freely() {
     )
     .expect("executor construction should succeed");
 
-    let mut runtime = AgentRuntime::new(
+    let runtime = AgentRuntime::new(
         make_registry(provider),
         Box::new(channel),
         executor,
@@ -744,7 +700,7 @@ async fn test_consent_no_gate_executes_freely() {
         .unwrap();
 
     let cancel = CancellationToken::new();
-    tokio::time::timeout(Duration::from_secs(5), runtime.run(cancel))
+    tokio::time::timeout(Duration::from_secs(5), Arc::new(runtime).run(cancel))
         .await
         .expect("runtime should exit within timeout")
         .unwrap();
@@ -800,7 +756,7 @@ async fn test_consent_response_unknown_id_logged() {
     )
     .expect("executor construction should succeed");
 
-    let mut runtime = AgentRuntime::new(
+    let runtime = AgentRuntime::new(
         make_registry(provider),
         Box::new(channel),
         executor,
@@ -841,7 +797,7 @@ async fn test_consent_response_unknown_id_logged() {
         .unwrap();
 
     let cancel = CancellationToken::new();
-    let result = tokio::time::timeout(Duration::from_secs(5), runtime.run(cancel))
+    let result = tokio::time::timeout(Duration::from_secs(5), Arc::new(runtime).run(cancel))
         .await
         .expect("runtime should exit within timeout");
 

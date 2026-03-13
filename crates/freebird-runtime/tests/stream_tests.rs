@@ -16,14 +16,12 @@ use std::collections::{BTreeSet, VecDeque};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::Stream;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 use freebird_memory::in_memory::InMemoryMemory;
 use freebird_runtime::agent::AgentRuntime;
@@ -44,11 +42,12 @@ use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
     ToolOutput,
 };
-use freebird_types::config::{
-    BudgetConfig, ContextConfig, KnowledgeConfig, RuntimeConfig, SummarizationConfig,
-};
+use freebird_types::config::{BudgetConfig, KnowledgeConfig, RuntimeConfig, SummarizationConfig};
 
-use helpers::{default_tools_config, error_text, make_tool_executor, message_text};
+use helpers::{
+    default_config, default_tools_config, error_text, make_tool_executor, message_text,
+    send_message_and_collect,
+};
 
 // ---------------------------------------------------------------------------
 // StreamingMockChannel — a channel that advertises ChannelFeature::Streaming
@@ -437,18 +436,10 @@ fn text_response_factory(text: &str) -> ResponseFactory {
 // Test helpers
 // ---------------------------------------------------------------------------
 
-fn default_config() -> RuntimeConfig {
+fn stream_config() -> RuntimeConfig {
     RuntimeConfig {
-        default_model: ModelId::from("test-model"),
         default_provider: ProviderId::from("test-stream-provider"),
-        system_prompt: None,
-        max_output_tokens: 1024,
-        max_tool_rounds: 10,
-        temperature: None,
-        max_turns_per_session: 10,
-        drain_timeout_secs: 1,
-        session: freebird_types::config::SessionConfig::default(),
-        context: ContextConfig::default(),
+        ..default_config()
     }
 }
 
@@ -512,7 +503,7 @@ fn make_stream_runtime(
         Arc::new(InMemoryMemory::new()),
         None,
         KnowledgeConfig::default(),
-        default_config(),
+        stream_config(),
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
@@ -521,42 +512,6 @@ fn make_stream_runtime(
         None,
         SummarizationConfig::default(),
     )
-}
-
-async fn send_message_and_collect(
-    inbound_tx: &mpsc::Sender<InboundEvent>,
-    mut outbound_rx: mpsc::Receiver<OutboundEvent>,
-    mut runtime: AgentRuntime,
-    text: &str,
-) -> Vec<OutboundEvent> {
-    inbound_tx
-        .send(InboundEvent::Message {
-            raw_text: text.into(),
-            sender_id: "alice".into(),
-            attachments: vec![],
-        })
-        .await
-        .unwrap();
-    inbound_tx
-        .send(InboundEvent::Command {
-            name: "quit".into(),
-            args: vec![],
-            sender_id: "alice".into(),
-        })
-        .await
-        .unwrap();
-
-    let cancel = CancellationToken::new();
-    tokio::time::timeout(Duration::from_secs(5), runtime.run(cancel))
-        .await
-        .expect("runtime should exit within timeout")
-        .unwrap();
-
-    let mut events = Vec::new();
-    while let Ok(event) = outbound_rx.try_recv() {
-        events.push(event);
-    }
-    events
 }
 
 fn stream_chunk_text(event: &OutboundEvent) -> Option<&str> {
@@ -580,7 +535,7 @@ async fn test_streaming_text_delivery() {
     let (channel, inbound_tx, outbound_rx) = StreamingMockChannel::new();
     let runtime = make_stream_runtime(channel, provider, make_tool_executor(vec![]));
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // Expect: StreamChunk("Hello world") + StreamEnd + Message("Goodbye!")
     assert_eq!(stream_chunk_text(&events[0]), Some("Hello world"));
@@ -595,7 +550,7 @@ async fn test_streaming_multiple_deltas() {
     let (channel, inbound_tx, outbound_rx) = StreamingMockChannel::new();
     let runtime = make_stream_runtime(channel, provider, make_tool_executor(vec![]));
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // 3 StreamChunks + 1 StreamEnd + 1 quit Message
     assert_eq!(stream_chunk_text(&events[0]), Some("Hello"));
@@ -623,7 +578,7 @@ async fn test_streaming_tool_use_round() {
         make_tool_executor(vec![Box::new(tool)])
     });
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Read file").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Read file").await;
 
     // Round 1: StreamChunk("Let me check") + StreamEnd (tool use)
     // ToolStart + ToolEnd (tool status events)
@@ -643,7 +598,7 @@ async fn test_streaming_mid_stream_error() {
     let (channel, inbound_tx, outbound_rx) = StreamingMockChannel::new();
     let runtime = make_stream_runtime(channel, provider, make_tool_executor(vec![]));
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // StreamChunk("partial") + StreamEnd + Error + quit
     assert_eq!(stream_chunk_text(&events[0]), Some("partial"));
@@ -659,7 +614,7 @@ async fn test_streaming_max_tokens() {
     let (channel, inbound_tx, outbound_rx) = StreamingMockChannel::new();
     let runtime = make_stream_runtime(channel, provider, make_tool_executor(vec![]));
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // StreamChunk + StreamEnd + Message(truncation notice) + quit
     assert_eq!(stream_chunk_text(&events[0]), Some("truncated response"));
@@ -691,7 +646,7 @@ async fn test_streaming_fallback_on_stream_setup_failure() {
         KnowledgeConfig::default(),
         RuntimeConfig {
             default_provider: "test-fallback-provider".into(),
-            ..default_config()
+            ..stream_config()
         },
         default_tools_config(),
         BudgetConfig::default(),
@@ -702,7 +657,7 @@ async fn test_streaming_fallback_on_stream_setup_failure() {
         SummarizationConfig::default(),
     );
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // Should get a regular Message (not StreamChunk) since we fell back
     assert_eq!(message_text(&events[0]), Some("fallback response"));
@@ -731,7 +686,7 @@ async fn test_non_streaming_channel_uses_non_streaming_path() {
         KnowledgeConfig::default(),
         RuntimeConfig {
             default_provider: "test-fallback-provider".into(),
-            ..default_config()
+            ..stream_config()
         },
         default_tools_config(),
         BudgetConfig::default(),
@@ -742,7 +697,7 @@ async fn test_non_streaming_channel_uses_non_streaming_path() {
         SummarizationConfig::default(),
     );
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // Should get a Message (non-streaming path), not StreamChunks
     assert_eq!(message_text(&events[0]), Some("non-streaming response"));
@@ -760,7 +715,7 @@ async fn test_streaming_provider_called_via_stream_not_complete() {
     let (channel, inbound_tx, outbound_rx) = StreamingMockChannel::new();
     let runtime = make_stream_runtime(channel, Arc::clone(&provider), make_tool_executor(vec![]));
 
-    let _events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let _events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // stream() should have been called once
     assert_eq!(provider.stream_call_count(), 1);
@@ -794,7 +749,7 @@ async fn test_streaming_multi_tool_rounds() {
         make_tool_executor(vec![Box::new(tool_a), Box::new(tool_b)])
     });
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Use tools").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Use tools").await;
 
     // Round 1: StreamChunk + StreamEnd (tool_a)
     // Round 2: StreamChunk + StreamEnd (tool_b)
@@ -824,7 +779,7 @@ async fn test_streaming_conversation_persisted() {
         Arc::new(memory.clone()),
         None,
         KnowledgeConfig::default(),
-        default_config(),
+        stream_config(),
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
@@ -834,7 +789,7 @@ async fn test_streaming_conversation_persisted() {
         SummarizationConfig::default(),
     );
 
-    let _events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi there").await;
+    let _events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi there").await;
 
     // Verify conversation was saved
     let sessions = memory.list_sessions(10).await.unwrap();
@@ -855,7 +810,7 @@ async fn test_streaming_empty_stream_reports_error() {
     let (channel, inbound_tx, outbound_rx) = StreamingMockChannel::new();
     let runtime = make_stream_runtime(channel, provider, make_tool_executor(vec![]));
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // Should get StreamEnd + Error about unexpected end
     assert!(is_stream_end(&events[0]));
@@ -872,7 +827,7 @@ async fn test_streaming_injection_audit_only() {
     let (channel, inbound_tx, outbound_rx) = StreamingMockChannel::new();
     let runtime = make_stream_runtime(channel, provider, make_tool_executor(vec![]));
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // Streaming delivers the text via StreamChunk even though it contains injection.
     // The injection scan is audit-only — the text has already been sent to the user.
@@ -943,7 +898,7 @@ async fn test_streaming_multiple_tools_same_round() {
         make_tool_executor(vec![Box::new(tool_a), Box::new(tool_b)])
     });
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Use both").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Use both").await;
 
     // Round 1: StreamChunk("Using both tools") + StreamEnd (tool use, 2 tools executed)
     // ToolStart(tool_a) + ToolEnd(tool_a) + ToolStart(tool_b) + ToolEnd(tool_b)
@@ -986,7 +941,7 @@ async fn test_streaming_max_tool_rounds_exceeded() {
         KnowledgeConfig::default(),
         RuntimeConfig {
             max_tool_rounds: 1,
-            ..default_config()
+            ..stream_config()
         },
         default_tools_config(),
         BudgetConfig {
@@ -1000,7 +955,7 @@ async fn test_streaming_max_tool_rounds_exceeded() {
         SummarizationConfig::default(),
     );
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Loop forever").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Loop forever").await;
 
     // Budget check fires at round 1 (0-indexed) with max_tool_rounds_per_turn=1.
     assert!(
@@ -1039,7 +994,7 @@ async fn test_streaming_stop_sequence() {
         Arc::new(memory.clone()),
         None,
         KnowledgeConfig::default(),
-        default_config(),
+        stream_config(),
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
@@ -1049,7 +1004,7 @@ async fn test_streaming_stop_sequence() {
         SummarizationConfig::default(),
     );
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // Should deliver text and send StreamEnd (same as EndTurn)
     assert_eq!(stream_chunk_text(&events[0]), Some("stopped early"));
@@ -1134,7 +1089,7 @@ async fn test_non_streaming_provider_uses_complete_path() {
         KnowledgeConfig::default(),
         RuntimeConfig {
             default_provider: "no-stream-provider".into(),
-            ..default_config()
+            ..stream_config()
         },
         default_tools_config(),
         BudgetConfig::default(),
@@ -1145,7 +1100,7 @@ async fn test_non_streaming_provider_uses_complete_path() {
         SummarizationConfig::default(),
     );
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // Should get a Message (not StreamChunks) — non-streaming path
     assert_eq!(message_text(&events[0]), Some("non-streaming response"));
@@ -1182,7 +1137,7 @@ async fn test_streaming_empty_done() {
         Arc::new(memory.clone()),
         None,
         KnowledgeConfig::default(),
-        default_config(),
+        stream_config(),
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
@@ -1192,7 +1147,7 @@ async fn test_streaming_empty_done() {
         SummarizationConfig::default(),
     );
 
-    let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+    let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
 
     // StreamEnd should be sent even with no text deltas
     assert!(is_stream_end(&events[0]));

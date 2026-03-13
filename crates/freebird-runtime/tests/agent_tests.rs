@@ -45,6 +45,7 @@ fn make_runtime(channel: MockChannel) -> AgentRuntime {
             temperature: None,
             max_turns_per_session: 10,
             drain_timeout_secs: 1,
+            max_concurrent_tasks: 8,
             session: freebird_types::config::SessionConfig::default(),
             context: ContextConfig::default(),
         },
@@ -73,7 +74,7 @@ fn make_runtime(channel: MockChannel) -> AgentRuntime {
 #[tokio::test]
 async fn test_command_quit_sends_goodbye_and_exits() {
     let (channel, inbound_tx, mut outbound_rx, _stopped) = MockChannel::new();
-    let mut runtime = make_runtime(channel);
+    let runtime = make_runtime(channel);
     let cancel = CancellationToken::new();
 
     inbound_tx
@@ -85,7 +86,7 @@ async fn test_command_quit_sends_goodbye_and_exits() {
         .await
         .unwrap();
 
-    let result = tokio::time::timeout(Duration::from_secs(2), runtime.run(cancel)).await;
+    let result = tokio::time::timeout(Duration::from_secs(2), Arc::new(runtime).run(cancel)).await;
     let result = result.expect("runtime should exit within timeout");
     assert!(result.is_ok(), "run() should return Ok(())");
 
@@ -96,7 +97,7 @@ async fn test_command_quit_sends_goodbye_and_exits() {
 #[tokio::test]
 async fn test_command_new_creates_session() {
     let (channel, inbound_tx, mut outbound_rx, _stopped) = MockChannel::new();
-    let mut runtime = make_runtime(channel);
+    let runtime = make_runtime(channel);
     let cancel = CancellationToken::new();
 
     inbound_tx
@@ -116,7 +117,7 @@ async fn test_command_new_creates_session() {
         .await
         .unwrap();
 
-    let result = tokio::time::timeout(Duration::from_secs(2), runtime.run(cancel)).await;
+    let result = tokio::time::timeout(Duration::from_secs(2), Arc::new(runtime).run(cancel)).await;
     result.expect("runtime should exit").unwrap();
 
     let event = outbound_rx
@@ -133,7 +134,7 @@ async fn test_command_new_creates_session() {
 #[tokio::test]
 async fn test_command_help_sends_help_text() {
     let (channel, inbound_tx, mut outbound_rx, _stopped) = MockChannel::new();
-    let mut runtime = make_runtime(channel);
+    let runtime = make_runtime(channel);
     let cancel = CancellationToken::new();
 
     inbound_tx
@@ -153,7 +154,7 @@ async fn test_command_help_sends_help_text() {
         .await
         .unwrap();
 
-    let result = tokio::time::timeout(Duration::from_secs(2), runtime.run(cancel)).await;
+    let result = tokio::time::timeout(Duration::from_secs(2), Arc::new(runtime).run(cancel)).await;
     result.expect("runtime should exit").unwrap();
 
     let event = outbound_rx.recv().await.expect("should receive help text");
@@ -166,7 +167,7 @@ async fn test_command_help_sends_help_text() {
 #[tokio::test]
 async fn test_command_unknown_sends_error() {
     let (channel, inbound_tx, mut outbound_rx, _stopped) = MockChannel::new();
-    let mut runtime = make_runtime(channel);
+    let runtime = make_runtime(channel);
     let cancel = CancellationToken::new();
 
     inbound_tx
@@ -186,7 +187,7 @@ async fn test_command_unknown_sends_error() {
         .await
         .unwrap();
 
-    let result = tokio::time::timeout(Duration::from_secs(2), runtime.run(cancel)).await;
+    let result = tokio::time::timeout(Duration::from_secs(2), Arc::new(runtime).run(cancel)).await;
     result.expect("runtime should exit").unwrap();
 
     let event = outbound_rx.recv().await.expect("should receive error");
@@ -200,7 +201,7 @@ async fn test_command_unknown_sends_error() {
 #[tokio::test]
 async fn test_shutdown_on_cancel() {
     let (channel, _inbound_tx, _outbound_rx, _stopped) = MockChannel::new();
-    let mut runtime = make_runtime(channel);
+    let runtime = make_runtime(channel);
     let cancel = CancellationToken::new();
 
     let cancel_clone = cancel.clone();
@@ -209,7 +210,7 @@ async fn test_shutdown_on_cancel() {
         cancel_clone.cancel();
     });
 
-    let result = tokio::time::timeout(Duration::from_secs(2), runtime.run(cancel)).await;
+    let result = tokio::time::timeout(Duration::from_secs(2), Arc::new(runtime).run(cancel)).await;
     let result = result.expect("runtime should exit within timeout");
     assert!(result.is_ok(), "run() should return Ok(()) on cancel");
 }
@@ -217,13 +218,13 @@ async fn test_shutdown_on_cancel() {
 #[tokio::test]
 async fn test_eof_exits_cleanly() {
     let (channel, inbound_tx, _outbound_rx, _stopped) = MockChannel::new();
-    let mut runtime = make_runtime(channel);
+    let runtime = make_runtime(channel);
     let cancel = CancellationToken::new();
 
     // Drop the sender to close the inbound stream (simulates EOF)
     drop(inbound_tx);
 
-    let result = tokio::time::timeout(Duration::from_secs(2), runtime.run(cancel)).await;
+    let result = tokio::time::timeout(Duration::from_secs(2), Arc::new(runtime).run(cancel)).await;
     let result = result.expect("runtime should exit within timeout");
     assert!(result.is_ok(), "run() should return Ok(()) on EOF");
 }
@@ -231,13 +232,13 @@ async fn test_eof_exits_cleanly() {
 #[tokio::test]
 async fn test_channel_stop_called() {
     let (channel, inbound_tx, _outbound_rx, stopped) = MockChannel::new();
-    let mut runtime = make_runtime(channel);
+    let runtime = make_runtime(channel);
     let cancel = CancellationToken::new();
 
     // Drop sender to trigger EOF → clean exit
     drop(inbound_tx);
 
-    let result = tokio::time::timeout(Duration::from_secs(2), runtime.run(cancel)).await;
+    let result = tokio::time::timeout(Duration::from_secs(2), Arc::new(runtime).run(cancel)).await;
     result.expect("runtime should exit").unwrap();
 
     assert!(
@@ -249,7 +250,7 @@ async fn test_channel_stop_called() {
 #[tokio::test]
 async fn test_connected_event_no_crash() {
     let (channel, inbound_tx, mut outbound_rx, _stopped) = MockChannel::new();
-    let mut runtime = make_runtime(channel);
+    let runtime = make_runtime(channel);
     let cancel = CancellationToken::new();
 
     inbound_tx
@@ -267,7 +268,7 @@ async fn test_connected_event_no_crash() {
         .await
         .unwrap();
 
-    let result = tokio::time::timeout(Duration::from_secs(2), runtime.run(cancel)).await;
+    let result = tokio::time::timeout(Duration::from_secs(2), Arc::new(runtime).run(cancel)).await;
     result.expect("runtime should exit").unwrap();
 
     // The Connected event produces no outbound — next event is Goodbye
@@ -278,7 +279,7 @@ async fn test_connected_event_no_crash() {
 #[tokio::test]
 async fn test_disconnected_event_no_crash() {
     let (channel, inbound_tx, mut outbound_rx, _stopped) = MockChannel::new();
-    let mut runtime = make_runtime(channel);
+    let runtime = make_runtime(channel);
     let cancel = CancellationToken::new();
 
     inbound_tx
@@ -296,7 +297,7 @@ async fn test_disconnected_event_no_crash() {
         .await
         .unwrap();
 
-    let result = tokio::time::timeout(Duration::from_secs(2), runtime.run(cancel)).await;
+    let result = tokio::time::timeout(Duration::from_secs(2), Arc::new(runtime).run(cancel)).await;
     result.expect("runtime should exit").unwrap();
 
     let event = outbound_rx.recv().await.expect("should receive goodbye");

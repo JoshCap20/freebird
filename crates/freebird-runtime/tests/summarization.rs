@@ -188,7 +188,7 @@ fn make_summarization_runtime(
 async fn send_messages_and_collect(
     inbound_tx: &mpsc::Sender<InboundEvent>,
     mut outbound_rx: mpsc::Receiver<OutboundEvent>,
-    mut runtime: AgentRuntime,
+    runtime: AgentRuntime,
     messages: &[&str],
 ) -> Vec<OutboundEvent> {
     for msg in messages {
@@ -212,6 +212,7 @@ async fn send_messages_and_collect(
         .unwrap();
 
     let cancel = CancellationToken::new();
+    let runtime = Arc::new(runtime);
     tokio::time::timeout(Duration::from_secs(10), runtime.run(cancel))
         .await
         .expect("runtime should exit within timeout")

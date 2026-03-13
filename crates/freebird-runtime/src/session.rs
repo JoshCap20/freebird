@@ -8,13 +8,17 @@
 //! Supports TTL-based expiration and LRU eviction to bound memory usage.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
+use chrono::Utc;
 use freebird_security::budget::TokenBudget;
 use freebird_security::capability::CapabilityGrant;
+use freebird_security::error::SecurityError;
 use freebird_traits::id::SessionId;
-use freebird_types::config::SessionConfig;
+use freebird_traits::tool::Capability;
+use freebird_types::config::{BudgetConfig, SessionConfig};
 use freebird_types::id::new_session_id;
 use tokio::sync::RwLock;
 
@@ -44,6 +48,9 @@ pub struct SessionManager {
     /// Per-session capability grants. Each session has a scoped set of
     /// permissions that determine which tools it can invoke.
     grants: RwLock<HashMap<SessionId, CapabilityGrant>>,
+    /// Per-session serialization locks. Ensures same-session messages
+    /// are processed sequentially while different sessions run concurrently.
+    session_locks: RwLock<HashMap<SessionId, Arc<tokio::sync::Mutex<()>>>>,
     /// Configuration for session limits.
     config: SessionConfig,
 }
@@ -56,6 +63,7 @@ impl SessionManager {
             sessions: RwLock::new(HashMap::new()),
             budgets: RwLock::new(HashMap::new()),
             grants: RwLock::new(HashMap::new()),
+            session_locks: RwLock::new(HashMap::new()),
             config: SessionConfig::default(),
         }
     }
@@ -67,6 +75,7 @@ impl SessionManager {
             sessions: RwLock::new(HashMap::new()),
             budgets: RwLock::new(HashMap::new()),
             grants: RwLock::new(HashMap::new()),
+            session_locks: RwLock::new(HashMap::new()),
             config,
         }
     }
@@ -135,10 +144,11 @@ impl SessionManager {
             sessions.insert(key, entry).map(|e| e.id)
         };
 
-        // Clean up old session's grant and budget if one existed.
+        // Clean up old session's grant, budget, and lock if one existed.
         if let Some(old_id) = old_id {
             self.grants.write().await.remove(&old_id);
             self.budgets.write().await.remove(&old_id);
+            self.session_locks.write().await.remove(&old_id);
         }
 
         // Run eviction after inserting
@@ -176,6 +186,7 @@ impl SessionManager {
         if let Some(ref id) = removed_id {
             self.grants.write().await.remove(id);
             self.budgets.write().await.remove(id);
+            self.session_locks.write().await.remove(id);
         }
 
         removed_id
@@ -210,6 +221,87 @@ impl SessionManager {
     pub async fn get_grant(&self, session_id: &SessionId) -> Option<CapabilityGrant> {
         let grants = self.grants.read().await;
         grants.get(session_id).cloned()
+    }
+
+    /// Returns the per-session serialization lock, creating one if needed.
+    ///
+    /// Uses read-then-write locking: fast path (existing lock) only acquires
+    /// a read lock. Write lock taken only for new sessions.
+    pub async fn get_or_create_lock(&self, session_id: &SessionId) -> Arc<tokio::sync::Mutex<()>> {
+        // Fast path: read lock
+        {
+            let locks = self.session_locks.read().await;
+            if let Some(lock) = locks.get(session_id) {
+                return Arc::clone(lock);
+            }
+        }
+        // Slow path: write lock with double-check
+        let mut locks = self.session_locks.write().await;
+        Arc::clone(
+            locks
+                .entry(session_id.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    }
+
+    /// Initialize budget and capability grant for a session.
+    ///
+    /// When `force` is `false` (normal message path), existing budget/grant are
+    /// preserved — this is the idempotent "ensure" path. When `force` is `true`
+    /// (the `/new` command), both are unconditionally replaced.
+    ///
+    /// **Must be called inside the per-session `Mutex<()>`** to prevent TOCTOU
+    /// races where two concurrent first-messages both see `budget=None` and both
+    /// create one (the second would overwrite the first, losing recorded usage).
+    ///
+    /// # Errors
+    ///
+    /// Returns `SecurityError` if the `ttl_hours` value overflows or the
+    /// sandbox root is not accessible.
+    pub async fn initialize_session_state(
+        &self,
+        session_id: &SessionId,
+        budget_config: &BudgetConfig,
+        sandbox_root: &Path,
+        ttl_hours: u64,
+        force: bool,
+    ) -> Result<(), SecurityError> {
+        if force || self.get_budget(session_id).await.is_none() {
+            self.set_budget(session_id, TokenBudget::new(budget_config))
+                .await;
+        }
+        if force || self.get_grant(session_id).await.is_none() {
+            tracing::warn!(
+                ttl_hours,
+                "using permissive default capability grant — per-session auth not yet wired"
+            );
+            let ttl_hours_i64 = i64::try_from(ttl_hours).map_err(|_| {
+                SecurityError::InvalidCredential {
+                    reason: format!(
+                        "default_session_ttl_hours value {ttl_hours} exceeds maximum representable duration"
+                    ),
+                }
+            })?;
+            let expires_at = Utc::now() + chrono::Duration::hours(ttl_hours_i64);
+            let grant = CapabilityGrant::new(
+                [
+                    Capability::FileRead,
+                    Capability::FileWrite,
+                    Capability::FileDelete,
+                    Capability::ShellExecute,
+                    Capability::ProcessSpawn,
+                    Capability::NetworkOutbound,
+                    Capability::NetworkListen,
+                    Capability::EnvRead,
+                ]
+                .into_iter()
+                .collect(),
+                sandbox_root.to_path_buf(),
+                Some(expires_at),
+            )?;
+            self.set_grant(session_id, grant).await;
+        }
+        Ok(())
     }
 
     /// Returns the number of active session mappings.
@@ -281,7 +373,7 @@ impl SessionManager {
         self.cleanup_evicted(&evicted_ids).await;
     }
 
-    /// Remove grants and budgets for evicted session IDs.
+    /// Remove grants, budgets, and locks for evicted session IDs.
     async fn cleanup_evicted(&self, ids: &[SessionId]) {
         {
             let mut grants = self.grants.write().await;
@@ -293,6 +385,12 @@ impl SessionManager {
             let mut budgets = self.budgets.write().await;
             for id in ids {
                 budgets.remove(id);
+            }
+        }
+        {
+            let mut locks = self.session_locks.write().await;
+            for id in ids {
+                locks.remove(id);
             }
         }
     }
@@ -625,5 +723,63 @@ mod tests {
         // Budget and grant for evicted session should be gone
         assert!(mgr.get_budget(&id).await.is_none());
         assert!(mgr.get_grant(&id).await.is_none());
+    }
+
+    // ── Per-session lock tests ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_or_create_lock_returns_same_lock_for_same_session() {
+        let mgr = SessionManager::new();
+        let id = mgr.resolve("cli", "alice").await;
+        let lock1 = mgr.get_or_create_lock(&id).await;
+        let lock2 = mgr.get_or_create_lock(&id).await;
+        assert!(Arc::ptr_eq(&lock1, &lock2));
+    }
+
+    #[tokio::test]
+    async fn test_get_or_create_lock_returns_different_locks_for_different_sessions() {
+        let mgr = SessionManager::new();
+        let alice = mgr.resolve("cli", "alice").await;
+        let bob = mgr.resolve("cli", "bob").await;
+        let lock_alice = mgr.get_or_create_lock(&alice).await;
+        let lock_bob = mgr.get_or_create_lock(&bob).await;
+        assert!(!Arc::ptr_eq(&lock_alice, &lock_bob));
+    }
+
+    #[tokio::test]
+    async fn test_new_session_cleans_up_session_lock() {
+        let mgr = SessionManager::new();
+        let old_id = mgr.resolve("cli", "alice").await;
+        drop(mgr.get_or_create_lock(&old_id).await);
+
+        let _new_id = mgr.new_session("cli", "alice").await;
+        assert!(!mgr.session_locks.read().await.contains_key(&old_id));
+    }
+
+    #[tokio::test]
+    async fn test_remove_cleans_up_session_lock() {
+        let mgr = SessionManager::new();
+        let id = mgr.resolve("cli", "alice").await;
+        drop(mgr.get_or_create_lock(&id).await);
+
+        let _ = mgr.remove("cli", "alice").await;
+        assert!(!mgr.session_locks.read().await.contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn test_eviction_cleans_up_session_locks() {
+        let config = SessionConfig {
+            max_sessions: 100,
+            session_ttl_secs: 1,
+        };
+        let mgr = SessionManager::with_config(config);
+
+        let id = mgr.resolve("cli", "alice").await;
+        drop(mgr.get_or_create_lock(&id).await);
+
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        let _id2 = mgr.resolve("cli", "bob").await;
+
+        assert!(!mgr.session_locks.read().await.contains_key(&id));
     }
 }
