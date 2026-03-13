@@ -321,23 +321,14 @@ impl Tool for SearchReplaceEditTool {
         let result = find_and_replace(&file_content, old_str, new_str, &relative)?;
 
         // Large edit guardrail — detect edits that change a large fraction of the file.
-        if let Some(output) = check_large_edit_guard(
-            &file_content,
-            old_str,
-            new_str,
-            &relative,
-            self.large_edit_threshold,
-            self.large_edit_action,
-        ) {
-            return Ok(output);
+        let large_edit_metrics =
+            compute_large_edit_metrics(&file_content, old_str, new_str, self.large_edit_threshold);
+        if let Some(ref metrics) = large_edit_metrics {
+            if let Some(output) = check_large_edit_guard(metrics, &relative, self.large_edit_action)
+            {
+                return Ok(output);
+            }
         }
-        let large_edit_warning = large_edit_warning_text(
-            &file_content,
-            old_str,
-            new_str,
-            self.large_edit_threshold,
-            self.large_edit_action,
-        );
 
         // Syntax validation before write — original file untouched on failure.
         if self.syntax_validation {
@@ -364,8 +355,10 @@ impl Tool for SearchReplaceEditTool {
             message.push_str(&diff);
         }
 
-        if let Some(warning) = large_edit_warning {
-            message.push_str(&warning);
+        if let Some(ref metrics) = large_edit_metrics {
+            if matches!(self.large_edit_action, LargeEditAction::Warn) {
+                message.push_str(&large_edit_warning_text(metrics));
+            }
         }
 
         // Record pre-edit content for undo support — AFTER successful write,
@@ -449,18 +442,24 @@ fn relative_path_display(safe_path: &freebird_security::safe_types::SafeFilePath
         .to_string()
 }
 
-/// Check whether a large edit should be blocked or rejected.
+/// Computed metrics for a large-edit check.
+struct LargeEditMetrics {
+    pct: u64,
+    threshold_pct: u64,
+    old_lines: usize,
+    new_lines: usize,
+}
+
+/// Compute large-edit metrics if the ratio exceeds the threshold.
 ///
-/// Returns `Some(ToolOutput)` for `Block`/`Consent` actions when the threshold
-/// is exceeded. Returns `None` if the edit is allowed.
-fn check_large_edit_guard(
+/// Returns `None` when the edit is under the threshold or the file is empty
+/// (avoids division by zero).
+fn compute_large_edit_metrics(
     file_content: &str,
     old_str: &str,
     new_str: &str,
-    relative: &str,
     threshold: f64,
-    action: LargeEditAction,
-) -> Option<ToolOutput> {
+) -> Option<LargeEditMetrics> {
     if file_content.is_empty() {
         return None;
     }
@@ -476,8 +475,31 @@ fn check_large_edit_guard(
     let pct = (change_ratio * 100.0).round() as u64;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let threshold_pct = (threshold * 100.0).round() as u64;
-    let old_lines = old_str.lines().count();
-    let new_lines = new_str.lines().count();
+
+    Some(LargeEditMetrics {
+        pct,
+        threshold_pct,
+        old_lines: old_str.lines().count(),
+        new_lines: new_str.lines().count(),
+    })
+}
+
+/// Evaluate the large-edit guardrail.
+///
+/// Returns `Some(ToolOutput)` for `Block`/`Consent` when the threshold is
+/// exceeded. Returns `None` when the edit is allowed (including `Warn` mode,
+/// whose warning text is handled separately via `large_edit_warning_text`).
+fn check_large_edit_guard(
+    metrics: &LargeEditMetrics,
+    relative: &str,
+    action: LargeEditAction,
+) -> Option<ToolOutput> {
+    let LargeEditMetrics {
+        pct,
+        threshold_pct,
+        old_lines,
+        new_lines,
+    } = *metrics;
 
     match action {
         LargeEditAction::Block => Some(ToolOutput {
@@ -505,36 +527,18 @@ fn check_large_edit_guard(
 }
 
 /// Return the warning text for a large edit in `Warn` mode, or `None`.
-fn large_edit_warning_text(
-    file_content: &str,
-    old_str: &str,
-    new_str: &str,
-    threshold: f64,
-    action: LargeEditAction,
-) -> Option<String> {
-    if file_content.is_empty() || !matches!(action, LargeEditAction::Warn) {
-        return None;
-    }
-    let max_span = old_str.len().max(new_str.len());
-    #[allow(clippy::cast_precision_loss)]
-    let change_ratio = max_span as f64 / file_content.len() as f64;
-
-    if change_ratio < threshold {
-        return None;
-    }
-
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let pct = (change_ratio * 100.0).round() as u64;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let threshold_pct = (threshold * 100.0).round() as u64;
-    let old_lines = old_str.lines().count();
-    let new_lines = new_str.lines().count();
-
-    Some(format!(
+fn large_edit_warning_text(metrics: &LargeEditMetrics) -> String {
+    let LargeEditMetrics {
+        pct,
+        threshold_pct,
+        old_lines,
+        new_lines,
+    } = *metrics;
+    format!(
         "\n\nLarge edit warning: this edit changes {pct}% of the file \
          ({old_lines} \u{2192} {new_lines} lines, threshold: {threshold_pct}%). \
          Consider smaller, targeted edits."
-    ))
+    )
 }
 
 /// Format a compact diff preview showing what changed with context lines.
