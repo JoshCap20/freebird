@@ -14,6 +14,7 @@
 //! Each scan applies dual normalization to defeat Unicode-based evasion
 //! (see [`check_patterns`] for details).
 
+use crate::audit::InjectionSource;
 use crate::error::{SecurityError, Severity};
 
 /// Zero-width and invisible Unicode characters used for pattern evasion.
@@ -176,6 +177,7 @@ pub fn scan_input(text: &str) -> Result<(), SecurityError> {
         SecurityError::PotentialInjection {
             pattern: pattern.to_string(),
             severity: Severity::High,
+            origin: InjectionSource::UserInput,
         }
     })
 }
@@ -195,6 +197,7 @@ pub fn scan_output(text: &str) -> Result<(), SecurityError> {
         SecurityError::PotentialInjection {
             pattern: pattern.to_string(),
             severity: Severity::High,
+            origin: InjectionSource::ToolOutput,
         }
     })
 }
@@ -323,9 +326,14 @@ mod tests {
     fn test_returns_matched_pattern() {
         let result = scan_input("please jailbreak the model");
         match result.unwrap_err() {
-            SecurityError::PotentialInjection { pattern, severity } => {
+            SecurityError::PotentialInjection {
+                pattern,
+                severity,
+                origin,
+            } => {
                 assert_eq!(pattern, "jailbreak");
                 assert_eq!(severity, Severity::High);
+                assert_eq!(origin, InjectionSource::UserInput);
             }
             other => panic!("expected PotentialInjection, got: {other:?}"),
         }

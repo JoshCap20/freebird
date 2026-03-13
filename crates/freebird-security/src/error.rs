@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use freebird_traits::tool::Capability;
 use serde::{Deserialize, Serialize};
 
+use crate::audit::InjectionSource;
 use crate::budget::BudgetResource;
 
 /// Severity classification for security events.
@@ -32,8 +33,12 @@ pub enum SecurityError {
     ForbiddenCharacter { character: char, context: String },
 
     // ── Prompt injection ─────────────────────────────────────────
-    #[error("potential prompt injection detected: pattern `{pattern}`")]
-    PotentialInjection { pattern: String, severity: Severity },
+    #[error("potential prompt injection detected in {origin:?}: pattern `{pattern}`")]
+    PotentialInjection {
+        pattern: String,
+        severity: Severity,
+        origin: InjectionSource,
+    },
 
     // ── Path safety ──────────────────────────────────────────────
     #[error("path traversal: `{}` escapes sandbox `{}`", attempted.display(), sandbox.display())]
@@ -171,8 +176,11 @@ mod tests {
         let err = SecurityError::PotentialInjection {
             pattern: "ignore previous instructions".into(),
             severity: Severity::High,
+            origin: InjectionSource::UserInput,
         };
-        assert!(err.to_string().contains("ignore previous instructions"));
+        let msg = err.to_string();
+        assert!(msg.contains("ignore previous instructions"));
+        assert!(msg.contains("UserInput"));
     }
 
     #[test]
