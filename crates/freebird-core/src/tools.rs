@@ -219,9 +219,18 @@ format = "pretty"
             registry.get("recall_session").is_some(),
             "missing recall_session"
         );
+        assert!(registry.get("undo_edit").is_some(), "missing undo_edit");
         assert!(
-            registry.tool_count() >= 19,
-            "expected at least 19 tools, got {}",
+            registry.get("create_checkpoint").is_some(),
+            "missing create_checkpoint"
+        );
+        assert!(
+            registry.get("rollback_to_checkpoint").is_some(),
+            "missing rollback_to_checkpoint"
+        );
+        assert!(
+            registry.tool_count() >= 22,
+            "expected at least 22 tools, got {}",
             registry.tool_count()
         );
     }
