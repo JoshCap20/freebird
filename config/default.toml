@@ -46,6 +46,8 @@ git_timeout_secs = 5
 diff_preview = true
 diff_context_lines = 3
 syntax_validation = true
+large_edit_threshold = 0.5
+large_edit_action = "warn"
 
 [memory]
 db_path = "~/.freebird/freebird.db"

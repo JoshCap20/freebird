@@ -200,6 +200,18 @@ const fn default_git_timeout_secs() -> u64 {
     5
 }
 
+/// Action to take when an edit exceeds the large-edit threshold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LargeEditAction {
+    /// Apply the edit but include a warning in the output.
+    Warn,
+    /// Reject the edit entirely — the file is not modified.
+    Block,
+    /// Reject the edit with guidance to break it into smaller edits.
+    Consent,
+}
+
 /// Configuration for the search/replace edit tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditConfig {
@@ -213,6 +225,12 @@ pub struct EditConfig {
     /// Invalid edits are rejected and the original file is preserved.
     #[serde(default = "default_syntax_validation")]
     pub syntax_validation: bool,
+    /// Flag edits that change more than this fraction of the file (0.0–1.0).
+    #[serde(default = "default_large_edit_threshold")]
+    pub large_edit_threshold: f64,
+    /// Action when the large-edit threshold is exceeded.
+    #[serde(default = "default_large_edit_action")]
+    pub large_edit_action: LargeEditAction,
 }
 
 impl Default for EditConfig {
@@ -221,6 +239,8 @@ impl Default for EditConfig {
             diff_preview: default_diff_preview(),
             diff_context_lines: default_diff_context_lines(),
             syntax_validation: default_syntax_validation(),
+            large_edit_threshold: default_large_edit_threshold(),
+            large_edit_action: default_large_edit_action(),
         }
     }
 }
@@ -235,6 +255,14 @@ const fn default_diff_context_lines() -> usize {
 
 const fn default_syntax_validation() -> bool {
     true
+}
+
+const fn default_large_edit_threshold() -> f64 {
+    0.5
+}
+
+const fn default_large_edit_action() -> LargeEditAction {
+    LargeEditAction::Warn
 }
 
 fn default_allowed_shell_commands() -> Vec<String> {
@@ -1220,5 +1248,45 @@ drain_timeout_secs = 1"#,
             result.is_err(),
             "invalid secret guard action should fail deserialization"
         );
+    }
+
+    // ── LargeEditAction tests ───────────────────────────────────
+
+    #[test]
+    fn test_large_edit_action_serde_roundtrip() {
+        for (action, expected_json) in [
+            (LargeEditAction::Warn, "\"warn\""),
+            (LargeEditAction::Block, "\"block\""),
+            (LargeEditAction::Consent, "\"consent\""),
+        ] {
+            let json = serde_json::to_string(&action).unwrap();
+            assert_eq!(json, expected_json);
+            let back: LargeEditAction = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, action);
+        }
+    }
+
+    #[test]
+    fn test_large_edit_action_invalid_value_rejected() {
+        let result = serde_json::from_str::<LargeEditAction>("\"ignore\"");
+        assert!(
+            result.is_err(),
+            "invalid large-edit action should fail deserialization"
+        );
+    }
+
+    #[test]
+    fn test_edit_config_large_edit_defaults() {
+        // Parse EditConfig with only required fields — large-edit fields use defaults
+        let toml_str = config_toml(&[(
+            "tools",
+            "sandbox_root = \"/tmp\"\ndefault_timeout_secs = 10\n\n[tools.edit]\ndiff_preview = true\ndiff_context_lines = 3\nsyntax_validation = true",
+        )]);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert!(
+            (config.tools.edit.large_edit_threshold - 0.5).abs() < f64::EPSILON,
+            "default threshold should be 0.5"
+        );
+        assert_eq!(config.tools.edit.large_edit_action, LargeEditAction::Warn);
     }
 }
