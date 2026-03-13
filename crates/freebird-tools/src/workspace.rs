@@ -188,8 +188,9 @@ async fn git_command(work_dir: &Path, args: &[&str], timeout: Duration) -> Resul
 
 /// Parse porcelain status output into (modified, staged, untracked).
 fn parse_porcelain_status(output: &str) -> (Vec<String>, Vec<String>, usize) {
-    let mut modified = Vec::new();
-    let mut staged = Vec::new();
+    let line_count = output.lines().count();
+    let mut modified = Vec::with_capacity(line_count);
+    let mut staged = Vec::with_capacity(line_count);
     let mut untracked: usize = 0;
 
     for line in output.lines() {
@@ -228,8 +229,12 @@ fn format_file_list(files: &[String]) -> String {
         return "(none)".into();
     }
 
-    let shown = files.len().min(MAX_FILES_SHOWN);
-    let mut result = files.get(..shown).unwrap_or(files).join(", ");
+    let mut result: String = files
+        .iter()
+        .take(MAX_FILES_SHOWN)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
 
     let remaining = files.len().saturating_sub(MAX_FILES_SHOWN);
     if remaining > 0 {
