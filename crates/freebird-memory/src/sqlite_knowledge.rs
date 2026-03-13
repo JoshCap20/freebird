@@ -320,21 +320,22 @@ impl KnowledgeStore for SqliteKnowledgeStore {
         let kind_s = kind_str(kind)?;
         let conn = self.db.conn().await;
 
-        conn.execute_batch("BEGIN IMMEDIATE")
+        // Use unchecked_transaction because we already hold the async mutex.
+        // Auto-rolls-back on drop if commit() is never reached.
+        let tx = conn
+            .unchecked_transaction()
             .map_err(|e| db_err("begin transaction", &e))?;
 
-        if let Err(e) = conn.execute(
+        tx.execute(
             "DELETE FROM knowledge WHERE kind = ?1",
             rusqlite::params![kind_s],
-        ) {
-            let _ = conn.execute_batch("ROLLBACK");
-            return Err(db_err("delete kind", &e));
-        }
+        )
+        .map_err(|e| db_err("delete kind", &e))?;
 
         for entry in &entries {
             let tags_json = serde_json::to_string(&entry.tags)
                 .map_err(|e| KnowledgeError::Serialization(e.to_string()))?;
-            if let Err(e) = conn.execute(
+            tx.execute(
                 &format!(
                     "INSERT INTO knowledge ({SELECT_COLS}) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
@@ -352,14 +353,11 @@ impl KnowledgeStore for SqliteKnowledgeStore {
                     entry.access_count as i64,
                     entry.last_accessed.map(|dt| dt.to_rfc3339()),
                 ],
-            ) {
-                let _ = conn.execute_batch("ROLLBACK");
-                return Err(db_err("insert replacement", &e));
-            }
+            )
+            .map_err(|e| db_err("insert replacement", &e))?;
         }
 
-        conn.execute_batch("COMMIT")
-            .map_err(|e| db_err("commit replace_kind", &e))?;
+        tx.commit().map_err(|e| db_err("commit replace_kind", &e))?;
 
         Ok(())
     }
