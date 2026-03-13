@@ -1241,4 +1241,44 @@ drain_timeout_secs = 1"#,
             "invalid secret guard action should fail deserialization"
         );
     }
+
+    // ── LargeEditAction tests ───────────────────────────────────
+
+    #[test]
+    fn test_large_edit_action_serde_roundtrip() {
+        for (action, expected_json) in [
+            (LargeEditAction::Warn, "\"warn\""),
+            (LargeEditAction::Block, "\"block\""),
+            (LargeEditAction::Consent, "\"consent\""),
+        ] {
+            let json = serde_json::to_string(&action).unwrap();
+            assert_eq!(json, expected_json);
+            let back: LargeEditAction = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, action);
+        }
+    }
+
+    #[test]
+    fn test_large_edit_action_invalid_value_rejected() {
+        let result = serde_json::from_str::<LargeEditAction>("\"ignore\"");
+        assert!(
+            result.is_err(),
+            "invalid large-edit action should fail deserialization"
+        );
+    }
+
+    #[test]
+    fn test_edit_config_large_edit_defaults() {
+        // Parse EditConfig with only required fields — large-edit fields use defaults
+        let toml_str = config_toml(&[(
+            "tools",
+            "sandbox_root = \"/tmp\"\ndefault_timeout_secs = 10\n\n[tools.edit]\ndiff_preview = true\ndiff_context_lines = 3\nsyntax_validation = true",
+        )]);
+        let config: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert!(
+            (config.tools.edit.large_edit_threshold - 0.5).abs() < f64::EPSILON,
+            "default threshold should be 0.5"
+        );
+        assert_eq!(config.tools.edit.large_edit_action, LargeEditAction::Warn);
+    }
 }
