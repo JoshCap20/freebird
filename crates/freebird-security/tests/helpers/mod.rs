@@ -57,7 +57,7 @@ pub fn test_egress_policy() -> EgressPolicy {
         .into_iter()
         .collect();
     let ports: BTreeSet<u16> = [443].into_iter().collect();
-    EgressPolicy::new(hosts, ports)
+    EgressPolicy::new(hosts, ports, 1_048_576)
 }
 
 /// Collection of real-world injection payloads for battery testing.

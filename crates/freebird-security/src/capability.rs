@@ -258,6 +258,67 @@ impl CapabilityGrant {
     }
 }
 
+/// Thread-safe revocation list for immediately revoking session grants.
+///
+/// Checked by `ToolExecutor` before each tool invocation. Uses
+/// `std::sync::RwLock` (not `tokio`) because checks are nanosecond-fast
+/// with no `.await` — per CLAUDE.md §20 concurrency rules exception.
+pub struct RevocationList {
+    revoked_sessions: std::sync::RwLock<BTreeSet<String>>,
+}
+
+impl RevocationList {
+    /// Create an empty revocation list.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            revoked_sessions: std::sync::RwLock::new(BTreeSet::new()),
+        }
+    }
+
+    /// Add a session ID to the revoked set.
+    ///
+    /// Once revoked, `is_revoked()` will return `true` for this session
+    /// until `unrevoke_session()` is called.
+    pub fn revoke_session(&self, session_id: &str) {
+        let mut guard = match self.revoked_sessions.write() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.insert(session_id.to_owned());
+    }
+
+    /// Check if a session ID has been revoked.
+    ///
+    /// Returns `false` for unknown session IDs (deny-by-default is
+    /// enforced elsewhere by `CapabilityGrant::check()`).
+    #[must_use]
+    pub fn is_revoked(&self, session_id: &str) -> bool {
+        let guard = match self.revoked_sessions.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.contains(session_id)
+    }
+
+    /// Remove a session ID from the revoked set.
+    ///
+    /// Returns `true` if the session was previously revoked, `false` otherwise.
+    pub fn unrevoke_session(&self, session_id: &str) -> bool {
+        let mut guard = match self.revoked_sessions.write() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.remove(session_id)
+    }
+}
+
+impl Default for RevocationList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -999,5 +1060,56 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── RevocationList tests ──────────────────────────────────────
+
+    #[test]
+    fn test_revocation_list_new_is_empty() {
+        let list = RevocationList::new();
+        assert!(!list.is_revoked("session-1"));
+    }
+
+    #[test]
+    fn test_revoke_session_makes_it_revoked() {
+        let list = RevocationList::new();
+        list.revoke_session("session-1");
+        assert!(list.is_revoked("session-1"));
+    }
+
+    #[test]
+    fn test_is_revoked_false_for_unknown() {
+        let list = RevocationList::new();
+        list.revoke_session("session-1");
+        assert!(!list.is_revoked("session-2"));
+    }
+
+    #[test]
+    fn test_unrevoke_session_removes_revocation() {
+        let list = RevocationList::new();
+        list.revoke_session("session-1");
+        assert!(list.is_revoked("session-1"));
+
+        let was_present = list.unrevoke_session("session-1");
+        assert!(was_present);
+        assert!(!list.is_revoked("session-1"));
+    }
+
+    #[test]
+    fn test_unrevoke_returns_false_for_unknown() {
+        let list = RevocationList::new();
+        let was_present = list.unrevoke_session("session-never-revoked");
+        assert!(!was_present);
+    }
+
+    #[test]
+    fn test_revocation_multiple_sessions() {
+        let list = RevocationList::new();
+        list.revoke_session("session-a");
+        list.revoke_session("session-b");
+
+        assert!(list.is_revoked("session-a"));
+        assert!(list.is_revoked("session-b"));
+        assert!(!list.is_revoked("session-c"));
     }
 }

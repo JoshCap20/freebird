@@ -182,7 +182,10 @@ impl FreebirdBuilder {
             None
         };
 
-        // 10. TOOL EXECUTOR
+        // 10. REVOCATION LIST — shared between ToolExecutor and FreebirdApp
+        let revocation_list = Arc::new(freebird_security::capability::RevocationList::new());
+
+        // 11. TOOL EXECUTOR
         let tool_executor = freebird_runtime::tool_executor::ToolExecutor::new(
             tool_registry.into_tools(),
             Duration::from_secs(tools_config.default_timeout_secs),
@@ -193,11 +196,12 @@ impl FreebirdBuilder {
             Some(Arc::clone(&memory)),
             secret_guard,
             config.security.injection.clone(),
+            Some(Arc::clone(&revocation_list)),
         )
         .context("failed to construct ToolExecutor (duplicate tool names?)")
         .map_err(CoreError::ToolRegistry)?;
 
-        // 11. AGENT RUNTIME
+        // 12. AGENT RUNTIME
         let runtime = AgentRuntime::new(
             registry,
             channel,
@@ -218,6 +222,7 @@ impl FreebirdBuilder {
             runtime,
             audit_sink,
             memory,
+            revocation_list,
         })
     }
 }

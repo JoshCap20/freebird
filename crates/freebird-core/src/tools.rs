@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use freebird_runtime::tool_registry::ToolRegistry;
-use freebird_security::egress::EgressPolicy;
+use freebird_security::egress::{EgressPolicy, EgressRateLimiter};
 use freebird_tools::network::NetworkToolConfig;
 use freebird_types::config::AppConfig;
 
@@ -58,6 +58,9 @@ pub fn build_tool_registry(config: &AppConfig) -> Result<ToolRegistry> {
 
     // Network tool — gated by egress policy from SecurityConfig.
     let egress_policy = build_egress_policy(config);
+    let rate_limiter = Arc::new(EgressRateLimiter::new(
+        config.security.egress.rate_limit_per_minute,
+    ));
     let network_config = NetworkToolConfig {
         max_response_bytes: config.security.egress.max_response_bytes,
         request_timeout: Duration::from_secs(config.security.egress.request_timeout_secs),
@@ -66,6 +69,7 @@ pub fn build_tool_registry(config: &AppConfig) -> Result<ToolRegistry> {
     registry.register(freebird_tools::network::network_tool(
         client,
         egress_policy,
+        Some(rate_limiter),
         network_config,
     ));
 
@@ -107,7 +111,11 @@ fn build_egress_policy(config: &AppConfig) -> Arc<EgressPolicy> {
         .copied()
         .collect();
 
-    Arc::new(EgressPolicy::new(allowed_hosts, allowed_ports))
+    Arc::new(EgressPolicy::new(
+        allowed_hosts,
+        allowed_ports,
+        config.security.egress.max_request_body_bytes,
+    ))
 }
 
 /// Build a `reqwest::Client` with security-hardened defaults.

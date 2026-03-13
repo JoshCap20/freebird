@@ -14,41 +14,17 @@ use std::time::Duration;
 use freebird_runtime::agent::AgentRuntime;
 use freebird_runtime::registry::ProviderRegistry;
 use freebird_traits::channel::InboundEvent;
-use freebird_traits::id::{ModelId, ProviderId, SessionId};
-use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary};
+use freebird_traits::id::{ModelId, ProviderId};
 use freebird_types::config::{
     BudgetConfig, ContextConfig, EditConfig, KnowledgeConfig, RuntimeConfig, ToolsConfig,
 };
 use tokio_util::sync::CancellationToken;
 
-use helpers::{MockChannel, error_text, make_tool_executor, message_text};
+use helpers::{MockChannel, NoopMemory, error_text, make_tool_executor, message_text};
 
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
-
-struct NoopMemory;
-
-#[async_trait::async_trait]
-impl Memory for NoopMemory {
-    async fn load(&self, _: &SessionId) -> Result<Option<Conversation>, MemoryError> {
-        Ok(None)
-    }
-    async fn save(&self, _: &Conversation) -> Result<(), MemoryError> {
-        Ok(())
-    }
-    async fn list_sessions(&self, _: usize) -> Result<Vec<SessionSummary>, MemoryError> {
-        Ok(vec![])
-    }
-    async fn delete(&self, _: &SessionId) -> Result<(), MemoryError> {
-        Ok(())
-    }
-    async fn search(&self, _: &str, _: usize) -> Result<Vec<SessionSummary>, MemoryError> {
-        Ok(vec![])
-    }
-}
-
-// make_tool_executor imported from helpers
 
 fn make_runtime(channel: MockChannel) -> AgentRuntime {
     AgentRuntime::new(
@@ -81,8 +57,8 @@ fn make_runtime(channel: MockChannel) -> AgentRuntime {
         },
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     )
 }
 

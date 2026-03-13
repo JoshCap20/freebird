@@ -398,6 +398,14 @@ pub struct EgressConfig {
     /// Per-request timeout in seconds for outbound HTTP. Default: 30.
     #[serde(default = "default_egress_request_timeout_secs")]
     pub request_timeout_secs: u64,
+    /// Maximum requests per 60-second sliding window. Default: 60.
+    /// Prevents rapid-fire exfiltration bursts (CLAUDE.md §12 — ASI01).
+    #[serde(default = "default_egress_rate_limit_per_minute")]
+    pub rate_limit_per_minute: u32,
+    /// Maximum request body bytes the network tool will send. Default: 1 MiB.
+    /// Prevents large data exfiltration to allowlisted hosts (CLAUDE.md §12).
+    #[serde(default = "default_egress_max_request_body_bytes")]
+    pub max_request_body_bytes: usize,
 }
 
 impl Default for EgressConfig {
@@ -407,6 +415,8 @@ impl Default for EgressConfig {
             allowed_ports: default_egress_allowed_ports(),
             max_response_bytes: default_egress_max_response_bytes(),
             request_timeout_secs: default_egress_request_timeout_secs(),
+            rate_limit_per_minute: default_egress_rate_limit_per_minute(),
+            max_request_body_bytes: default_egress_max_request_body_bytes(),
         }
     }
 }
@@ -425,6 +435,14 @@ const fn default_egress_max_response_bytes() -> usize {
 
 const fn default_egress_request_timeout_secs() -> u64 {
     30
+}
+
+const fn default_egress_rate_limit_per_minute() -> u32 {
+    60
+}
+
+const fn default_egress_max_request_body_bytes() -> usize {
+    1_048_576 // 1 MiB — prevents data exfiltration
 }
 
 /// What action the secret guard takes when a sensitive input is detected.
@@ -1040,6 +1058,8 @@ drain_timeout_secs = 1"#,
             allowed_ports: vec![443, 8080],
             max_response_bytes: 512_000,
             request_timeout_secs: 15,
+            rate_limit_per_minute: 30,
+            max_request_body_bytes: 2_097_152,
         };
         let json = serde_json::to_string(&egress).unwrap();
         let back: EgressConfig = serde_json::from_str(&json).unwrap();
@@ -1047,6 +1067,8 @@ drain_timeout_secs = 1"#,
         assert_eq!(back.allowed_ports, vec![443, 8080]);
         assert_eq!(back.max_response_bytes, 512_000);
         assert_eq!(back.request_timeout_secs, 15);
+        assert_eq!(back.rate_limit_per_minute, 30);
+        assert_eq!(back.max_request_body_bytes, 2_097_152);
     }
 
     // ── Knowledge config tests ─────────────────────────────────

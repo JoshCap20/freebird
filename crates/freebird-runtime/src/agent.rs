@@ -141,6 +141,15 @@ impl AgentRuntime {
         }
     }
 
+    /// Returns a reference to the internal [`SessionManager`].
+    ///
+    /// Primarily useful for tests that need to inject restricted capability
+    /// grants after session creation (e.g., capability denial E2E tests).
+    #[must_use]
+    pub const fn sessions(&self) -> &SessionManager {
+        &self.sessions
+    }
+
     /// Create a default [`CapabilityGrant`] for a new session.
     ///
     /// Grants all capabilities scoped to the configured sandbox root with a
@@ -2292,6 +2301,7 @@ mod tests {
                 None,
                 None,
                 InjectionConfig::default(),
+                None,
             )
             .unwrap(),
             None,

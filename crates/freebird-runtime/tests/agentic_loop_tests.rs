@@ -28,6 +28,7 @@ use freebird_memory::in_memory::InMemoryMemory;
 use freebird_runtime::agent::AgentRuntime;
 use freebird_runtime::registry::ProviderRegistry;
 use freebird_runtime::tool_executor::ToolExecutor;
+use freebird_security::capability::CapabilityGrant;
 use freebird_traits::channel::{InboundEvent, OutboundEvent};
 use freebird_traits::id::{ModelId, ProviderId, SessionId};
 use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary, Turn};
@@ -368,6 +369,24 @@ fn make_test_runtime(
     tools: ToolExecutor,
     memory: Arc<dyn Memory>,
 ) -> AgentRuntime {
+    make_test_runtime_with_sinks(
+        channel,
+        provider,
+        tools,
+        memory,
+        Arc::new(helpers::MockEventSink::new()),
+        Arc::new(helpers::MockAuditSink::new()),
+    )
+}
+
+fn make_test_runtime_with_sinks(
+    channel: MockChannel,
+    provider: Arc<QueuedProvider>,
+    tools: ToolExecutor,
+    memory: Arc<dyn Memory>,
+    event_sink: Arc<helpers::MockEventSink>,
+    audit_sink: Arc<helpers::MockAuditSink>,
+) -> AgentRuntime {
     AgentRuntime::new(
         make_registry(provider),
         Box::new(channel),
@@ -380,8 +399,8 @@ fn make_test_runtime(
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(event_sink),
+        Some(audit_sink),
     )
 }
 
@@ -676,13 +695,17 @@ async fn test_tool_use_timeout() {
     let short_timeout_executor = ToolExecutor::new(
         vec![Box::new(slow_tool)],
         Duration::from_secs(1),
-        None,
+        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
         vec![],
         None,
-        None,
-        None,
+        Some(Arc::new(helpers::NoopKnowledgeStore)
+            as Arc<dyn freebird_traits::knowledge::KnowledgeStore>),
+        Some(Arc::new(helpers::NoopMemory) as Arc<dyn freebird_traits::memory::Memory>),
         None,
         InjectionConfig::default(),
+        Some(Arc::new(
+            freebird_security::capability::RevocationList::new(),
+        )),
     )
     .unwrap();
 
@@ -698,8 +721,8 @@ async fn test_tool_use_timeout() {
         tools_config,
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new())),
+        Some(Arc::new(helpers::MockAuditSink::new())),
     );
 
     let events = without_status_events(
@@ -761,8 +784,8 @@ async fn test_tool_use_max_rounds_exceeded() {
         default_tools_config(),
         budget_config,
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new())),
+        Some(Arc::new(helpers::MockAuditSink::new())),
     );
 
     let events = without_status_events(
@@ -845,8 +868,8 @@ async fn test_conversation_saved_after_turn() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new())),
+        Some(Arc::new(helpers::MockAuditSink::new())),
     );
 
     let _events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hello").await;
@@ -887,8 +910,8 @@ async fn test_tool_invocations_recorded_in_turn() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new())),
+        Some(Arc::new(helpers::MockAuditSink::new())),
     );
 
     let _ = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Use tool").await;
@@ -1016,8 +1039,8 @@ async fn test_tool_output_injection_replaced_with_error() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new())),
+        Some(Arc::new(helpers::MockAuditSink::new())),
     );
 
     let events = without_status_events(
@@ -1069,8 +1092,8 @@ async fn test_model_output_injection_blocks_delivery() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new())),
+        Some(Arc::new(helpers::MockAuditSink::new())),
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -1118,8 +1141,8 @@ async fn test_truncated_response_injection_blocks_delivery() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new())),
+        Some(Arc::new(helpers::MockAuditSink::new())),
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -1192,8 +1215,8 @@ async fn test_memory_load_error_sends_error_event() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new())),
+        Some(Arc::new(helpers::MockAuditSink::new())),
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -1231,8 +1254,8 @@ async fn test_memory_save_error_does_not_crash() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new())),
+        Some(Arc::new(helpers::MockAuditSink::new())),
     );
 
     let events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -1330,8 +1353,8 @@ async fn test_continuing_session_includes_history_in_request() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new())),
+        Some(Arc::new(helpers::MockAuditSink::new())),
     );
 
     let events =
@@ -1414,8 +1437,8 @@ async fn test_new_conversation_uses_config_values() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new())),
+        Some(Arc::new(helpers::MockAuditSink::new())),
     );
 
     let _events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -1471,8 +1494,8 @@ async fn test_multi_turn_within_same_session() {
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new())),
+        Some(Arc::new(helpers::MockAuditSink::new())),
     );
 
     // Send two messages then quit — runtime processes them sequentially
@@ -1605,8 +1628,8 @@ async fn test_token_budget_per_request_exceeded() {
         default_tools_config(),
         budget,
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new())),
+        Some(Arc::new(helpers::MockAuditSink::new())),
     );
 
     let events = without_status_events(
@@ -1651,8 +1674,8 @@ async fn test_token_budget_per_session_exceeded() {
         default_tools_config(),
         budget,
         24, // default_session_ttl_hours
-        None,
-        None,
+        Some(Arc::new(helpers::MockEventSink::new())),
+        Some(Arc::new(helpers::MockAuditSink::new())),
     );
 
     // Send two messages — first should succeed (300 tokens), second should fail (600 > 500)
@@ -1712,4 +1735,333 @@ async fn test_token_budget_per_session_exceeded() {
         has_budget_error,
         "second message should trigger budget exceeded, got: {events:?}"
     );
+}
+
+// ===========================================================================
+// Tests — Capability denial E2E
+// ===========================================================================
+
+/// E2E test verifying the full capability denial path:
+///   provider requests tool → executor checks capability → denial propagated
+///   back as `ToolResult { is_error: true }` → provider receives error → final
+///   response delivered to channel.
+#[tokio::test]
+async fn test_capability_denial_propagates_to_provider() {
+    let (channel, inbound_tx, outbound_rx, _) = MockChannel::new();
+
+    // Create a capturing provider: first response requests a tool requiring
+    // ShellExecute, second response acknowledges the denial.
+    let capturing = Arc::new(RequestCapturingProvider::new(vec![
+        tool_use_response("dangerous_shell", serde_json::json!({"cmd": "rm -rf /"})),
+        text_response("I understand the tool was denied"),
+    ]));
+
+    // Construct a tool requiring ShellExecute — the grant only has FileRead,
+    // so execution should be denied.
+    let restricted_shell_tool = CapabilityRestrictedMockTool {
+        info: ToolInfo {
+            name: "dangerous_shell".into(),
+            description: "Test tool requiring ShellExecute".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+            required_capability: Capability::ShellExecute,
+            risk_level: RiskLevel::Critical,
+            side_effects: SideEffects::HasSideEffects,
+        },
+        outputs: TokioMutex::new(VecDeque::from(vec![Ok(ToolOutput {
+            content: "this should never execute".into(),
+            outcome: ToolOutcome::Success,
+            metadata: None,
+        })])),
+        executed: std::sync::atomic::AtomicBool::new(false),
+    };
+
+    let runtime = AgentRuntime::new(
+        make_capturing_registry(Arc::clone(&capturing)),
+        Box::new(channel),
+        make_tool_executor(vec![Box::new(restricted_shell_tool)]),
+        None,
+        Arc::new(InMemoryMemory::new()),
+        None,
+        KnowledgeConfig::default(),
+        default_config(),
+        default_tools_config(),
+        BudgetConfig::default(),
+        24,
+        Some(Arc::new(helpers::MockEventSink::new())),
+        Some(Arc::new(helpers::MockAuditSink::new())),
+    );
+
+    // Pre-seed the session with a restricted grant: only FileRead, no ShellExecute.
+    let session_id = runtime.sessions().resolve("mock", "alice").await;
+    let restricted_grant = CapabilityGrant::new(
+        std::iter::once(Capability::FileRead).collect(),
+        default_tools_config().sandbox_root,
+        Some(Utc::now() + chrono::Duration::hours(24)),
+    )
+    .unwrap();
+    runtime
+        .sessions()
+        .set_grant(&session_id, restricted_grant)
+        .await;
+
+    let events = send_message_and_collect(
+        &inbound_tx,
+        outbound_rx,
+        runtime,
+        "Execute dangerous command",
+    )
+    .await;
+    let events = without_status_events(events);
+
+    // Provider should have been called twice: first tool_use, then after receiving
+    // the denial as a ToolResult, it responds with text.
+    assert_eq!(
+        capturing.captured_requests().await.len(),
+        2,
+        "provider should be called twice (tool_use + after denial)"
+    );
+
+    // The second request should contain a ToolResult with is_error=true
+    let second_request = &capturing.captured_requests().await[1];
+    let has_tool_error = second_request.messages.iter().any(|m| {
+        m.content.iter().any(|c| matches!(c, ContentBlock::ToolResult { is_error: true, content, .. } if content.contains("denied")))
+    });
+    assert!(
+        has_tool_error,
+        "second provider request should include a denied ToolResult, got: {:?}",
+        second_request.messages
+    );
+
+    // Final response should be delivered to the channel.
+    let has_response = events
+        .iter()
+        .any(|e| message_text(e).is_some_and(|t| t.contains("denied")));
+    assert!(
+        has_response,
+        "channel should receive the denial acknowledgement, got: {events:?}"
+    );
+}
+
+// ===========================================================================
+// Tests — Subsystem integration (event_sink, audit_sink)
+// ===========================================================================
+
+/// Verify that a single-turn conversation emits the expected sequence of events
+/// to the `EventSink`: `SessionCreated`, `TurnStarted`, `AssistantMessage`, `TurnCompleted`.
+#[tokio::test]
+async fn test_event_sink_receives_turn_events() {
+    let (channel, inbound_tx, outbound_rx, _) = MockChannel::new();
+    let provider = Arc::new(QueuedProvider::new(vec![text_response("Hello!")]));
+
+    let event_sink = Arc::new(helpers::MockEventSink::new());
+    let audit_sink = Arc::new(helpers::MockAuditSink::new());
+
+    let runtime = make_test_runtime_with_sinks(
+        channel,
+        provider,
+        make_tool_executor(vec![]),
+        Arc::new(InMemoryMemory::new()),
+        Arc::clone(&event_sink),
+        Arc::clone(&audit_sink),
+    );
+
+    let _events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+
+    let recorded = event_sink.events().await;
+    let event_types: Vec<&str> = recorded.iter().map(|(_, e)| e.event_type()).collect();
+
+    assert!(
+        event_types.contains(&"session_created"),
+        "should emit SessionCreated, got: {event_types:?}"
+    );
+    assert!(
+        event_types.contains(&"turn_started"),
+        "should emit TurnStarted, got: {event_types:?}"
+    );
+    assert!(
+        event_types.contains(&"assistant_message"),
+        "should emit AssistantMessage, got: {event_types:?}"
+    );
+    assert!(
+        event_types.contains(&"turn_completed"),
+        "should emit TurnCompleted, got: {event_types:?}"
+    );
+}
+
+/// Verify that the audit sink records a `SessionStarted` event when a new session
+/// is created.
+#[tokio::test]
+async fn test_audit_sink_records_session_started() {
+    let (channel, inbound_tx, outbound_rx, _) = MockChannel::new();
+    let provider = Arc::new(QueuedProvider::new(vec![text_response("Hello!")]));
+
+    let event_sink = Arc::new(helpers::MockEventSink::new());
+    let audit_sink = Arc::new(helpers::MockAuditSink::new());
+
+    let runtime = make_test_runtime_with_sinks(
+        channel,
+        provider,
+        make_tool_executor(vec![]),
+        Arc::new(InMemoryMemory::new()),
+        Arc::clone(&event_sink),
+        Arc::clone(&audit_sink),
+    );
+
+    let _events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+
+    let audit_events = audit_sink.events().await;
+    let has_session_started = audit_events
+        .iter()
+        .any(|(_, event_type, _)| event_type == "session_started");
+
+    assert!(
+        has_session_started,
+        "audit sink should record SessionStarted, got types: {:?}",
+        audit_events
+            .iter()
+            .map(|(_, t, _)| t.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Verify that the audit sink records tool execution events when a tool is invoked.
+#[tokio::test]
+async fn test_audit_sink_records_tool_execution() {
+    let (channel, inbound_tx, outbound_rx, _) = MockChannel::new();
+    let provider = Arc::new(QueuedProvider::new(vec![
+        tool_use_response("read_file", serde_json::json!({})),
+        text_response("Done"),
+    ]));
+
+    let mock_tool = MockTool::new(
+        "read_file",
+        vec![Ok(ToolOutput {
+            content: "file contents".into(),
+            outcome: ToolOutcome::Success,
+            metadata: None,
+        })],
+    );
+
+    let event_sink = Arc::new(helpers::MockEventSink::new());
+    let audit_sink = Arc::new(helpers::MockAuditSink::new());
+
+    let runtime = make_test_runtime_with_sinks(
+        channel,
+        provider,
+        helpers::make_tool_executor_with_audit(vec![Box::new(mock_tool)], Arc::clone(&audit_sink)),
+        Arc::new(InMemoryMemory::new()),
+        Arc::clone(&event_sink),
+        Arc::clone(&audit_sink),
+    );
+
+    let _events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Read file").await;
+
+    let audit_events = audit_sink.events().await;
+    let audit_types: Vec<&str> = audit_events.iter().map(|(_, t, _)| t.as_str()).collect();
+
+    assert!(
+        audit_types.contains(&"tool_execution_completed"),
+        "audit sink should record tool execution, got: {audit_types:?}"
+    );
+}
+
+/// Verify that a tool use emits `ToolInvoked` events to the `EventSink`.
+#[tokio::test]
+async fn test_event_sink_receives_tool_invoked() {
+    let (channel, inbound_tx, outbound_rx, _) = MockChannel::new();
+    let provider = Arc::new(QueuedProvider::new(vec![
+        tool_use_response("read_file", serde_json::json!({})),
+        text_response("Done"),
+    ]));
+
+    let mock_tool = MockTool::new(
+        "read_file",
+        vec![Ok(ToolOutput {
+            content: "file contents".into(),
+            outcome: ToolOutcome::Success,
+            metadata: None,
+        })],
+    );
+
+    let event_sink = Arc::new(helpers::MockEventSink::new());
+    let audit_sink = Arc::new(helpers::MockAuditSink::new());
+
+    let runtime = make_test_runtime_with_sinks(
+        channel,
+        provider,
+        helpers::make_tool_executor_with_audit(vec![Box::new(mock_tool)], Arc::clone(&audit_sink)),
+        Arc::new(InMemoryMemory::new()),
+        Arc::clone(&event_sink),
+        Arc::clone(&audit_sink),
+    );
+
+    let _events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Read file").await;
+
+    let recorded = event_sink.events().await;
+    let event_types: Vec<&str> = recorded.iter().map(|(_, e)| e.event_type()).collect();
+
+    assert!(
+        event_types.contains(&"tool_invoked"),
+        "should emit ToolInvoked, got: {event_types:?}"
+    );
+}
+
+/// Verify that all events for a session share the same `SessionId`.
+#[tokio::test]
+async fn test_event_sink_consistent_session_id() {
+    let (channel, inbound_tx, outbound_rx, _) = MockChannel::new();
+    let provider = Arc::new(QueuedProvider::new(vec![text_response("Hello!")]));
+
+    let event_sink = Arc::new(helpers::MockEventSink::new());
+    let audit_sink = Arc::new(helpers::MockAuditSink::new());
+
+    let runtime = make_test_runtime_with_sinks(
+        channel,
+        provider,
+        make_tool_executor(vec![]),
+        Arc::new(InMemoryMemory::new()),
+        Arc::clone(&event_sink),
+        Arc::clone(&audit_sink),
+    );
+
+    let _events = send_message_and_collect(&inbound_tx, outbound_rx, runtime, "Hi").await;
+
+    let recorded = event_sink.events().await;
+    assert!(!recorded.is_empty(), "should have at least one event");
+
+    let first_session_id = &recorded[0].0;
+    for (sid, _) in &recorded {
+        assert_eq!(
+            sid, first_session_id,
+            "all events should share the same session ID"
+        );
+    }
+}
+
+/// Mock tool with a configurable required capability and execution tracking.
+struct CapabilityRestrictedMockTool {
+    info: ToolInfo,
+    outputs: TokioMutex<VecDeque<Result<ToolOutput, ToolError>>>,
+    executed: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl Tool for CapabilityRestrictedMockTool {
+    fn info(&self) -> &ToolInfo {
+        &self.info
+    }
+
+    async fn execute(
+        &self,
+        _input: serde_json::Value,
+        _context: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        self.executed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.outputs
+            .lock()
+            .await
+            .pop_front()
+            .expect("CapabilityRestrictedMockTool: no more queued outputs")
+    }
 }

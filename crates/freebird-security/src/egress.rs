@@ -10,6 +10,8 @@
 
 use std::collections::BTreeSet;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::SecurityError;
 
@@ -74,14 +76,19 @@ pub fn is_private_ip(ip: &IpAddr) -> bool {
 pub struct EgressPolicy {
     allowed_hosts: BTreeSet<String>,
     allowed_ports: BTreeSet<u16>,
+    max_request_body_bytes: usize,
 }
 
 impl EgressPolicy {
-    /// Create a new egress policy with the given allowed hosts and ports.
+    /// Create a new egress policy with the given allowed hosts, ports, and body size limit.
     ///
     /// All hosts are stored lowercase for case-insensitive matching.
     #[must_use]
-    pub fn new(allowed_hosts: BTreeSet<String>, allowed_ports: BTreeSet<u16>) -> Self {
+    pub fn new(
+        allowed_hosts: BTreeSet<String>,
+        allowed_ports: BTreeSet<u16>,
+        max_request_body_bytes: usize,
+    ) -> Self {
         let normalized_hosts = allowed_hosts
             .into_iter()
             .map(|h| h.to_lowercase())
@@ -89,6 +96,7 @@ impl EgressPolicy {
         Self {
             allowed_hosts: normalized_hosts,
             allowed_ports,
+            max_request_body_bytes,
         }
     }
 
@@ -102,6 +110,29 @@ impl EgressPolicy {
     #[must_use]
     pub const fn allowed_ports(&self) -> &BTreeSet<u16> {
         &self.allowed_ports
+    }
+
+    /// Return the maximum allowed request body size in bytes.
+    #[must_use]
+    pub const fn max_request_body_bytes(&self) -> usize {
+        self.max_request_body_bytes
+    }
+
+    /// Validate that a request body size does not exceed the configured limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SecurityError::EgressBodyTooLarge` if `len` exceeds
+    /// `max_request_body_bytes`.
+    #[must_use = "egress check result must not be silently discarded"]
+    pub const fn check_request_body_size(&self, len: usize) -> Result<(), SecurityError> {
+        if len > self.max_request_body_bytes {
+            return Err(SecurityError::EgressBodyTooLarge {
+                actual: len,
+                max: self.max_request_body_bytes,
+            });
+        }
+        Ok(())
     }
 
     /// Validate that a resolved IP address is not private/loopback/link-local.
@@ -167,6 +198,7 @@ impl EgressPolicy {
 /// Default egress policy per CLAUDE.md section 12:
 /// - `allowed_hosts`: `["api.anthropic.com", "api.openai.com"]`
 /// - `allowed_ports`: `[443]` (HTTPS only)
+/// - `max_request_body_bytes`: `1_048_576` (1 MiB)
 impl Default for EgressPolicy {
     fn default() -> Self {
         let allowed_hosts: BTreeSet<String> =
@@ -179,7 +211,100 @@ impl Default for EgressPolicy {
         Self {
             allowed_hosts,
             allowed_ports,
+            max_request_body_bytes: 1_048_576,
         }
+    }
+}
+
+/// Thread-safe sliding-window rate limiter for egress requests.
+///
+/// Uses a circular buffer of timestamps (Unix epoch milliseconds) with atomic
+/// operations. Each call to [`check_and_record`](EgressRateLimiter::check_and_record)
+/// inspects the oldest entry in the window; if it falls within the last 60 seconds,
+/// the rate limit has been exceeded.
+pub struct EgressRateLimiter {
+    /// Circular buffer of request timestamps (Unix epoch millis).
+    timestamps: Vec<AtomicU64>,
+    /// Maximum requests per 60-second window.
+    limit: u32,
+    /// Atomic cursor for the next slot in the circular buffer.
+    cursor: AtomicU64,
+}
+
+impl EgressRateLimiter {
+    /// Create a new rate limiter allowing `limit` requests per 60-second window.
+    ///
+    /// A `limit` of `0` will reject every request. A `limit` of `u32::MAX` is
+    /// effectively unlimited.
+    #[must_use]
+    pub fn new(limit: u32) -> Self {
+        // u32→usize is always safe: usize ≥ 32 bits on all supported platforms.
+        #[allow(clippy::cast_possible_truncation)]
+        let size = limit as usize;
+        let mut timestamps = Vec::with_capacity(size);
+        for _ in 0..size {
+            timestamps.push(AtomicU64::new(0));
+        }
+        Self {
+            timestamps,
+            limit,
+            cursor: AtomicU64::new(0),
+        }
+    }
+
+    /// Check whether the rate limit allows another request, and if so, record it.
+    ///
+    /// Uses a 60-second sliding window. The oldest timestamp in the circular buffer
+    /// is compared against the current time; if it is less than 60 seconds old, the
+    /// window is full and the request is rejected.
+    ///
+    /// **Concurrency note**: Under high contention, a small number of extra
+    /// requests (up to the number of concurrent callers) may pass the check
+    /// before the window is fully recorded. This is an inherent trade-off of
+    /// the lock-free atomic design — acceptable for egress rate limiting where
+    /// occasional overshoot is tolerable.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SecurityError::EgressRateLimited` if the limit has been exceeded.
+    #[must_use = "rate limit check result must not be silently discarded"]
+    pub fn check_and_record(&self) -> Result<(), SecurityError> {
+        if self.limit == 0 {
+            return Err(SecurityError::EgressRateLimited {
+                limit_per_minute: self.limit,
+            });
+        }
+
+        // Truncation from u128→u64 is safe: millis since epoch fit in u64 until year 584M.
+        #[allow(clippy::cast_possible_truncation)]
+        let now_millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let slot = self.cursor.fetch_add(1, Ordering::Relaxed) % u64::from(self.limit);
+
+        // `slot` is always < self.limit (which fits in u32), so truncation to usize
+        // is safe on all platforms (usize ≥ 32 bits).
+        #[allow(clippy::cast_possible_truncation)]
+        let slot_idx = slot as usize;
+        let Some(entry) = self.timestamps.get(slot_idx) else {
+            return Err(SecurityError::EgressRateLimited {
+                limit_per_minute: self.limit,
+            });
+        };
+
+        let oldest = entry.load(Ordering::Relaxed);
+        let window_millis: u64 = 60_000;
+
+        if oldest != 0 && now_millis.saturating_sub(oldest) < window_millis {
+            return Err(SecurityError::EgressRateLimited {
+                limit_per_minute: self.limit,
+            });
+        }
+
+        entry.store(now_millis, Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -196,7 +321,7 @@ mod tests {
         let mut ports = BTreeSet::new();
         ports.insert(443);
 
-        EgressPolicy::new(hosts, ports)
+        EgressPolicy::new(hosts, ports, 1_048_576)
     }
 
     #[test]
@@ -347,5 +472,62 @@ mod tests {
         let policy = test_policy();
         let ip: IpAddr = "169.254.1.1".parse().unwrap();
         assert!(policy.check_resolved_ip(&ip).is_err());
+    }
+
+    // ── Body size check tests ──────────────────────────────────────
+
+    #[test]
+    fn test_body_size_within_limit_passes() {
+        let policy = test_policy();
+        assert!(policy.check_request_body_size(512).is_ok());
+        assert!(policy.check_request_body_size(1_048_576).is_ok());
+    }
+
+    #[test]
+    fn test_body_size_exceeds_limit_returns_error() {
+        let policy = test_policy();
+        let result = policy.check_request_body_size(1_048_577);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("too large"));
+        assert!(err.contains("1048577"));
+    }
+
+    #[test]
+    fn test_body_size_zero_byte_limit_rejects_all() {
+        let hosts = BTreeSet::new();
+        let ports = BTreeSet::new();
+        let policy = EgressPolicy::new(hosts, ports, 0);
+        assert!(policy.check_request_body_size(0).is_ok());
+        assert!(policy.check_request_body_size(1).is_err());
+    }
+
+    // ── Rate limiter tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_rate_limiter_within_limit_passes() {
+        let limiter = EgressRateLimiter::new(5);
+        for _ in 0..5 {
+            assert!(limiter.check_and_record().is_ok());
+        }
+    }
+
+    #[test]
+    fn test_rate_limiter_exceeded_returns_error() {
+        let limiter = EgressRateLimiter::new(3);
+        for _ in 0..3 {
+            assert!(limiter.check_and_record().is_ok());
+        }
+        let result = limiter.check_and_record();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("rate limited"));
+    }
+
+    #[test]
+    fn test_rate_limiter_zero_limit_rejects_all() {
+        let limiter = EgressRateLimiter::new(0);
+        let result = limiter.check_and_record();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("rate limited"));
     }
 }
