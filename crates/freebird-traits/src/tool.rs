@@ -115,7 +115,7 @@ impl std::fmt::Debug for ToolContext<'_> {
             .field("allowed_directories", &self.allowed_directories)
             .field("knowledge_store", &self.knowledge_store.is_some())
             .field("memory", &self.memory.is_some())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
