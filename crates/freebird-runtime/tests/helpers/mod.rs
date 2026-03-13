@@ -23,8 +23,11 @@ use freebird_traits::channel::{
     AuthRequirement, Channel, ChannelError, ChannelHandle, ChannelInfo, InboundEvent, OutboundEvent,
 };
 use freebird_traits::event::{ConversationEvent, EventSink};
-use freebird_traits::id::{ChannelId, ModelId, ProviderId, SessionId};
-use freebird_traits::memory::MemoryError;
+use freebird_traits::id::{ChannelId, KnowledgeId, ModelId, ProviderId, SessionId};
+use freebird_traits::knowledge::{
+    KnowledgeEntry, KnowledgeError, KnowledgeKind, KnowledgeMatch, KnowledgeStore,
+};
+use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary};
 use freebird_traits::provider::{
     CompletionRequest, CompletionResponse, Provider, ProviderError, ProviderFeature, ProviderInfo,
     StreamEvent,
@@ -274,6 +277,78 @@ impl AuditSink for MockAuditSink {
 }
 
 // ---------------------------------------------------------------------------
+// NoopMemory — returns empty results for all operations
+// ---------------------------------------------------------------------------
+
+/// No-op `Memory` implementation for tests that don't exercise session recall.
+pub struct NoopMemory;
+
+#[async_trait]
+impl Memory for NoopMemory {
+    async fn load(&self, _: &SessionId) -> Result<Option<Conversation>, MemoryError> {
+        Ok(None)
+    }
+    async fn save(&self, _: &Conversation) -> Result<(), MemoryError> {
+        Ok(())
+    }
+    async fn list_sessions(&self, _: usize) -> Result<Vec<SessionSummary>, MemoryError> {
+        Ok(vec![])
+    }
+    async fn delete(&self, _: &SessionId) -> Result<(), MemoryError> {
+        Ok(())
+    }
+    async fn search(&self, _: &str, _: usize) -> Result<Vec<SessionSummary>, MemoryError> {
+        Ok(vec![])
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NoopKnowledgeStore — returns empty results for all operations
+// ---------------------------------------------------------------------------
+
+/// No-op `KnowledgeStore` implementation for tests that don't exercise knowledge tools.
+pub struct NoopKnowledgeStore;
+
+#[async_trait]
+impl KnowledgeStore for NoopKnowledgeStore {
+    async fn store(&self, _: KnowledgeEntry) -> Result<KnowledgeId, KnowledgeError> {
+        Ok(KnowledgeId::from_string("noop"))
+    }
+    async fn update(&self, _: &KnowledgeEntry) -> Result<(), KnowledgeError> {
+        Ok(())
+    }
+    async fn get(&self, _: &KnowledgeId) -> Result<Option<KnowledgeEntry>, KnowledgeError> {
+        Ok(None)
+    }
+    async fn delete(&self, _: &KnowledgeId) -> Result<(), KnowledgeError> {
+        Ok(())
+    }
+    async fn search(&self, _: &str, _: usize) -> Result<Vec<KnowledgeMatch>, KnowledgeError> {
+        Ok(vec![])
+    }
+    async fn list_by_kind(
+        &self,
+        _: &KnowledgeKind,
+        _: usize,
+    ) -> Result<Vec<KnowledgeEntry>, KnowledgeError> {
+        Ok(vec![])
+    }
+    async fn list_by_tag(&self, _: &str, _: usize) -> Result<Vec<KnowledgeEntry>, KnowledgeError> {
+        Ok(vec![])
+    }
+    async fn replace_kind(
+        &self,
+        _: &KnowledgeKind,
+        _: Vec<KnowledgeEntry>,
+    ) -> Result<(), KnowledgeError> {
+        Ok(())
+    }
+    async fn record_access(&self, _: &[KnowledgeId]) -> Result<(), KnowledgeError> {
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Config + runtime helpers
 // ---------------------------------------------------------------------------
 
@@ -316,8 +391,8 @@ pub fn make_tool_executor_with_audit(
         Some(audit_sink as Arc<dyn AuditSink>),
         vec![],
         None,
-        None,
-        None,
+        Some(Arc::new(NoopKnowledgeStore) as Arc<dyn KnowledgeStore>),
+        Some(Arc::new(NoopMemory) as Arc<dyn Memory>),
         None,
         freebird_types::config::InjectionConfig::default(),
         None,
