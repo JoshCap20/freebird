@@ -1,11 +1,12 @@
 //! Integration tests for the `plan_edits` tool.
 //!
 //! Uses real Rust files in a tempdir to verify AST-based auto-detection,
-//! manual mode, cycle detection, and mixed explicit+inferred dependencies.
+//! manual mode, cycle detection, mixed explicit+inferred dependencies,
+//! and path traversal rejection.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use freebird_traits::id::SessionId;
 use freebird_traits::tool::{Capability, Tool, ToolContext};
@@ -18,45 +19,62 @@ fn plan_edits_tool() -> Box<dyn Tool> {
         .expect("planner_tools should return at least one tool")
 }
 
-/// Build a minimal `ToolContext` pointing at the given sandbox root.
-fn make_context() -> (SessionId, Vec<Capability>, Vec<PathBuf>) {
-    let session_id = SessionId::from_string("test-session");
-    let caps = vec![Capability::FileRead];
-    let dirs = Vec::new();
-    (session_id, caps, dirs)
+/// Integration test harness: owns tempdir, provides zero-boilerplate context.
+struct Harness {
+    _tmp: tempfile::TempDir,
+    sandbox: std::path::PathBuf,
+    session_id: SessionId,
+    caps: Vec<Capability>,
+}
+
+impl Harness {
+    fn new() -> Self {
+        let tmp = tempfile::tempdir().expect("failed to create temp dir");
+        let sandbox = tmp.path().canonicalize().expect("failed to canonicalize");
+        Self {
+            _tmp: tmp,
+            sandbox,
+            session_id: SessionId::from_string("test-session"),
+            caps: vec![Capability::FileRead],
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.sandbox
+    }
+
+    fn context(&self) -> ToolContext<'_> {
+        ToolContext {
+            session_id: &self.session_id,
+            sandbox_root: &self.sandbox,
+            granted_capabilities: &self.caps,
+            allowed_directories: &[],
+            knowledge_store: None,
+            memory: None,
+        }
+    }
 }
 
 #[tokio::test]
 async fn test_auto_detect_with_real_files() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let sandbox = tmp.path();
+    let h = Harness::new();
 
     // Create a trait file
-    let trait_file = sandbox.join("my_trait.rs");
     std::fs::write(
-        &trait_file,
+        h.path().join("my_trait.rs"),
         "pub trait MyTrait {\n    fn do_thing(&self);\n}\n",
     )
     .unwrap();
 
     // Create a struct file that references the trait
-    let struct_file = sandbox.join("my_struct.rs");
     std::fs::write(
-        &struct_file,
+        h.path().join("my_struct.rs"),
         "use crate::MyTrait;\npub struct MyStruct;\nimpl MyTrait for MyStruct {\n    fn do_thing(&self) {}\n}\n",
     )
     .unwrap();
 
     let tool = plan_edits_tool();
-    let (session_id, caps, dirs) = make_context();
-    let ctx = ToolContext {
-        session_id: &session_id,
-        sandbox_root: sandbox,
-        granted_capabilities: &caps,
-        allowed_directories: &dirs,
-        knowledge_store: None,
-        memory: None,
-    };
+    let ctx = h.context();
 
     let input = serde_json::json!({
         "changes": [
@@ -86,19 +104,9 @@ async fn test_auto_detect_with_real_files() {
 
 #[tokio::test]
 async fn test_manual_mode_with_explicit_deps() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let sandbox = tmp.path();
-
+    let h = Harness::new();
     let tool = plan_edits_tool();
-    let (session_id, caps, dirs) = make_context();
-    let ctx = ToolContext {
-        session_id: &session_id,
-        sandbox_root: sandbox,
-        granted_capabilities: &caps,
-        allowed_directories: &dirs,
-        knowledge_store: None,
-        memory: None,
-    };
+    let ctx = h.context();
 
     let input = serde_json::json!({
         "changes": [
@@ -150,19 +158,9 @@ async fn test_manual_mode_with_explicit_deps() {
 
 #[tokio::test]
 async fn test_cycle_returns_error_outcome() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let sandbox = tmp.path();
-
+    let h = Harness::new();
     let tool = plan_edits_tool();
-    let (session_id, caps, dirs) = make_context();
-    let ctx = ToolContext {
-        session_id: &session_id,
-        sandbox_root: sandbox,
-        granted_capabilities: &caps,
-        allowed_directories: &dirs,
-        knowledge_store: None,
-        memory: None,
-    };
+    let ctx = h.context();
 
     let input = serde_json::json!({
         "changes": [
@@ -201,34 +199,26 @@ async fn test_cycle_returns_error_outcome() {
 
 #[tokio::test]
 async fn test_mixed_explicit_and_inferred_deps() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let sandbox = tmp.path();
+    let h = Harness::new();
 
     // Create files: trait_file defines `Foo`, consumer references `Foo`
-    let trait_file = sandbox.join("traits.rs");
-    std::fs::write(&trait_file, "pub trait Foo {\n    fn bar(&self);\n}\n").unwrap();
-
-    let consumer_file = sandbox.join("consumer.rs");
     std::fs::write(
-        &consumer_file,
+        h.path().join("traits.rs"),
+        "pub trait Foo {\n    fn bar(&self);\n}\n",
+    )
+    .unwrap();
+
+    std::fs::write(
+        h.path().join("consumer.rs"),
         "fn uses_foo(f: &dyn Foo) {\n    f.bar();\n}\n",
     )
     .unwrap();
 
     // Third file with only explicit dep on consumer
-    let test_file = sandbox.join("my_test.rs");
-    std::fs::write(&test_file, "// test file\n").unwrap();
+    std::fs::write(h.path().join("my_test.rs"), "// test file\n").unwrap();
 
     let tool = plan_edits_tool();
-    let (session_id, caps, dirs) = make_context();
-    let ctx = ToolContext {
-        session_id: &session_id,
-        sandbox_root: sandbox,
-        granted_capabilities: &caps,
-        allowed_directories: &dirs,
-        knowledge_store: None,
-        memory: None,
-    };
+    let ctx = h.context();
 
     let input = serde_json::json!({
         "changes": [
@@ -270,4 +260,28 @@ async fn test_mixed_explicit_and_inferred_deps() {
         consumer_pos < test_pos,
         "consumer should come before test (consumer={consumer_pos}, test={test_pos})"
     );
+}
+
+#[tokio::test]
+async fn test_path_traversal_rejected() {
+    let h = Harness::new();
+    let tool = plan_edits_tool();
+    let ctx = h.context();
+
+    let input = serde_json::json!({
+        "changes": [
+            {
+                "id": 0,
+                "file_path": "../../etc/passwd",
+                "description": "Malicious path",
+                "depends_on": [],
+                "change_kind": "consumer",
+                "crate_kind": "library"
+            }
+        ],
+        "auto_detect": false
+    });
+
+    let result = tool.execute(input, &ctx).await;
+    assert!(result.is_err(), "path traversal should be rejected");
 }
