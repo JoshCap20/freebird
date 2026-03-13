@@ -11,7 +11,7 @@
 
 mod helpers;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::Stream;
+use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use freebird_memory::in_memory::InMemoryMemory;
@@ -33,30 +35,9 @@ use freebird_traits::provider::{
 use freebird_types::config::{BudgetConfig, KnowledgeConfig, RuntimeConfig, SummarizationConfig};
 
 use helpers::{
-    MockChannel, QueuedProvider, ResponseFactory, default_config, default_tools_config, error_text,
-    make_registry, make_tool_executor, message_text, without_status_events,
+    MockChannel, default_config, default_tools_config, error_text, make_tool_executor,
+    message_text, without_status_events,
 };
-
-// ---------------------------------------------------------------------------
-// Slow provider — introduces a configurable delay per response
-// ---------------------------------------------------------------------------
-
-fn slow_text_response(text: &str, delay: Duration) -> ResponseFactory {
-    let text = text.to_owned();
-    Box::new(move || {
-        std::thread::sleep(delay);
-        Ok(CompletionResponse {
-            message: Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::Text { text: text.clone() }],
-                timestamp: Utc::now(),
-            },
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage::default(),
-            model: ModelId::from("test-model"),
-        })
-    })
-}
 
 fn config_with(max_concurrent: usize, drain_secs: u64) -> RuntimeConfig {
     RuntimeConfig {
@@ -67,27 +48,47 @@ fn config_with(max_concurrent: usize, drain_secs: u64) -> RuntimeConfig {
 }
 
 // ---------------------------------------------------------------------------
-// SlowAsyncProvider — uses tokio::time::sleep (cancellable by JoinSet::shutdown)
+// SlowAsyncProvider — queued responses with tokio::time::sleep (async, cancellable)
 // ---------------------------------------------------------------------------
+
+struct SlowAsyncResponse {
+    text: String,
+    delay: Duration,
+}
 
 struct SlowAsyncProvider {
     info: ProviderInfo,
-    delay: Duration,
-    text: String,
+    responses: TokioMutex<VecDeque<SlowAsyncResponse>>,
+    /// Optional: signalled when `complete()` starts (before the delay).
+    /// Tests can wait on this to know the provider is actively processing.
+    on_start: Option<Arc<Notify>>,
 }
 
 impl SlowAsyncProvider {
-    fn new(text: &str, delay: Duration) -> Self {
+    fn new(provider_id: &str, responses: Vec<(&str, Duration)>) -> Self {
         Self {
             info: ProviderInfo {
-                id: ProviderId::from("slow-async-provider"),
+                id: ProviderId::from(provider_id),
                 display_name: "Slow Async".into(),
                 supported_models: vec![],
                 features: BTreeSet::from([ProviderFeature::ToolUse]),
             },
-            delay,
-            text: text.to_owned(),
+            responses: TokioMutex::new(
+                responses
+                    .into_iter()
+                    .map(|(text, delay)| SlowAsyncResponse {
+                        text: text.to_owned(),
+                        delay,
+                    })
+                    .collect(),
+            ),
+            on_start: None,
         }
+    }
+
+    fn with_start_notify(mut self, notify: Arc<Notify>) -> Self {
+        self.on_start = Some(notify);
+        self
     }
 }
 
@@ -105,13 +106,23 @@ impl Provider for SlowAsyncProvider {
         &self,
         _request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
-        tokio::time::sleep(self.delay).await;
+        let resp = self
+            .responses
+            .lock()
+            .await
+            .pop_front()
+            .expect("SlowAsyncProvider: no more queued responses");
+
+        // Signal that processing has started (before sleeping).
+        if let Some(notify) = &self.on_start {
+            notify.notify_one();
+        }
+
+        tokio::time::sleep(resp.delay).await;
         Ok(CompletionResponse {
             message: Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::Text {
-                    text: self.text.clone(),
-                }],
+                content: vec![ContentBlock::Text { text: resp.text }],
                 timestamp: Utc::now(),
             },
             stop_reason: StopReason::EndTurn,
@@ -129,6 +140,15 @@ impl Provider for SlowAsyncProvider {
     }
 }
 
+/// Register a `SlowAsyncProvider` into a `ProviderRegistry` and configure failover.
+fn make_slow_registry(provider_id: &str, provider: SlowAsyncProvider) -> ProviderRegistry {
+    let mut registry = ProviderRegistry::new();
+    let id = ProviderId::from(provider_id);
+    registry.register(id.clone(), Box::new(provider));
+    registry.set_failover_chain(vec![id]);
+    registry
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -139,14 +159,14 @@ impl Provider for SlowAsyncProvider {
 #[tokio::test]
 async fn test_concurrent_different_sessions() {
     let delay = Duration::from_millis(200);
-    let provider = Arc::new(QueuedProvider::new(vec![
-        slow_text_response("Reply A", delay),
-        slow_text_response("Reply B", delay),
-    ]));
+    let provider = SlowAsyncProvider::new(
+        "test-provider",
+        vec![("Reply A", delay), ("Reply B", delay)],
+    );
 
     let (channel, inbound_tx, mut outbound_rx, _) = MockChannel::new();
     let runtime = AgentRuntime::new(
-        make_registry(provider),
+        make_slow_registry("test-provider", provider),
         Box::new(channel),
         make_tool_executor(vec![]),
         None,
@@ -208,12 +228,12 @@ async fn test_concurrent_different_sessions() {
     );
 
     // Concurrent execution: both should complete in roughly 1 delay period,
-    // not 2x. Allow generous margin for CI variability.
+    // not 2x. A serialized execution would take >= 400ms.
     assert!(
-        elapsed < delay * 3,
-        "concurrent messages took {elapsed:?}, expected < {:?} (3x one delay). \
+        elapsed < delay * 2,
+        "concurrent messages took {elapsed:?}, expected < {:?} (2x one delay). \
          Sequential processing would take >= {:?}",
-        delay * 3,
+        delay * 2,
         delay * 2,
     );
 }
@@ -223,14 +243,14 @@ async fn test_concurrent_different_sessions() {
 #[tokio::test]
 async fn test_serialized_same_session() {
     let delay = Duration::from_millis(100);
-    let provider = Arc::new(QueuedProvider::new(vec![
-        slow_text_response("Reply 1", delay),
-        slow_text_response("Reply 2", delay),
-    ]));
+    let provider = SlowAsyncProvider::new(
+        "test-provider",
+        vec![("Reply 1", delay), ("Reply 2", delay)],
+    );
 
     let (channel, inbound_tx, mut outbound_rx, _) = MockChannel::new();
     let runtime = AgentRuntime::new(
-        make_registry(provider),
+        make_slow_registry("test-provider", provider),
         Box::new(channel),
         make_tool_executor(vec![]),
         None,
@@ -297,18 +317,20 @@ async fn test_serialized_same_session() {
 }
 
 /// When the semaphore is exhausted, excess messages get "Server is busy" error.
+///
+/// Uses `Notify` to deterministically wait until the provider is actively
+/// processing the first request before sending the second, avoiding races.
 #[tokio::test]
 async fn test_concurrency_limit_rejects_excess() {
     let delay = Duration::from_millis(300);
+    let started = Arc::new(Notify::new());
     // max_concurrent_tasks = 1, so only one message at a time
-    let provider = Arc::new(QueuedProvider::new(vec![slow_text_response(
-        "Slow reply",
-        delay,
-    )]));
+    let provider = SlowAsyncProvider::new("test-provider", vec![("Slow reply", delay)])
+        .with_start_notify(Arc::clone(&started));
 
     let (channel, inbound_tx, mut outbound_rx, _) = MockChannel::new();
     let runtime = AgentRuntime::new(
-        make_registry(provider),
+        make_slow_registry("test-provider", provider),
         Box::new(channel),
         make_tool_executor(vec![]),
         None,
@@ -325,8 +347,17 @@ async fn test_concurrency_limit_rejects_excess() {
         SummarizationConfig::default(),
     );
 
-    // Send two messages from different senders at once
-    // First grabs the single permit, second should be rejected
+    let runtime = Arc::new(runtime);
+    let cancel = CancellationToken::new();
+
+    // Run the runtime in a background task so we can coordinate message sends.
+    let runtime_handle = {
+        let runtime = Arc::clone(&runtime);
+        let cancel = cancel.clone();
+        tokio::spawn(async move { runtime.run(cancel).await })
+    };
+
+    // Send first message — it will grab the single semaphore permit.
     inbound_tx
         .send(InboundEvent::Message {
             raw_text: "Hello".into(),
@@ -336,9 +367,13 @@ async fn test_concurrency_limit_rejects_excess() {
         .await
         .unwrap();
 
-    // Small delay so the first message's task starts and holds the permit
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Wait until the provider is actively processing (permit held, sleeping).
+    // This is deterministic — no timing races.
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("provider should start processing within 2s");
 
+    // Now send the second message — the permit is held, so this gets rejected.
     inbound_tx
         .send(InboundEvent::Message {
             raw_text: "Hello too".into(),
@@ -349,10 +384,10 @@ async fn test_concurrency_limit_rejects_excess() {
         .unwrap();
     drop(inbound_tx);
 
-    let cancel = CancellationToken::new();
-    tokio::time::timeout(Duration::from_secs(5), Arc::new(runtime).run(cancel))
+    tokio::time::timeout(Duration::from_secs(5), runtime_handle)
         .await
         .expect("runtime should exit within timeout")
+        .unwrap()
         .unwrap();
 
     let mut events = Vec::new();
@@ -383,13 +418,13 @@ async fn test_concurrency_limit_rejects_excess() {
 #[tokio::test]
 async fn test_command_quit_during_inflight() {
     let delay = Duration::from_millis(200);
-    let provider = Arc::new(QueuedProvider::new(vec![slow_text_response(
-        "Finished", delay,
-    )]));
+    let started = Arc::new(Notify::new());
+    let provider = SlowAsyncProvider::new("test-provider", vec![("Finished", delay)])
+        .with_start_notify(Arc::clone(&started));
 
     let (channel, inbound_tx, mut outbound_rx, _) = MockChannel::new();
     let runtime = AgentRuntime::new(
-        make_registry(provider),
+        make_slow_registry("test-provider", provider),
         Box::new(channel),
         make_tool_executor(vec![]),
         None,
@@ -406,7 +441,16 @@ async fn test_command_quit_during_inflight() {
         SummarizationConfig::default(),
     );
 
-    // Send a message, then immediately send quit
+    let runtime = Arc::new(runtime);
+    let cancel = CancellationToken::new();
+
+    let runtime_handle = {
+        let runtime = Arc::clone(&runtime);
+        let cancel = cancel.clone();
+        tokio::spawn(async move { runtime.run(cancel).await })
+    };
+
+    // Send a message
     inbound_tx
         .send(InboundEvent::Message {
             raw_text: "Hello".into(),
@@ -416,9 +460,12 @@ async fn test_command_quit_during_inflight() {
         .await
         .unwrap();
 
-    // Small delay to ensure the message is spawned into JoinSet
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    // Wait until the provider is actively processing (deterministic).
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("provider should start processing within 2s");
 
+    // Now send quit — the in-flight task should complete during drain.
     inbound_tx
         .send(InboundEvent::Command {
             name: "quit".into(),
@@ -429,10 +476,10 @@ async fn test_command_quit_during_inflight() {
         .unwrap();
     drop(inbound_tx);
 
-    let cancel = CancellationToken::new();
-    tokio::time::timeout(Duration::from_secs(5), Arc::new(runtime).run(cancel))
+    tokio::time::timeout(Duration::from_secs(5), runtime_handle)
         .await
         .expect("runtime should exit within timeout")
+        .unwrap()
         .unwrap();
 
     let mut events = Vec::new();
@@ -460,25 +507,21 @@ async fn test_command_quit_during_inflight() {
 #[tokio::test]
 async fn test_shutdown_drains_inflight_with_timeout() {
     // Use an async provider so tokio can cancel the sleep during shutdown
-    let provider = SlowAsyncProvider::new("Never arrives", Duration::from_secs(30));
-    let mut registry = ProviderRegistry::new();
-    let id = ProviderId::from("slow-async-provider");
-    registry.register(id.clone(), Box::new(provider));
-    registry.set_failover_chain(vec![id]);
+    let provider = SlowAsyncProvider::new(
+        "test-provider",
+        vec![("Never arrives", Duration::from_secs(30))],
+    );
 
     let (channel, inbound_tx, mut outbound_rx, _) = MockChannel::new();
     let runtime = AgentRuntime::new(
-        registry,
+        make_slow_registry("test-provider", provider),
         Box::new(channel),
         make_tool_executor(vec![]),
         None,
         Arc::new(InMemoryMemory::new()),
         None,
         KnowledgeConfig::default(),
-        RuntimeConfig {
-            default_provider: "slow-async-provider".into(),
-            ..config_with(8, 1) // 1 second drain timeout
-        },
+        config_with(8, 1), // 1 second drain timeout
         default_tools_config(),
         BudgetConfig::default(),
         24,
