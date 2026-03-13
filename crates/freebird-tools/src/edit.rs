@@ -21,7 +21,7 @@ use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
     ToolOutput,
 };
-use freebird_types::config::EditConfig;
+use freebird_types::config::{EditConfig, LargeEditAction};
 
 /// Maximum file size the edit tool will read (10 MiB).
 ///
@@ -51,6 +51,8 @@ struct SearchReplaceEditTool {
     diff_preview: bool,
     diff_context_lines: usize,
     syntax_validation: bool,
+    large_edit_threshold: f64,
+    large_edit_action: LargeEditAction,
     history: Arc<EditHistory>,
 }
 
@@ -62,6 +64,8 @@ impl SearchReplaceEditTool {
             diff_preview: config.diff_preview,
             diff_context_lines: config.diff_context_lines,
             syntax_validation: config.syntax_validation,
+            large_edit_threshold: config.large_edit_threshold,
+            large_edit_action: config.large_edit_action,
             history,
             info: ToolInfo {
                 name: Self::NAME.into(),
@@ -311,38 +315,29 @@ impl Tool for SearchReplaceEditTool {
             });
         }
 
-        // Read file content with size cap (same pattern as read_file)
-        let file = tokio::fs::File::open(safe_path.as_path())
-            .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool: Self::NAME.into(),
-                reason: e.to_string(),
-            })?;
-
-        let cap = MAX_EDIT_FILE_BYTES + 1;
-        let mut buf = Vec::with_capacity(cap.min(8 * 1024));
-        file.take(cap as u64)
-            .read_to_end(&mut buf)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool: Self::NAME.into(),
-                reason: e.to_string(),
-            })?;
-
-        if buf.len() > MAX_EDIT_FILE_BYTES {
-            return Err(ToolError::ExecutionFailed {
-                tool: Self::NAME.into(),
-                reason: format!("file exceeds {MAX_EDIT_FILE_BYTES} byte limit"),
-            });
-        }
-
-        let file_content = String::from_utf8(buf).map_err(|_| ToolError::ExecutionFailed {
-            tool: Self::NAME.into(),
-            reason: "file is not valid UTF-8".into(),
-        })?;
+        let file_content = read_file_content(safe_path.as_path(), Self::NAME).await?;
 
         let relative = relative_path_display(&safe_path);
         let result = find_and_replace(&file_content, old_str, new_str, &relative)?;
+
+        // Large edit guardrail — detect edits that change a large fraction of the file.
+        if let Some(output) = check_large_edit_guard(
+            &file_content,
+            old_str,
+            new_str,
+            &relative,
+            self.large_edit_threshold,
+            self.large_edit_action,
+        ) {
+            return Ok(output);
+        }
+        let large_edit_warning = large_edit_warning_text(
+            &file_content,
+            old_str,
+            new_str,
+            self.large_edit_threshold,
+            self.large_edit_action,
+        );
 
         // Syntax validation before write — original file untouched on failure.
         if self.syntax_validation {
@@ -369,6 +364,10 @@ impl Tool for SearchReplaceEditTool {
             message.push_str(&diff);
         }
 
+        if let Some(warning) = large_edit_warning {
+            message.push_str(&warning);
+        }
+
         // Record pre-edit content for undo support — AFTER successful write,
         // so failed writes don't create phantom undo entries.
         self.history.record_pre_edit(
@@ -383,6 +382,38 @@ impl Tool for SearchReplaceEditTool {
             metadata: None,
         })
     }
+}
+
+/// Read file content with size and encoding validation.
+async fn read_file_content(path: &Path, tool_name: &str) -> Result<String, ToolError> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| ToolError::ExecutionFailed {
+            tool: tool_name.into(),
+            reason: e.to_string(),
+        })?;
+
+    let cap = MAX_EDIT_FILE_BYTES + 1;
+    let mut buf = Vec::with_capacity(cap.min(8 * 1024));
+    file.take(cap as u64)
+        .read_to_end(&mut buf)
+        .await
+        .map_err(|e| ToolError::ExecutionFailed {
+            tool: tool_name.into(),
+            reason: e.to_string(),
+        })?;
+
+    if buf.len() > MAX_EDIT_FILE_BYTES {
+        return Err(ToolError::ExecutionFailed {
+            tool: tool_name.into(),
+            reason: format!("file exceeds {MAX_EDIT_FILE_BYTES} byte limit"),
+        });
+    }
+
+    String::from_utf8(buf).map_err(|_| ToolError::ExecutionFailed {
+        tool: tool_name.into(),
+        reason: "file is not valid UTF-8".into(),
+    })
 }
 
 /// Write content to a file atomically via temp file + rename.
@@ -416,6 +447,94 @@ fn relative_path_display(safe_path: &freebird_security::safe_types::SafeFilePath
         .unwrap_or(safe_path.as_path())
         .display()
         .to_string()
+}
+
+/// Check whether a large edit should be blocked or rejected.
+///
+/// Returns `Some(ToolOutput)` for `Block`/`Consent` actions when the threshold
+/// is exceeded. Returns `None` if the edit is allowed.
+fn check_large_edit_guard(
+    file_content: &str,
+    old_str: &str,
+    new_str: &str,
+    relative: &str,
+    threshold: f64,
+    action: LargeEditAction,
+) -> Option<ToolOutput> {
+    if file_content.is_empty() {
+        return None;
+    }
+    let max_span = old_str.len().max(new_str.len());
+    #[allow(clippy::cast_precision_loss)]
+    let change_ratio = max_span as f64 / file_content.len() as f64;
+
+    if change_ratio < threshold {
+        return None;
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let pct = (change_ratio * 100.0).round() as u64;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let threshold_pct = (threshold * 100.0).round() as u64;
+    let old_lines = old_str.lines().count();
+    let new_lines = new_str.lines().count();
+
+    match action {
+        LargeEditAction::Block => Some(ToolOutput {
+            content: format!(
+                "Edit rejected: this edit changes {pct}% of {relative} \
+                 ({old_lines} \u{2192} {new_lines} lines), which exceeds the \
+                 {threshold_pct}% large-edit threshold. \
+                 Break the edit into smaller, targeted replacements."
+            ),
+            outcome: ToolOutcome::Error,
+            metadata: None,
+        }),
+        LargeEditAction::Consent => Some(ToolOutput {
+            content: format!(
+                "Edit rejected (requires confirmation): this edit changes \
+                 {pct}% of {relative} ({old_lines} \u{2192} {new_lines} lines), \
+                 which exceeds the {threshold_pct}% large-edit threshold. \
+                 Please break this into smaller edits."
+            ),
+            outcome: ToolOutcome::Error,
+            metadata: None,
+        }),
+        LargeEditAction::Warn => None,
+    }
+}
+
+/// Return the warning text for a large edit in `Warn` mode, or `None`.
+fn large_edit_warning_text(
+    file_content: &str,
+    old_str: &str,
+    new_str: &str,
+    threshold: f64,
+    action: LargeEditAction,
+) -> Option<String> {
+    if file_content.is_empty() || !matches!(action, LargeEditAction::Warn) {
+        return None;
+    }
+    let max_span = old_str.len().max(new_str.len());
+    #[allow(clippy::cast_precision_loss)]
+    let change_ratio = max_span as f64 / file_content.len() as f64;
+
+    if change_ratio < threshold {
+        return None;
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let pct = (change_ratio * 100.0).round() as u64;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let threshold_pct = (threshold * 100.0).round() as u64;
+    let old_lines = old_str.lines().count();
+    let new_lines = new_str.lines().count();
+
+    Some(format!(
+        "\n\nLarge edit warning: this edit changes {pct}% of the file \
+         ({old_lines} \u{2192} {new_lines} lines, threshold: {threshold_pct}%). \
+         Consider smaller, targeted edits."
+    ))
 }
 
 /// Format a compact diff preview showing what changed with context lines.
@@ -2031,6 +2150,7 @@ mod tests {
                 diff_preview: true,
                 diff_context_lines: 3,
                 syntax_validation: false,
+                ..EditConfig::default()
             },
             Arc::new(EditHistory::new()),
         );
@@ -2217,6 +2337,7 @@ mod tests {
                 diff_preview: false,
                 diff_context_lines: 3,
                 syntax_validation: false,
+                ..EditConfig::default()
             },
             Arc::new(EditHistory::new()),
         );
@@ -2327,6 +2448,7 @@ mod tests {
                 diff_preview: true,
                 diff_context_lines: 0,
                 syntax_validation: false,
+                ..EditConfig::default()
             },
             Arc::new(EditHistory::new()),
         );
@@ -3139,5 +3261,277 @@ mod tests {
                 .await;
             assert!(result.is_err(), "expected error for name: {name:?}");
         }
+    }
+
+    // ── Large edit guardrail tests ──────────────────────────────
+
+    fn large_edit_config(threshold: f64, action: LargeEditAction) -> EditConfig {
+        EditConfig {
+            syntax_validation: false,
+            large_edit_threshold: threshold,
+            large_edit_action: action,
+            ..EditConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_large_edit_small_edit_no_warning() {
+        let h = TestHarness::new();
+        // 100 bytes of content, replace 5 bytes → 5% ratio
+        let content = "a".repeat(95) + "XXXXX";
+        std::fs::write(h.path().join("file.txt"), &content).unwrap();
+
+        let tool = SearchReplaceEditTool::new(
+            &large_edit_config(0.5, LargeEditAction::Warn),
+            Arc::new(EditHistory::new()),
+        );
+        let ctx = h.context();
+        let out = tool
+            .execute(
+                serde_json::json!({
+                    "path": "file.txt",
+                    "old_string": "XXXXX",
+                    "new_string": "YYYYY",
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(out.outcome, ToolOutcome::Success);
+        assert!(
+            !out.content.to_lowercase().contains("warning"),
+            "small edit should not have warning, got: {}",
+            out.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_large_edit_warns() {
+        let h = TestHarness::new();
+        // 100 bytes, replace 60 bytes → 60% ratio (>= 50%)
+        let content = "a".repeat(40) + &"b".repeat(60);
+        std::fs::write(h.path().join("file.txt"), &content).unwrap();
+
+        let tool = SearchReplaceEditTool::new(
+            &large_edit_config(0.5, LargeEditAction::Warn),
+            Arc::new(EditHistory::new()),
+        );
+        let ctx = h.context();
+        let out = tool
+            .execute(
+                serde_json::json!({
+                    "path": "file.txt",
+                    "old_string": "b".repeat(60),
+                    "new_string": "c".repeat(60),
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(out.outcome, ToolOutcome::Success);
+        assert!(
+            out.content.contains("Large edit warning"),
+            "expected warning, got: {}",
+            out.content
+        );
+        // File should be modified
+        let modified = std::fs::read_to_string(h.path().join("file.txt")).unwrap();
+        assert!(modified.contains(&"c".repeat(60)));
+    }
+
+    #[tokio::test]
+    async fn test_large_edit_blocked() {
+        let h = TestHarness::new();
+        let content = "a".repeat(40) + &"b".repeat(60);
+        std::fs::write(h.path().join("file.txt"), &content).unwrap();
+
+        let tool = SearchReplaceEditTool::new(
+            &large_edit_config(0.5, LargeEditAction::Block),
+            Arc::new(EditHistory::new()),
+        );
+        let ctx = h.context();
+        let out = tool
+            .execute(
+                serde_json::json!({
+                    "path": "file.txt",
+                    "old_string": "b".repeat(60),
+                    "new_string": "c".repeat(60),
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(out.outcome, ToolOutcome::Error);
+        assert!(
+            out.content.contains("Edit rejected"),
+            "expected rejection, got: {}",
+            out.content
+        );
+        // File should NOT be modified
+        let unchanged = std::fs::read_to_string(h.path().join("file.txt")).unwrap();
+        assert_eq!(unchanged, content);
+    }
+
+    #[tokio::test]
+    async fn test_large_edit_consent_rejected() {
+        let h = TestHarness::new();
+        let content = "a".repeat(40) + &"b".repeat(60);
+        std::fs::write(h.path().join("file.txt"), &content).unwrap();
+
+        let tool = SearchReplaceEditTool::new(
+            &large_edit_config(0.5, LargeEditAction::Consent),
+            Arc::new(EditHistory::new()),
+        );
+        let ctx = h.context();
+        let out = tool
+            .execute(
+                serde_json::json!({
+                    "path": "file.txt",
+                    "old_string": "b".repeat(60),
+                    "new_string": "c".repeat(60),
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(out.outcome, ToolOutcome::Error);
+        assert!(
+            out.content.contains("smaller edits"),
+            "expected consent guidance, got: {}",
+            out.content
+        );
+        // File should NOT be modified
+        let unchanged = std::fs::read_to_string(h.path().join("file.txt")).unwrap();
+        assert_eq!(unchanged, content);
+    }
+
+    #[tokio::test]
+    async fn test_large_edit_threshold_configurable() {
+        let h = TestHarness::new();
+        // 100 bytes, replace 60 → 60% ratio, but threshold is 80%
+        let content = "a".repeat(40) + &"b".repeat(60);
+        std::fs::write(h.path().join("file.txt"), &content).unwrap();
+
+        let tool = SearchReplaceEditTool::new(
+            &large_edit_config(0.8, LargeEditAction::Warn),
+            Arc::new(EditHistory::new()),
+        );
+        let ctx = h.context();
+        let out = tool
+            .execute(
+                serde_json::json!({
+                    "path": "file.txt",
+                    "old_string": "b".repeat(60),
+                    "new_string": "c".repeat(60),
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(out.outcome, ToolOutcome::Success);
+        assert!(
+            !out.content.to_lowercase().contains("warning"),
+            "60% under 80% threshold should not warn, got: {}",
+            out.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_large_edit_warning_includes_ratio() {
+        let h = TestHarness::new();
+        let content = "a".repeat(40) + &"b".repeat(60);
+        std::fs::write(h.path().join("file.txt"), &content).unwrap();
+
+        let tool = SearchReplaceEditTool::new(
+            &large_edit_config(0.5, LargeEditAction::Warn),
+            Arc::new(EditHistory::new()),
+        );
+        let ctx = h.context();
+        let out = tool
+            .execute(
+                serde_json::json!({
+                    "path": "file.txt",
+                    "old_string": "b".repeat(60),
+                    "new_string": "c".repeat(60),
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            out.content.contains("60%"),
+            "warning should include the percentage, got: {}",
+            out.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_large_edit_exact_threshold_boundary() {
+        let h = TestHarness::new();
+        // 100 bytes, replace exactly 50 → 50% ratio, threshold 0.5 → should flag (>=)
+        let content = "a".repeat(50) + &"b".repeat(50);
+        std::fs::write(h.path().join("file.txt"), &content).unwrap();
+
+        let tool = SearchReplaceEditTool::new(
+            &large_edit_config(0.5, LargeEditAction::Block),
+            Arc::new(EditHistory::new()),
+        );
+        let ctx = h.context();
+        let out = tool
+            .execute(
+                serde_json::json!({
+                    "path": "file.txt",
+                    "old_string": "b".repeat(50),
+                    "new_string": "c".repeat(50),
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            out.outcome,
+            ToolOutcome::Error,
+            "exactly at threshold should be flagged"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_large_edit_empty_file_bypasses_check() {
+        let h = TestHarness::new();
+        // Empty file — guardrail should not trigger (no division by zero)
+        std::fs::write(h.path().join("file.txt"), "").unwrap();
+
+        let tool = SearchReplaceEditTool::new(
+            &large_edit_config(0.5, LargeEditAction::Block),
+            Arc::new(EditHistory::new()),
+        );
+        let ctx = h.context();
+        // Inserting into empty file: old_string="" matches the empty file content
+        let out = tool
+            .execute(
+                serde_json::json!({
+                    "path": "file.txt",
+                    "old_string": "",
+                    "new_string": "new content here",
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        // Should succeed without hitting the guardrail
+        assert_eq!(
+            out.outcome,
+            ToolOutcome::Success,
+            "empty file should bypass guardrail, got: {}",
+            out.content
+        );
     }
 }
