@@ -17,7 +17,9 @@ pub const MAX_DEPTH: usize = 64;
 // ── Types ───────────────────────────────────────────────────────────
 
 /// Classification of a planned change for secondary sort ordering.
-/// Variant declaration order = edit priority (Ord is derived).
+///
+/// **Do not reorder variants.** Derived `Ord` determines secondary sort
+/// priority within each topological level. Append new variants at the end only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeKind {
@@ -45,6 +47,16 @@ pub struct PlannedChange {
     pub depends_on: Vec<usize>,
     pub change_kind: ChangeKind,
     pub crate_kind: CrateKind,
+}
+
+impl PlannedChange {
+    /// Sort key used for secondary ordering within a topological level.
+    ///
+    /// Single source of truth — used by both the algorithm and proptests.
+    #[must_use]
+    pub const fn secondary_sort_key(&self) -> (CrateKind, ChangeKind, &PathBuf) {
+        (self.crate_kind, self.change_kind, &self.file_path)
+    }
 }
 
 /// The result of planning: an ordered sequence of changes.
@@ -146,7 +158,7 @@ pub fn plan_changes(changes: Vec<PlannedChange>) -> Result<ChangePlan, PlanError
     }
 
     if ordered.len() < n {
-        let cycle = extract_cycle(&slots, &in_degree, &id_to_index);
+        let cycle = extract_cycle(&slots, &in_degree, &adjacency);
         return Err(PlanError::CycleDetected { cycle });
     }
 
@@ -175,7 +187,16 @@ fn build_graph(
     let mut in_degree: Vec<usize> = vec![0; n];
 
     for (idx, change) in changes.iter().enumerate() {
+        // Deduplicate dependencies to prevent in-degree corruption.
+        // Duplicate entries would increment in-degree multiple times for the
+        // same logical edge, potentially preventing nodes from ever entering
+        // the BFS queue.
+        let mut seen_deps = BTreeSet::new();
         for &dep_id in &change.depends_on {
+            if !seen_deps.insert(dep_id) {
+                continue; // skip duplicate
+            }
+
             let dep_idx =
                 id_to_index
                     .get(&dep_id)
@@ -186,6 +207,8 @@ fn build_graph(
                     })?;
 
             if dep_idx == idx {
+                // Self-loop: normalized to [id, id] — same format as
+                // multi-node cycles [a, ..., a] (first == last).
                 return Err(PlanError::CycleDetected {
                     cycle: vec![change.id, change.id],
                 });
@@ -207,11 +230,7 @@ fn sort_level_by_secondary_key(level: &mut [usize], slots: &[Option<PlannedChang
         let ca = slots.get(a).and_then(Option::as_ref);
         let cb = slots.get(b).and_then(Option::as_ref);
         match (ca, cb) {
-            (Some(ca), Some(cb)) => ca
-                .crate_kind
-                .cmp(&cb.crate_kind)
-                .then_with(|| ca.change_kind.cmp(&cb.change_kind))
-                .then_with(|| ca.file_path.cmp(&cb.file_path)),
+            (Some(ca), Some(cb)) => ca.secondary_sort_key().cmp(&cb.secondary_sort_key()),
             _ => std::cmp::Ordering::Equal,
         }
     });
@@ -249,55 +268,125 @@ fn drain_level_into_ordered(
     }
 }
 
-/// Extract one cycle from the remaining nodes (those still in `slots` with `in_degree` > 0).
+/// Extract one cycle from the residual graph using DFS on the adjacency list.
+///
+/// After Kahn's BFS completes, any nodes still in the graph (`in_degree` > 0) are
+/// part of at least one cycle. This function walks the *adjacency list* (not
+/// `PlannedChange.depends_on`) to find a cycle, which is more reliable than the
+/// depends_on-based walk because the adjacency list was already deduplicated and
+/// validated during graph construction.
 fn extract_cycle(
     slots: &[Option<PlannedChange>],
     in_degree: &[usize],
-    id_to_index: &HashMap<usize, usize>,
+    adjacency: &[Vec<usize>],
 ) -> Vec<usize> {
-    let start_idx = in_degree
-        .iter()
-        .enumerate()
-        .find(|(_, d)| **d > 0)
-        .map(|(i, _)| i)
-        .unwrap_or_default();
-
-    let mut visited: BTreeSet<usize> = BTreeSet::new();
-    let mut path: Vec<usize> = Vec::new();
-    let mut current = start_idx;
-
-    loop {
-        let Some(change) = slots.get(current).and_then(Option::as_ref) else {
-            return path;
-        };
-
-        if visited.contains(&current) {
-            let cycle_start_id = change.id;
-            if let Some(pos) = path.iter().position(|&id| id == cycle_start_id) {
-                // pos is guaranteed valid — it comes from Iterator::position on path
-                let mut cycle: Vec<usize> =
-                    path.get(pos..).map_or_else(Vec::new, <[usize]>::to_vec);
-                cycle.push(cycle_start_id);
-                return cycle;
+    // Build residual-only forward edges (node → its dependencies still in graph).
+    // adjacency[dep] contains dependents, so we reverse: dependent → dep.
+    let n = in_degree.len();
+    let mut forward: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (dep_idx, dependents) in adjacency.iter().enumerate() {
+        if in_degree.get(dep_idx).is_some_and(|&d| d > 0) {
+            for &dependent in dependents {
+                if in_degree.get(dependent).is_some_and(|&d| d > 0) {
+                    if let Some(fwd) = forward.get_mut(dependent) {
+                        fwd.push(dep_idx);
+                    }
+                }
             }
-            path.push(change.id);
-            return path;
-        }
-
-        visited.insert(current);
-        path.push(change.id);
-
-        let next = change.depends_on.iter().find_map(|&dep_id| {
-            let &dep_idx = id_to_index.get(&dep_id)?;
-            let still_in_graph = in_degree.get(dep_idx).is_some_and(|&d| d > 0);
-            (still_in_graph || visited.contains(&dep_idx)).then_some(dep_idx)
-        });
-
-        match next {
-            Some(idx) => current = idx,
-            None => return path,
         }
     }
+
+    // Try DFS from each residual node
+    let mut visited = vec![false; n];
+
+    for (start, &deg) in in_degree.iter().enumerate() {
+        if deg == 0 || visited.get(start).is_some_and(|&v| v) {
+            continue;
+        }
+        if let Some(cycle) = dfs_find_cycle(start, &forward, &mut visited, slots) {
+            return cycle;
+        }
+    }
+
+    // Fallback: should not happen if Kahn's BFS correctly identifies residual nodes
+    Vec::new()
+}
+
+/// Map a graph index to its change ID (falls back to the index itself).
+fn node_id(slots: &[Option<PlannedChange>], idx: usize) -> usize {
+    slots
+        .get(idx)
+        .and_then(Option::as_ref)
+        .map_or(idx, |c| c.id)
+}
+
+/// DFS from `start` through `forward` edges to find a cycle.
+///
+/// Returns the cycle as a vec of change IDs `[a, b, ..., a]` if found.
+fn dfs_find_cycle(
+    start: usize,
+    forward: &[Vec<usize>],
+    visited: &mut [bool],
+    slots: &[Option<PlannedChange>],
+) -> Option<Vec<usize>> {
+    let n = forward.len();
+    let mut on_stack = vec![false; n];
+    // Stack entries: (node, neighbor_cursor)
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    let mut path: Vec<usize> = Vec::new();
+
+    if let Some(v) = visited.get_mut(start) {
+        *v = true;
+    }
+    if let Some(v) = on_stack.get_mut(start) {
+        *v = true;
+    }
+    path.push(node_id(slots, start));
+    stack.push((start, 0));
+
+    loop {
+        let Some(&mut (node, ref mut cursor)) = stack.last_mut() else {
+            break;
+        };
+        let neighbors = forward.get(node).map_or(&[] as &[usize], Vec::as_slice);
+        if *cursor < neighbors.len() {
+            let Some(&next) = neighbors.get(*cursor) else {
+                break;
+            };
+            *cursor += 1;
+
+            if on_stack.get(next).is_some_and(|&v| v) {
+                // Found a cycle — extract from path
+                let next_id = node_id(slots, next);
+                if let Some(pos) = path.iter().position(|&id| id == next_id) {
+                    let mut cycle: Vec<usize> =
+                        path.get(pos..).map_or_else(Vec::new, <[usize]>::to_vec);
+                    cycle.push(next_id);
+                    return Some(cycle);
+                }
+            }
+
+            if !visited.get(next).is_some_and(|&v| v) {
+                if let Some(v) = visited.get_mut(next) {
+                    *v = true;
+                }
+                if let Some(v) = on_stack.get_mut(next) {
+                    *v = true;
+                }
+                path.push(node_id(slots, next));
+                stack.push((next, 0));
+            }
+        } else {
+            // Backtrack
+            stack.pop();
+            path.pop();
+            if let Some(v) = on_stack.get_mut(node) {
+                *v = false;
+            }
+        }
+    }
+
+    None
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -593,6 +682,16 @@ mod tests {
                 actual: 65
             }
         ));
+    }
+
+    #[test]
+    fn test_duplicate_deps_handled_correctly() {
+        // depends_on: [1, 1] should behave the same as [1]
+        let a = lib_consumer(0, "a.rs", vec![1, 1]);
+        let b = lib_consumer(1, "b.rs", vec![]);
+        let result = plan_changes(vec![a, b]).unwrap();
+        let ids: Vec<usize> = result.ordered_changes.iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec![1, 0]);
     }
 
     // ── Determinism + Scale ─────────────────────────────────────────
@@ -939,8 +1038,8 @@ mod proptests {
                 let a_max_dep = a.depends_on.iter().filter_map(|d| position.get(d)).max().copied().unwrap_or(0);
                 let b_max_dep = b.depends_on.iter().filter_map(|d| position.get(d)).max().copied().unwrap_or(0);
                 if a_max_dep == b_max_dep && a.depends_on.len() == b.depends_on.len() {
-                    let a_key = (a.crate_kind, a.change_kind, &a.file_path);
-                    let b_key = (b.crate_kind, b.change_kind, &b.file_path);
+                    let a_key = a.secondary_sort_key();
+                    let b_key = b.secondary_sort_key();
                     prop_assert!(a_key <= b_key, "secondary sort violated: {:?} > {:?}", a_key, b_key);
                 }
             }
