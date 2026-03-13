@@ -6,6 +6,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod agent;
+mod approval_bridge;
 pub mod history;
 pub mod observation;
 pub mod registry;
@@ -13,5 +14,6 @@ pub mod router;
 pub mod session;
 pub mod shutdown;
 pub mod stream;
+mod task_drain;
 pub mod tool_executor;
 pub mod tool_registry;

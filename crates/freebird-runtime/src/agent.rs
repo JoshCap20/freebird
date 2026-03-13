@@ -5,7 +5,6 @@
 //! routes them to handlers, and shuts down gracefully when the
 //! cancellation token fires or the inbound stream closes.
 
-use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -223,9 +222,16 @@ impl AgentRuntime {
         };
 
         // Fan-out inbound events into a splitter task and optional approval
-        // bridge task. See `spawn_approval_bridge` for details.
-        let (mut main_rx, splitter_task, approval_task) =
-            self.spawn_approval_bridge(handle.inbound, &outbound, &cancel, approval_rx);
+        // bridge task. See `approval_bridge` module for details.
+        let approval_responder = self.tool_executor.approval_responder();
+        let bridge = crate::approval_bridge::spawn(
+            handle.inbound,
+            &outbound,
+            &cancel,
+            approval_responder,
+            approval_rx,
+        );
+        let mut main_rx = bridge.main_rx;
 
         let max_concurrent = self.config.max_concurrent_tasks.max(1);
         if self.config.max_concurrent_tasks == 0 {
@@ -295,171 +301,14 @@ impl AgentRuntime {
             }
         }
 
-        Self::drain_tasks(&mut tasks, self.config.drain_timeout_secs).await;
-        splitter_task.abort();
-        if let Some(task) = approval_task {
+        crate::task_drain::drain_tasks(&mut tasks, self.config.drain_timeout_secs).await;
+        bridge.splitter_task.abort();
+        if let Some(task) = bridge.approval_task {
             task.abort();
         }
 
         self.channel.stop().await?;
         Ok(())
-    }
-
-    /// Drain in-flight tasks from the `JoinSet`, aborting any that exceed
-    /// the timeout.
-    async fn drain_tasks(tasks: &mut tokio::task::JoinSet<()>, timeout_secs: u64) {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-        tracing::info!(
-            remaining = tasks.len(),
-            timeout_secs,
-            "draining in-flight tasks"
-        );
-        loop {
-            match tokio::time::timeout_at(deadline, tasks.join_next()).await {
-                Ok(Some(Ok(()))) => {}
-                Ok(Some(Err(e))) => {
-                    tracing::error!(error = %e, "task panicked during drain");
-                }
-                Ok(None) => break,
-                Err(_) => {
-                    tracing::warn!(
-                        remaining = tasks.len(),
-                        "drain timeout expired, aborting remaining tasks"
-                    );
-                    tasks.shutdown().await;
-                    break;
-                }
-            }
-        }
-    }
-
-    /// Spawn background tasks for approval bridge plumbing.
-    ///
-    /// Returns a receiver for non-approval inbound events, the splitter task
-    /// handle, and an optional approval-forwarder task handle.
-    ///
-    /// **Splitter task**: reads from the raw inbound stream and routes
-    /// `ApprovalResponse` events directly to the approval gate's
-    /// [`ApprovalResponder`], bypassing the main event loop. All other
-    /// events are forwarded to the returned `main_rx`. This is necessary
-    /// because the message handler may block on `check_consent()` (awaiting
-    /// user approval via oneshot), and the `ApprovalResponse` that unblocks
-    /// it also arrives as an `InboundEvent`.
-    ///
-    /// **Approval-forwarder task**: reads `ApprovalRequest`s from the gate's
-    /// mpsc channel and forwards them as `OutboundEvent::ApprovalRequest` to
-    /// the user's channel.
-    fn spawn_approval_bridge(
-        &self,
-        inbound: Pin<Box<dyn futures::Stream<Item = InboundEvent> + Send>>,
-        outbound: &mpsc::Sender<OutboundEvent>,
-        cancel: &CancellationToken,
-        approval_rx: Option<mpsc::Receiver<ApprovalRequest>>,
-    ) -> (
-        mpsc::Receiver<InboundEvent>,
-        tokio::task::JoinHandle<()>,
-        Option<tokio::task::JoinHandle<()>>,
-    ) {
-        let (main_tx, main_rx) = mpsc::channel::<InboundEvent>(32);
-        let approval_responder = self.tool_executor.approval_responder();
-        let has_approval_gate = approval_responder.is_some();
-
-        let splitter_cancel = cancel.clone();
-        let splitter_outbound = outbound.clone();
-        let splitter_task = tokio::spawn({
-            let mut inbound = inbound;
-            async move {
-                loop {
-                    tokio::select! {
-                        () = splitter_cancel.cancelled() => break,
-                        event = inbound.next() => {
-                            match event {
-                                Some(InboundEvent::ApprovalResponse {
-                                    request_id, approved, reason, sender_id, budget_action,
-                                }) if has_approval_gate => {
-                                    if let Some(ref resp) = approval_responder {
-                                        let response = if let Some(ref action_str) = budget_action {
-                                            match freebird_security::approval::BudgetOverrideAction::from_wire(action_str) {
-                                                Some(action) => freebird_security::approval::ApprovalResponse::BudgetOverride { action },
-                                                None if approved => {
-                                                    tracing::warn!(budget_action = %action_str, "unrecognized budget_action, falling back to Approved");
-                                                    freebird_security::approval::ApprovalResponse::Approved
-                                                }
-                                                None => freebird_security::approval::ApprovalResponse::Denied { reason },
-                                            }
-                                        } else if approved {
-                                            freebird_security::approval::ApprovalResponse::Approved
-                                        } else {
-                                            freebird_security::approval::ApprovalResponse::Denied { reason }
-                                        };
-                                        if resp.respond(&request_id, response).await {
-                                            tracing::info!(
-                                                %request_id, %sender_id, approved,
-                                                "approval response delivered"
-                                            );
-                                        } else {
-                                            tracing::warn!(
-                                                %request_id, %sender_id,
-                                                "approval response for unknown or expired request"
-                                            );
-                                            let _ = splitter_outbound.send(
-                                                OutboundEvent::Error {
-                                                    text: format!(
-                                                        "No pending approval request with id `{request_id}` \
-                                                         (expired or already responded)"
-                                                    ),
-                                                    recipient_id: sender_id,
-                                                }
-                                            ).await;
-                                        }
-                                    }
-                                }
-                                Some(event) => {
-                                    if main_tx.send(event).await.is_err() { break; }
-                                }
-                                None => break,
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        let approval_task = approval_rx.map(|mut approval_rx| {
-            let approval_cancel = cancel.clone();
-            let approval_outbound = outbound.clone();
-            tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        () = approval_cancel.cancelled() => break,
-                        req = approval_rx.recv() => {
-                            match req {
-                                Some(req) => {
-                                    let category_json = serde_json::to_string(&req.category)
-                                        .unwrap_or_else(|_| String::from("{}"));
-                                    let event = OutboundEvent::ApprovalRequest {
-                                        request_id: req.id,
-                                        category_json,
-                                        expires_at: req.expires_at.to_rfc3339(),
-                                        recipient_id: req.sender_id,
-                                    };
-                                    if approval_outbound.send(event).await.is_err() {
-                                        tracing::warn!(
-                                            "approval outbound channel closed; \
-                                             approval request dropped"
-                                        );
-                                        break;
-                                    }
-                                }
-                                None => break,
-                            }
-                        }
-                    }
-                }
-            })
-        });
-
-        (main_rx, splitter_task, approval_task)
     }
 
     /// Handle non-message events synchronously in the main loop.
