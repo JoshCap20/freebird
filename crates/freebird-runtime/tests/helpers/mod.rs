@@ -376,6 +376,7 @@ pub fn default_tools_config() -> ToolsConfig {
         allowed_shell_commands: vec![],
         max_shell_output_bytes: 1_048_576,
         edit: EditConfig::default(),
+        git_timeout_secs: 5,
     }
 }
 
