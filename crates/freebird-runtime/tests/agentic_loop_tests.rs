@@ -1422,6 +1422,7 @@ async fn test_new_conversation_uses_config_values() {
         temperature: Some(0.5),
         max_turns_per_session: 10,
         drain_timeout_secs: 1,
+        max_concurrent_tasks: 8,
         session: freebird_types::config::SessionConfig::default(),
         context: ContextConfig::default(),
     };

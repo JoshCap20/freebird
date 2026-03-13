@@ -445,6 +445,7 @@ fn default_config() -> RuntimeConfig {
         temperature: None,
         max_turns_per_session: 10,
         drain_timeout_secs: 1,
+        max_concurrent_tasks: 8,
         session: freebird_types::config::SessionConfig::default(),
         context: ContextConfig::default(),
     }
