@@ -65,6 +65,20 @@ pub enum RuntimeError {
     Memory(#[from] MemoryError),
 }
 
+/// Control flow outcome from budget check helpers.
+///
+/// Used by `check_round_budget` and `record_and_check_usage` to tell
+/// the caller whether the agentic loop should continue, break (max
+/// rounds without budget), or return early (user denied approval).
+enum BudgetOutcome {
+    /// Budget check passed (or no budget configured) — continue the loop.
+    Continue,
+    /// No budget configured and the static max-rounds limit was hit.
+    BreakLoop,
+    /// Budget exceeded and the user denied (or timed out) — abort the turn.
+    ReturnTurn,
+}
+
 /// The central orchestrator that wires together all subsystems.
 ///
 /// Accepts inbound events from a channel, routes messages through
@@ -1200,6 +1214,85 @@ impl AgentRuntime {
         }
     }
 
+    /// Check the tool-round budget before each agentic loop iteration.
+    ///
+    /// When a budget is configured, delegates to `check_tool_rounds` and routes
+    /// any exceeded error through the approval gate.  When no budget exists,
+    /// falls back to the static `max_rounds` limit from config.
+    #[allow(clippy::too_many_arguments)]
+    async fn check_round_budget(
+        &self,
+        round: usize,
+        max_rounds: usize,
+        budget: Option<&freebird_security::budget::TokenBudget>,
+        session_id: &SessionId,
+        current_turn: &mut Turn,
+        sender_id: &str,
+        outbound: &mpsc::Sender<OutboundEvent>,
+    ) -> BudgetOutcome {
+        if let Some(b) = budget {
+            let round_u32 = u32::try_from(round).unwrap_or(u32::MAX);
+            if let Err(e) = b.check_tool_rounds(round_u32) {
+                if !self
+                    .handle_budget_exceeded(
+                        session_id,
+                        &e,
+                        current_turn,
+                        sender_id,
+                        outbound,
+                        budget,
+                    )
+                    .await
+                {
+                    return BudgetOutcome::ReturnTurn;
+                }
+                // User approved — continue the loop beyond the limit.
+            }
+        } else if round >= max_rounds {
+            // No budget configured — fall back to config limit.
+            return BudgetOutcome::BreakLoop;
+        }
+        BudgetOutcome::Continue
+    }
+
+    /// Record token usage after a provider response and check per-request /
+    /// per-session limits.
+    ///
+    /// When the limit is exceeded, routes the error through the approval gate.
+    /// On approval the usage is force-committed; on denial the caller should
+    /// abort the loop.
+    async fn record_and_check_usage(
+        &self,
+        usage: &TokenUsage,
+        budget: Option<&freebird_security::budget::TokenBudget>,
+        session_id: &SessionId,
+        current_turn: &mut Turn,
+        sender_id: &str,
+        outbound: &mpsc::Sender<OutboundEvent>,
+    ) -> BudgetOutcome {
+        if let Some(b) = budget {
+            if let Err(e) = b.record_usage(usage) {
+                if self
+                    .handle_budget_exceeded(
+                        session_id,
+                        &e,
+                        current_turn,
+                        sender_id,
+                        outbound,
+                        budget,
+                    )
+                    .await
+                {
+                    // User approved — force-commit the usage.
+                    b.force_record_usage(usage);
+                } else {
+                    return BudgetOutcome::ReturnTurn;
+                }
+            }
+        }
+        BudgetOutcome::Continue
+    }
+
     /// Run the agentic loop: call provider, handle tool use, deliver response.
     ///
     /// When `initial_request` is `Some`, the first loop iteration uses it directly
@@ -1242,28 +1335,21 @@ impl AgentRuntime {
         let max_rounds = self.config.max_tool_rounds;
 
         for round in 0.. {
-            // Check tool-round budget before each iteration.
-            if let Some(ref b) = budget {
-                let round_u32 = u32::try_from(round).unwrap_or(u32::MAX);
-                if let Err(e) = b.check_tool_rounds(round_u32) {
-                    if !self
-                        .handle_budget_exceeded(
-                            session_id,
-                            &e,
-                            &mut current_turn,
-                            sender_id,
-                            outbound,
-                            budget.as_deref(),
-                        )
-                        .await
-                    {
-                        return current_turn;
-                    }
-                    // User approved — continue the loop beyond the limit.
-                }
-            } else if round >= max_rounds {
-                // No budget configured — fall back to config limit.
-                break;
+            match self
+                .check_round_budget(
+                    round,
+                    max_rounds,
+                    budget.as_deref(),
+                    session_id,
+                    &mut current_turn,
+                    sender_id,
+                    outbound,
+                )
+                .await
+            {
+                BudgetOutcome::Continue => {}
+                BudgetOutcome::BreakLoop => break,
+                BudgetOutcome::ReturnTurn => return current_turn,
             }
 
             let request = pending_request.take().unwrap_or_else(|| {
@@ -1285,26 +1371,19 @@ impl AgentRuntime {
                     }
                 };
 
-            // Record token usage and check per-request/per-session limits.
-            if let Some(ref b) = budget {
-                if let Err(e) = b.record_usage(&response.usage) {
-                    if self
-                        .handle_budget_exceeded(
-                            session_id,
-                            &e,
-                            &mut current_turn,
-                            sender_id,
-                            outbound,
-                            budget.as_deref(),
-                        )
-                        .await
-                    {
-                        // User approved — force-commit the usage.
-                        b.force_record_usage(&response.usage);
-                    } else {
-                        return current_turn;
-                    }
-                }
+            if matches!(
+                self.record_and_check_usage(
+                    &response.usage,
+                    budget.as_deref(),
+                    session_id,
+                    &mut current_turn,
+                    sender_id,
+                    outbound,
+                )
+                .await,
+                BudgetOutcome::ReturnTurn
+            ) {
+                return current_turn;
             }
 
             match response.stop_reason {
@@ -1818,28 +1897,21 @@ impl AgentRuntime {
         let max_rounds = self.config.max_tool_rounds;
 
         for round in 0.. {
-            // Check tool-round budget before each iteration.
-            if let Some(ref b) = budget {
-                let round_u32 = u32::try_from(round).unwrap_or(u32::MAX);
-                if let Err(e) = b.check_tool_rounds(round_u32) {
-                    if !self
-                        .handle_budget_exceeded(
-                            session_id,
-                            &e,
-                            &mut current_turn,
-                            sender_id,
-                            outbound,
-                            budget.as_deref(),
-                        )
-                        .await
-                    {
-                        return current_turn;
-                    }
-                    // User approved — continue the loop beyond the limit.
-                }
-            } else if round >= max_rounds {
-                // No budget configured — fall back to config limit.
-                break;
+            match self
+                .check_round_budget(
+                    round,
+                    max_rounds,
+                    budget.as_deref(),
+                    session_id,
+                    &mut current_turn,
+                    sender_id,
+                    outbound,
+                )
+                .await
+            {
+                BudgetOutcome::Continue => {}
+                BudgetOutcome::BreakLoop => break,
+                BudgetOutcome::ReturnTurn => return current_turn,
             }
 
             let request = self.build_completion_request(conversation, &messages, &tool_definitions);
@@ -1879,26 +1951,19 @@ impl AgentRuntime {
                 return current_turn;
             };
 
-            // Record token usage and check per-request/per-session limits.
-            if let Some(ref b) = budget {
-                if let Err(e) = b.record_usage(&usage) {
-                    if self
-                        .handle_budget_exceeded(
-                            session_id,
-                            &e,
-                            &mut current_turn,
-                            sender_id,
-                            outbound,
-                            budget.as_deref(),
-                        )
-                        .await
-                    {
-                        // User approved — force-commit the usage.
-                        b.force_record_usage(&usage);
-                    } else {
-                        return current_turn;
-                    }
-                }
+            if matches!(
+                self.record_and_check_usage(
+                    &usage,
+                    budget.as_deref(),
+                    session_id,
+                    &mut current_turn,
+                    sender_id,
+                    outbound,
+                )
+                .await,
+                BudgetOutcome::ReturnTurn
+            ) {
+                return current_turn;
             }
 
             // Always send StreamEnd after a complete stream round
