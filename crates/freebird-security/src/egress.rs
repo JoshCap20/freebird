@@ -222,6 +222,9 @@ impl Default for EgressPolicy {
 /// operations. Each call to [`check_and_record`](EgressRateLimiter::check_and_record)
 /// inspects the oldest entry in the window; if it falls within the last 60 seconds,
 /// the rate limit has been exceeded.
+/// Sliding window duration for egress rate limiting (60 seconds).
+const RATE_WINDOW_MILLIS: u64 = 60_000;
+
 pub struct EgressRateLimiter {
     /// Circular buffer of request timestamps (Unix epoch millis).
     timestamps: Vec<AtomicU64>,
@@ -295,9 +298,8 @@ impl EgressRateLimiter {
         };
 
         let oldest = entry.load(Ordering::Relaxed);
-        let window_millis: u64 = 60_000;
 
-        if oldest != 0 && now_millis.saturating_sub(oldest) < window_millis {
+        if oldest != 0 && now_millis.saturating_sub(oldest) < RATE_WINDOW_MILLIS {
             return Err(SecurityError::EgressRateLimited {
                 limit_per_minute: self.limit,
             });

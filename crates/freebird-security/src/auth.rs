@@ -269,6 +269,10 @@ pub fn verify_session_key<'a>(
     //    matters is that ring::hmac::verify runs in constant time, preventing
     //    timing side-channel attacks on the hash comparison.
     let provided_hash = hash_raw_key(raw_key);
+    // Static HMAC key used exclusively for constant-time string comparison.
+    // The value is not secret — it is used solely to ensure ring::hmac::verify
+    // performs constant-time equality. Any fixed value is equivalent; this
+    // value is non-empty and domain-scoped to prevent cross-context key reuse.
     let verify_key = hmac::Key::new(hmac::HMAC_SHA256, b"freebird-session-key-verify");
     let tag = hmac::sign(&verify_key, stored.key_hash.as_bytes());
 

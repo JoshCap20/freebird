@@ -36,11 +36,17 @@ pub struct DaemonConfig {
     pub port: u16,
 }
 
+/// Default TCP port for the `FreeBird` daemon.
+///
+/// Chosen to avoid conflicts with common services (HTTP 8080, Node 3000, etc.)
+/// and low-numbered well-known ports. Configurable via `[daemon] port`.
+const DEFAULT_DAEMON_PORT: u16 = 7531;
+
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             host: IpAddr::V4(Ipv4Addr::LOCALHOST),
-            port: 7531,
+            port: DEFAULT_DAEMON_PORT,
         }
     }
 }
