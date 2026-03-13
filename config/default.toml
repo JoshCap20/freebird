@@ -61,6 +61,13 @@ max_context_entries = 5
 relevance_threshold = -0.5
 max_context_tokens = 2000
 
+[summarization]
+enabled = true
+trigger_threshold = 0.75          # fraction of max_context_tokens
+preserve_recent_turns = 5         # never summarize last N turns
+max_summary_tokens = 1024         # max tokens for generated summary
+min_turns_before_summarize = 8    # minimum turns before summarization kicks in
+
 [security]
 max_tool_calls_per_turn = 25
 require_consent_above = "high"
