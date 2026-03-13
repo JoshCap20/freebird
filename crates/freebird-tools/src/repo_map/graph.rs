@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 /// A tag extracted from a source file — either a definition or a reference.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) struct Tag {
+pub struct Tag {
     /// The symbol name (e.g., `"AgentRuntime"`, `"handle_message"`).
     pub name: String,
     /// Absolute path to the file containing this tag.
@@ -27,7 +27,7 @@ pub(super) struct Tag {
 
 /// Classification of a tagged symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) enum TagKind {
+pub enum TagKind {
     Function,
     Struct,
     Enum,
@@ -45,7 +45,7 @@ impl TagKind {
     /// Stable string representation for serialization.
     ///
     /// Must stay in sync with `cache::parse_tag_kind`.
-    pub(super) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Function => "Function",
             Self::Struct => "Struct",
@@ -67,7 +67,7 @@ impl TagKind {
 /// a file that **references** a symbol to the file that **defines** it.
 ///
 /// Self-edges (same file) are excluded — they carry no cross-file signal.
-pub(super) struct ReferenceGraph {
+pub struct ReferenceGraph {
     index_to_file: Vec<PathBuf>,
     /// `adjacency[i]` = set of file indices that file `i` references.
     adjacency: Vec<HashSet<usize>>,
@@ -164,7 +164,7 @@ impl ReferenceGraph {
 /// - **Definition tags** for top-level items (functions, structs, enums, traits, etc.)
 /// - **Reference tags** for identifiers in call expressions, type usage, use
 ///   declarations, and macro invocations.
-pub(super) fn extract_rust_tags(tree: &tree_sitter::Tree, source: &[u8], file: &Path) -> Vec<Tag> {
+pub fn extract_rust_tags(tree: &tree_sitter::Tree, source: &[u8], file: &Path) -> Vec<Tag> {
     let mut tags = Vec::new();
     let mut cursor = tree.walk();
     walk_node_recursive(&mut cursor, source, file, &mut tags);

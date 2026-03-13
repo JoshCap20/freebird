@@ -75,7 +75,7 @@ fn parse_tag_kind(s: &str) -> super::graph::TagKind {
 }
 
 /// Per-file tag cache with mtime-based invalidation.
-pub(super) struct TagCache {
+pub struct TagCache {
     entries: HashMap<PathBuf, CacheEntry>,
 }
 
