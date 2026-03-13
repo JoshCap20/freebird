@@ -101,7 +101,10 @@ impl SqliteDb {
     fn migrate(conn: &rusqlite::Connection) -> Result<(), MemoryError> {
         let current_version = Self::get_schema_version(conn);
 
-        let migrations: &[(i64, &str)] = &[(1, include_str!("migrations/001_initial.sql"))];
+        let migrations: &[(i64, &str)] = &[
+            (1, include_str!("migrations/001_initial.sql")),
+            (2, include_str!("migrations/002_summaries.sql")),
+        ];
 
         for &(version, sql) in migrations {
             if version > current_version {
@@ -179,7 +182,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
     }
 
     fn test_signing_key() -> ring::hmac::Key {

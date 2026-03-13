@@ -13,3 +13,4 @@ pub mod sqlite_audit;
 pub mod sqlite_event;
 pub mod sqlite_knowledge;
 pub mod sqlite_memory;
+pub mod sqlite_summary;
