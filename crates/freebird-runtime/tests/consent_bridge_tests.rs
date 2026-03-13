@@ -38,7 +38,7 @@ use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
     ToolOutput,
 };
-use freebird_types::config::{BudgetConfig, InjectionConfig, KnowledgeConfig};
+use freebird_types::config::{BudgetConfig, InjectionConfig, KnowledgeConfig, SummarizationConfig};
 use helpers::{
     MockChannel, QueuedProvider, default_config, default_tools_config, make_registry, message_text,
     text_response, tool_use_response, without_status_events,
@@ -163,6 +163,8 @@ async fn test_consent_request_forwarded_to_channel() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
+        None,
+        SummarizationConfig::default(),
     );
 
     // Send message that triggers the high-risk tool
@@ -291,6 +293,8 @@ async fn test_consent_approved_executes_tool() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
+        None,
+        SummarizationConfig::default(),
     );
 
     inbound_tx
@@ -428,6 +432,8 @@ async fn test_consent_denied_returns_error_to_provider() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
+        None,
+        SummarizationConfig::default(),
     );
 
     inbound_tx
@@ -564,6 +570,8 @@ async fn test_consent_low_risk_no_prompt() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
+        None,
+        SummarizationConfig::default(),
     );
 
     inbound_tx
@@ -670,6 +678,8 @@ async fn test_consent_no_gate_executes_freely() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
+        None,
+        SummarizationConfig::default(),
     );
 
     inbound_tx
@@ -760,6 +770,8 @@ async fn test_consent_response_unknown_id_logged() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
+        None,
+        SummarizationConfig::default(),
     );
 
     // Send a bogus approval response

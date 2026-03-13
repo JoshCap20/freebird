@@ -30,7 +30,7 @@ use freebird_traits::provider::{
     CompletionRequest, CompletionResponse, ContentBlock, Message, Provider, ProviderError,
     ProviderFeature, ProviderInfo, Role, StopReason, StreamEvent, TokenUsage,
 };
-use freebird_types::config::{BudgetConfig, KnowledgeConfig, RuntimeConfig};
+use freebird_types::config::{BudgetConfig, KnowledgeConfig, RuntimeConfig, SummarizationConfig};
 
 use helpers::{
     MockChannel, QueuedProvider, ResponseFactory, default_config, default_tools_config, error_text,
@@ -159,6 +159,8 @@ async fn test_concurrent_different_sessions() {
         24,
         Some(Arc::new(helpers::MockEventSink::new())),
         Some(Arc::new(helpers::MockAuditSink::new())),
+        None,
+        SummarizationConfig::default(),
     );
 
     // Send messages from two different senders (different sessions)
@@ -241,6 +243,8 @@ async fn test_serialized_same_session() {
         24,
         Some(Arc::new(helpers::MockEventSink::new())),
         Some(Arc::new(helpers::MockAuditSink::new())),
+        None,
+        SummarizationConfig::default(),
     );
 
     // Send two messages from the same sender (same session → serialized)
@@ -317,6 +321,8 @@ async fn test_concurrency_limit_rejects_excess() {
         24,
         Some(Arc::new(helpers::MockEventSink::new())),
         Some(Arc::new(helpers::MockAuditSink::new())),
+        None,
+        SummarizationConfig::default(),
     );
 
     // Send two messages from different senders at once
@@ -396,6 +402,8 @@ async fn test_command_quit_during_inflight() {
         24,
         Some(Arc::new(helpers::MockEventSink::new())),
         Some(Arc::new(helpers::MockAuditSink::new())),
+        None,
+        SummarizationConfig::default(),
     );
 
     // Send a message, then immediately send quit
@@ -476,6 +484,8 @@ async fn test_shutdown_drains_inflight_with_timeout() {
         24,
         Some(Arc::new(helpers::MockEventSink::new())),
         Some(Arc::new(helpers::MockAuditSink::new())),
+        None,
+        SummarizationConfig::default(),
     );
 
     inbound_tx

@@ -42,7 +42,7 @@ use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
     ToolOutput,
 };
-use freebird_types::config::{BudgetConfig, KnowledgeConfig, RuntimeConfig};
+use freebird_types::config::{BudgetConfig, KnowledgeConfig, RuntimeConfig, SummarizationConfig};
 
 use helpers::{
     default_config, default_tools_config, error_text, make_tool_executor, message_text,
@@ -509,6 +509,8 @@ fn make_stream_runtime(
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
+        None,
+        SummarizationConfig::default(),
     )
 }
 
@@ -651,6 +653,8 @@ async fn test_streaming_fallback_on_stream_setup_failure() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
+        None,
+        SummarizationConfig::default(),
     );
 
     let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -689,6 +693,8 @@ async fn test_non_streaming_channel_uses_non_streaming_path() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
+        None,
+        SummarizationConfig::default(),
     );
 
     let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -779,6 +785,8 @@ async fn test_streaming_conversation_persisted() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
+        None,
+        SummarizationConfig::default(),
     );
 
     let _events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi there").await;
@@ -943,6 +951,8 @@ async fn test_streaming_max_tool_rounds_exceeded() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
+        None,
+        SummarizationConfig::default(),
     );
 
     let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Loop forever").await;
@@ -990,6 +1000,8 @@ async fn test_streaming_stop_sequence() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
+        None,
+        SummarizationConfig::default(),
     );
 
     let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -1084,6 +1096,8 @@ async fn test_non_streaming_provider_uses_complete_path() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
+        None,
+        SummarizationConfig::default(),
     );
 
     let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
@@ -1129,6 +1143,8 @@ async fn test_streaming_empty_done() {
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
+        None,
+        SummarizationConfig::default(),
     );
 
     let events = send_message_and_collect(inbound_tx, outbound_rx, runtime, "Hi").await;
