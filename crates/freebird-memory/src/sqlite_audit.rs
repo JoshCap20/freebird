@@ -233,20 +233,20 @@ fn verify_tail_metadata(
 }
 
 /// Get the next global sequence number and the HMAC of the last audit event.
+///
+/// Reads from `audit_metadata` (the authoritative counter) rather than
+/// scanning `audit_events ORDER BY sequence DESC`, which is O(n) and could
+/// diverge if an events INSERT failed within a retried transaction.
 fn get_next_audit_sequence(conn: &rusqlite::Connection) -> Result<(i64, String), MemoryError> {
-    let result: Option<(i64, String)> = conn
+    let (next_seq, last_hmac): (i64, String) = conn
         .query_row(
-            "SELECT sequence, hmac FROM audit_events ORDER BY sequence DESC LIMIT 1",
+            "SELECT expected_next_sequence, last_hmac FROM audit_metadata WHERE id = 1",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .optional()
-        .map_err(|e| rusqlite_to_io("query last audit event", &e))?;
+        .map_err(|e| rusqlite_to_io("query audit_metadata", &e))?;
 
-    match result {
-        Some((last_seq, last_hmac)) => Ok((last_seq + 1, last_hmac)),
-        None => Ok((0, String::new())),
-    }
+    Ok((next_seq, last_hmac))
 }
 
 /// Intermediate row for audit event verification.
