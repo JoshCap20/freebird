@@ -360,11 +360,12 @@ impl AgentRuntime {
         );
         let mut main_rx = bridge.main_rx;
 
-        let max_concurrent = self.config.max_concurrent_tasks.max(1);
-        if self.config.max_concurrent_tasks == 0 {
+        let max_concurrent = self.config.max_concurrent_tasks.clamp(1, 1024);
+        if self.config.max_concurrent_tasks != max_concurrent {
             tracing::warn!(
-                "max_concurrent_tasks is 0, clamping to 1 — \
-                 set to 0 would reject all messages"
+                configured = self.config.max_concurrent_tasks,
+                effective = max_concurrent,
+                "max_concurrent_tasks out of valid range [1, 1024], clamped"
             );
         }
         let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
