@@ -349,13 +349,6 @@ impl Tool for SearchReplaceEditTool {
             validate_syntax(safe_path.as_path(), &result.content)?;
         }
 
-        // Record pre-edit content for undo support
-        self.history.record_pre_edit(
-            context.session_id,
-            safe_path.as_path().to_path_buf(),
-            file_content.clone(),
-        );
-
         atomic_write(safe_path.as_path(), &result.content, Self::NAME).await?;
 
         let mut message = format!(
@@ -375,6 +368,14 @@ impl Tool for SearchReplaceEditTool {
             message.push_str("\n\n");
             message.push_str(&diff);
         }
+
+        // Record pre-edit content for undo support — AFTER successful write,
+        // so failed writes don't create phantom undo entries.
+        self.history.record_pre_edit(
+            context.session_id,
+            safe_path.as_path().to_path_buf(),
+            file_content,
+        );
 
         Ok(ToolOutput {
             content: message,
@@ -977,14 +978,14 @@ impl Tool for CreateCheckpointTool {
             }
         }
 
+        let file_list: Vec<String> = files.keys().map(|p| p.display().to_string()).collect();
+
         self.history
-            .create_checkpoint(context.session_id, name.to_string(), files.clone())
+            .create_checkpoint(context.session_id, name.to_string(), files)
             .map_err(|reason| ToolError::ExecutionFailed {
                 tool: Self::NAME.into(),
                 reason: reason.into(),
             })?;
-
-        let file_list: Vec<String> = files.keys().map(|p| p.display().to_string()).collect();
         Ok(ToolOutput {
             content: format!(
                 "Checkpoint '{}' created with {} files: {}",
@@ -1066,7 +1067,7 @@ impl Tool for RollbackToCheckpointTool {
                 reason: reason.into(),
             })?;
 
-        let mut restored = Vec::new();
+        let mut restored = Vec::with_capacity(files.len());
         let mut failed = Vec::new();
 
         for (path, content) in &files {
@@ -1089,7 +1090,6 @@ impl Tool for RollbackToCheckpointTool {
             restored.len()
         );
         if !failed.is_empty() {
-            use std::fmt::Write as _;
             let _ = write!(message, " (failed: {})", failed.join("; "));
         }
 

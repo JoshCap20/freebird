@@ -5,7 +5,7 @@
 //! the edit, undo, and checkpoint tools.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
@@ -95,7 +95,7 @@ impl EditHistory {
 
     /// Pop the most recent version from a file's undo stack.
     /// Returns `None` if no history exists for this session/path.
-    pub fn pop_last_version(&self, session_id: &SessionId, path: &PathBuf) -> Option<String> {
+    pub fn pop_last_version(&self, session_id: &SessionId, path: &Path) -> Option<String> {
         let mut sessions = self
             .sessions
             .write()
@@ -120,7 +120,7 @@ impl EditHistory {
     }
 
     /// Return how many undo steps remain for a specific file.
-    pub fn version_count(&self, session_id: &SessionId, path: &PathBuf) -> usize {
+    pub fn version_count(&self, session_id: &SessionId, path: &Path) -> usize {
         let sessions = self.sessions.read().unwrap_or_else(PoisonError::into_inner);
         sessions
             .get(session_id)
