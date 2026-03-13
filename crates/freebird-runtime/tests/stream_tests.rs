@@ -16,14 +16,12 @@ use std::collections::{BTreeSet, VecDeque};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::Stream;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 use freebird_memory::in_memory::InMemoryMemory;
 use freebird_runtime::agent::AgentRuntime;
@@ -44,9 +42,12 @@ use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
     ToolOutput,
 };
-use freebird_types::config::{BudgetConfig, ContextConfig, KnowledgeConfig, RuntimeConfig};
+use freebird_types::config::{BudgetConfig, KnowledgeConfig, RuntimeConfig};
 
-use helpers::{default_tools_config, error_text, make_tool_executor, message_text};
+use helpers::{
+    default_config, default_tools_config, error_text, make_tool_executor, message_text,
+    send_message_and_collect,
+};
 
 // ---------------------------------------------------------------------------
 // StreamingMockChannel — a channel that advertises ChannelFeature::Streaming
@@ -435,19 +436,10 @@ fn text_response_factory(text: &str) -> ResponseFactory {
 // Test helpers
 // ---------------------------------------------------------------------------
 
-fn default_config() -> RuntimeConfig {
+fn stream_config() -> RuntimeConfig {
     RuntimeConfig {
-        default_model: ModelId::from("test-model"),
         default_provider: ProviderId::from("test-stream-provider"),
-        system_prompt: None,
-        max_output_tokens: 1024,
-        max_tool_rounds: 10,
-        temperature: None,
-        max_turns_per_session: 10,
-        drain_timeout_secs: 1,
-        max_concurrent_tasks: 8,
-        session: freebird_types::config::SessionConfig::default(),
-        context: ContextConfig::default(),
+        ..default_config()
     }
 }
 
@@ -511,43 +503,13 @@ fn make_stream_runtime(
         Arc::new(InMemoryMemory::new()),
         None,
         KnowledgeConfig::default(),
-        default_config(),
+        stream_config(),
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
         Some(Arc::new(helpers::MockEventSink::new()) as Arc<dyn freebird_traits::event::EventSink>),
         Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
     )
-}
-
-async fn send_message_and_collect(
-    inbound_tx: mpsc::Sender<InboundEvent>,
-    mut outbound_rx: mpsc::Receiver<OutboundEvent>,
-    runtime: AgentRuntime,
-    text: &str,
-) -> Vec<OutboundEvent> {
-    inbound_tx
-        .send(InboundEvent::Message {
-            raw_text: text.into(),
-            sender_id: "alice".into(),
-            attachments: vec![],
-        })
-        .await
-        .unwrap();
-    // Drop sender to trigger EOF — runtime will drain spawned tasks before exiting.
-    drop(inbound_tx);
-
-    let cancel = CancellationToken::new();
-    tokio::time::timeout(Duration::from_secs(5), Arc::new(runtime).run(cancel))
-        .await
-        .expect("runtime should exit within timeout")
-        .unwrap();
-
-    let mut events = Vec::new();
-    while let Ok(event) = outbound_rx.try_recv() {
-        events.push(event);
-    }
-    events
 }
 
 fn stream_chunk_text(event: &OutboundEvent) -> Option<&str> {
@@ -682,7 +644,7 @@ async fn test_streaming_fallback_on_stream_setup_failure() {
         KnowledgeConfig::default(),
         RuntimeConfig {
             default_provider: "test-fallback-provider".into(),
-            ..default_config()
+            ..stream_config()
         },
         default_tools_config(),
         BudgetConfig::default(),
@@ -720,7 +682,7 @@ async fn test_non_streaming_channel_uses_non_streaming_path() {
         KnowledgeConfig::default(),
         RuntimeConfig {
             default_provider: "test-fallback-provider".into(),
-            ..default_config()
+            ..stream_config()
         },
         default_tools_config(),
         BudgetConfig::default(),
@@ -811,7 +773,7 @@ async fn test_streaming_conversation_persisted() {
         Arc::new(memory.clone()),
         None,
         KnowledgeConfig::default(),
-        default_config(),
+        stream_config(),
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
@@ -971,7 +933,7 @@ async fn test_streaming_max_tool_rounds_exceeded() {
         KnowledgeConfig::default(),
         RuntimeConfig {
             max_tool_rounds: 1,
-            ..default_config()
+            ..stream_config()
         },
         default_tools_config(),
         BudgetConfig {
@@ -1022,7 +984,7 @@ async fn test_streaming_stop_sequence() {
         Arc::new(memory.clone()),
         None,
         KnowledgeConfig::default(),
-        default_config(),
+        stream_config(),
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours
@@ -1115,7 +1077,7 @@ async fn test_non_streaming_provider_uses_complete_path() {
         KnowledgeConfig::default(),
         RuntimeConfig {
             default_provider: "no-stream-provider".into(),
-            ..default_config()
+            ..stream_config()
         },
         default_tools_config(),
         BudgetConfig::default(),
@@ -1161,7 +1123,7 @@ async fn test_streaming_empty_done() {
         Arc::new(memory.clone()),
         None,
         KnowledgeConfig::default(),
-        default_config(),
+        stream_config(),
         default_tools_config(),
         BudgetConfig::default(),
         24, // default_session_ttl_hours

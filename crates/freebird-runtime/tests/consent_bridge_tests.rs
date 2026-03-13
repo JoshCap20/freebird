@@ -26,7 +26,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 
@@ -35,18 +34,14 @@ use freebird_runtime::agent::AgentRuntime;
 use freebird_runtime::tool_executor::ToolExecutor;
 use freebird_security::approval::ApprovalGate;
 use freebird_traits::channel::{InboundEvent, OutboundEvent};
-use freebird_traits::id::ModelId;
-use freebird_traits::provider::{
-    CompletionResponse, ContentBlock, Message, Role, StopReason, TokenUsage,
-};
 use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
     ToolOutput,
 };
 use freebird_types::config::{BudgetConfig, InjectionConfig, KnowledgeConfig};
 use helpers::{
-    MockChannel, QueuedProvider, ResponseFactory, default_config, default_tools_config,
-    make_registry, message_text, without_status_events,
+    MockChannel, QueuedProvider, default_config, default_tools_config, make_registry, message_text,
+    text_response, tool_use_response, without_status_events,
 };
 
 // QueuedProvider, ArcProvider, ResponseFactory imported from helpers
@@ -104,47 +99,8 @@ impl Tool for MockTool {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Response builders (approval-specific response factories)
-// ---------------------------------------------------------------------------
-
-fn text_response(text: &str) -> ResponseFactory {
-    let text = text.to_owned();
-    Box::new(move || {
-        Ok(CompletionResponse {
-            message: Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::Text { text: text.clone() }],
-                timestamp: Utc::now(),
-            },
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage::default(),
-            model: ModelId::from("test-model"),
-        })
-    })
-}
-
-fn tool_use_response(tool_name: &str, input: serde_json::Value) -> ResponseFactory {
-    let tool_name = tool_name.to_owned();
-    Box::new(move || {
-        Ok(CompletionResponse {
-            message: Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "tool-call-1".into(),
-                    name: tool_name.clone(),
-                    input: input.clone(),
-                }],
-                timestamp: Utc::now(),
-            },
-            stop_reason: StopReason::ToolUse,
-            usage: TokenUsage::default(),
-            model: ModelId::from("test-model"),
-        })
-    })
-}
-
-// default_config, default_tools_config, make_registry imported from helpers
+// text_response, tool_use_response, default_config, default_tools_config,
+// make_registry imported from helpers
 
 // ===========================================================================
 // Tests

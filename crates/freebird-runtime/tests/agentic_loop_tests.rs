@@ -21,7 +21,6 @@ use async_trait::async_trait;
 use chrono::Utc;
 use futures::Stream;
 use tokio::sync::Mutex as TokioMutex;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use freebird_memory::in_memory::InMemoryMemory;
@@ -29,7 +28,7 @@ use freebird_runtime::agent::AgentRuntime;
 use freebird_runtime::registry::ProviderRegistry;
 use freebird_runtime::tool_executor::ToolExecutor;
 use freebird_security::capability::CapabilityGrant;
-use freebird_traits::channel::{InboundEvent, OutboundEvent};
+use freebird_traits::channel::InboundEvent;
 use freebird_traits::id::{ModelId, ProviderId, SessionId};
 use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary, Turn};
 use freebird_traits::provider::{
@@ -47,7 +46,8 @@ use freebird_types::config::{
 
 use helpers::{
     MockChannel, QueuedProvider, ResponseFactory, default_config, default_tools_config, error_text,
-    make_registry, make_tool_executor, message_text, without_status_events,
+    make_registry, make_tool_executor, max_tokens_response, message_text, send_message_and_collect,
+    stop_sequence_response, text_response, tool_use_response, without_status_events,
 };
 
 // QueuedProvider, ArcProvider, ResponseFactory imported from helpers
@@ -253,76 +253,9 @@ impl Memory for FailingMemory {
 }
 
 // ---------------------------------------------------------------------------
-// Response builders
+// Response builders (text_response, tool_use_response, max_tokens_response,
+// stop_sequence_response imported from helpers)
 // ---------------------------------------------------------------------------
-
-fn text_response(text: &str) -> ResponseFactory {
-    let text = text.to_owned();
-    Box::new(move || {
-        Ok(CompletionResponse {
-            message: Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::Text { text: text.clone() }],
-                timestamp: Utc::now(),
-            },
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage::default(),
-            model: ModelId::from("test-model"),
-        })
-    })
-}
-
-fn max_tokens_response(text: &str) -> ResponseFactory {
-    let text = text.to_owned();
-    Box::new(move || {
-        Ok(CompletionResponse {
-            message: Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::Text { text: text.clone() }],
-                timestamp: Utc::now(),
-            },
-            stop_reason: StopReason::MaxTokens,
-            usage: TokenUsage::default(),
-            model: ModelId::from("test-model"),
-        })
-    })
-}
-
-fn stop_sequence_response(text: &str) -> ResponseFactory {
-    let text = text.to_owned();
-    Box::new(move || {
-        Ok(CompletionResponse {
-            message: Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::Text { text: text.clone() }],
-                timestamp: Utc::now(),
-            },
-            stop_reason: StopReason::StopSequence,
-            usage: TokenUsage::default(),
-            model: ModelId::from("test-model"),
-        })
-    })
-}
-
-fn tool_use_response(tool_name: &str, input: serde_json::Value) -> ResponseFactory {
-    let tool_name = tool_name.to_owned();
-    Box::new(move || {
-        Ok(CompletionResponse {
-            message: Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "tool-call-1".into(),
-                    name: tool_name.clone(),
-                    input: input.clone(),
-                }],
-                timestamp: Utc::now(),
-            },
-            stop_reason: StopReason::ToolUse,
-            usage: TokenUsage::default(),
-            model: ModelId::from("test-model"),
-        })
-    })
-}
 
 fn multi_tool_use_response(tools: Vec<(&str, serde_json::Value)>) -> ResponseFactory {
     let tools: Vec<(String, serde_json::Value)> =
@@ -402,37 +335,6 @@ fn make_test_runtime_with_sinks(
         Some(event_sink),
         Some(audit_sink),
     )
-}
-
-/// Send a message then quit, run the runtime, and collect all outbound events.
-async fn send_message_and_collect(
-    inbound_tx: mpsc::Sender<InboundEvent>,
-    mut outbound_rx: mpsc::Receiver<OutboundEvent>,
-    runtime: AgentRuntime,
-    text: &str,
-) -> Vec<OutboundEvent> {
-    inbound_tx
-        .send(InboundEvent::Message {
-            raw_text: text.into(),
-            sender_id: "alice".into(),
-            attachments: vec![],
-        })
-        .await
-        .unwrap();
-    // Drop sender to trigger EOF — runtime will drain spawned tasks before exiting.
-    drop(inbound_tx);
-
-    let cancel = CancellationToken::new();
-    tokio::time::timeout(Duration::from_secs(5), Arc::new(runtime).run(cancel))
-        .await
-        .expect("runtime should exit within timeout")
-        .unwrap();
-
-    let mut events = Vec::new();
-    while let Ok(event) = outbound_rx.try_recv() {
-        events.push(event);
-    }
-    events
 }
 
 // ===========================================================================

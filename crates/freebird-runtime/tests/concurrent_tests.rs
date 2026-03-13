@@ -30,11 +30,11 @@ use freebird_traits::provider::{
     CompletionRequest, CompletionResponse, ContentBlock, Message, Provider, ProviderError,
     ProviderFeature, ProviderInfo, Role, StopReason, StreamEvent, TokenUsage,
 };
-use freebird_types::config::{BudgetConfig, ContextConfig, KnowledgeConfig, RuntimeConfig};
+use freebird_types::config::{BudgetConfig, KnowledgeConfig, RuntimeConfig};
 
 use helpers::{
-    MockChannel, QueuedProvider, ResponseFactory, default_tools_config, error_text, make_registry,
-    make_tool_executor, message_text, without_status_events,
+    MockChannel, QueuedProvider, ResponseFactory, default_config, default_tools_config, error_text,
+    make_registry, make_tool_executor, message_text, without_status_events,
 };
 
 // ---------------------------------------------------------------------------
@@ -60,17 +60,9 @@ fn slow_text_response(text: &str, delay: Duration) -> ResponseFactory {
 
 fn config_with(max_concurrent: usize, drain_secs: u64) -> RuntimeConfig {
     RuntimeConfig {
-        default_model: ModelId::from("test-model"),
-        default_provider: ProviderId::from("test-provider"),
-        system_prompt: None,
-        max_output_tokens: 1024,
-        max_tool_rounds: 10,
-        temperature: None,
-        max_turns_per_session: 10,
         drain_timeout_secs: drain_secs,
         max_concurrent_tasks: max_concurrent,
-        session: freebird_types::config::SessionConfig::default(),
-        context: ContextConfig::default(),
+        ..default_config()
     }
 }
 

@@ -16,6 +16,8 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+use chrono::Utc;
+use freebird_runtime::agent::AgentRuntime;
 use freebird_runtime::registry::ProviderRegistry;
 use freebird_runtime::tool_executor::ToolExecutor;
 use freebird_security::capability::RevocationList;
@@ -30,11 +32,12 @@ use freebird_traits::knowledge::{
 };
 use freebird_traits::memory::{Conversation, Memory, MemoryError, SessionSummary};
 use freebird_traits::provider::{
-    CompletionRequest, CompletionResponse, Provider, ProviderError, ProviderFeature, ProviderInfo,
-    StreamEvent,
+    CompletionRequest, CompletionResponse, ContentBlock, Message, Provider, ProviderError,
+    ProviderFeature, ProviderInfo, Role, StopReason, StreamEvent, TokenUsage,
 };
 use freebird_traits::tool::Tool;
 use freebird_types::config::{ContextConfig, EditConfig, RuntimeConfig, ToolsConfig};
+use tokio_util::sync::CancellationToken;
 
 // ---------------------------------------------------------------------------
 // MockChannel
@@ -446,4 +449,111 @@ pub fn without_status_events(events: Vec<OutboundEvent>) -> Vec<OutboundEvent> {
             )
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Response factories — shared across agentic_loop_tests, consent_bridge_tests
+// ---------------------------------------------------------------------------
+
+pub fn text_response(text: &str) -> ResponseFactory {
+    let text = text.to_owned();
+    Box::new(move || {
+        Ok(CompletionResponse {
+            message: Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text { text: text.clone() }],
+                timestamp: Utc::now(),
+            },
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+            model: ModelId::from("test-model"),
+        })
+    })
+}
+
+pub fn tool_use_response(tool_name: &str, input: serde_json::Value) -> ResponseFactory {
+    let tool_name = tool_name.to_owned();
+    Box::new(move || {
+        Ok(CompletionResponse {
+            message: Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "tool-call-1".into(),
+                    name: tool_name.clone(),
+                    input: input.clone(),
+                }],
+                timestamp: Utc::now(),
+            },
+            stop_reason: StopReason::ToolUse,
+            usage: TokenUsage::default(),
+            model: ModelId::from("test-model"),
+        })
+    })
+}
+
+pub fn max_tokens_response(text: &str) -> ResponseFactory {
+    let text = text.to_owned();
+    Box::new(move || {
+        Ok(CompletionResponse {
+            message: Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text { text: text.clone() }],
+                timestamp: Utc::now(),
+            },
+            stop_reason: StopReason::MaxTokens,
+            usage: TokenUsage::default(),
+            model: ModelId::from("test-model"),
+        })
+    })
+}
+
+pub fn stop_sequence_response(text: &str) -> ResponseFactory {
+    let text = text.to_owned();
+    Box::new(move || {
+        Ok(CompletionResponse {
+            message: Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text { text: text.clone() }],
+                timestamp: Utc::now(),
+            },
+            stop_reason: StopReason::StopSequence,
+            usage: TokenUsage::default(),
+            model: ModelId::from("test-model"),
+        })
+    })
+}
+
+// ---------------------------------------------------------------------------
+// send_message_and_collect — shared across agentic_loop_tests, stream_tests
+// ---------------------------------------------------------------------------
+
+/// Send a message then quit, run the runtime, and collect all outbound events.
+pub async fn send_message_and_collect(
+    inbound_tx: mpsc::Sender<InboundEvent>,
+    mut outbound_rx: mpsc::Receiver<OutboundEvent>,
+    runtime: AgentRuntime,
+    text: &str,
+) -> Vec<OutboundEvent> {
+    inbound_tx
+        .send(InboundEvent::Message {
+            raw_text: text.into(),
+            sender_id: "alice".into(),
+            attachments: vec![],
+        })
+        .await
+        .unwrap();
+    // Drop sender to trigger EOF — runtime will drain spawned tasks before exiting.
+    drop(inbound_tx);
+
+    let cancel = CancellationToken::new();
+    tokio::time::timeout(Duration::from_secs(5), Arc::new(runtime).run(cancel))
+        .await
+        .expect("runtime should exit within timeout")
+        .unwrap();
+
+    let mut events = Vec::new();
+    while let Ok(event) = outbound_rx.try_recv() {
+        events.push(event);
+    }
+    events
 }
