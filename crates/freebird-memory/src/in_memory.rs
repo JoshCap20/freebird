@@ -22,6 +22,12 @@ pub struct InMemoryMemory {
     store: RwLock<HashMap<SessionId, Conversation>>,
 }
 
+impl std::fmt::Debug for InMemoryMemory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InMemoryMemory").finish_non_exhaustive()
+    }
+}
+
 impl InMemoryMemory {
     /// Create an empty in-memory store.
     #[must_use]

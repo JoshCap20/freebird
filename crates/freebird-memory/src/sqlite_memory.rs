@@ -27,6 +27,12 @@ pub struct SqliteMemory {
     verify_on_load: bool,
 }
 
+impl std::fmt::Debug for SqliteMemory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteMemory").finish_non_exhaustive()
+    }
+}
+
 impl SqliteMemory {
     /// Create a new [`SqliteMemory`] sharing the given database connection.
     ///

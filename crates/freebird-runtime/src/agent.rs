@@ -1312,8 +1312,8 @@ impl AgentRuntime {
                     let invocations_before = current_turn.tool_invocations.len();
                     let messages_before = current_turn.assistant_messages.len();
 
-                    self.handle_tool_use_round(
-                        &response,
+                    self.execute_tool_calls(
+                        &response.message,
                         &mut messages,
                         &mut current_turn,
                         grant,
@@ -1468,34 +1468,10 @@ impl AgentRuntime {
         prompt
     }
 
-    /// Execute tool calls from a `ToolUse` response and append results to the message list.
-    #[allow(clippy::too_many_arguments)]
-    async fn handle_tool_use_round(
-        &self,
-        response: &CompletionResponse,
-        messages: &mut Vec<Message>,
-        current_turn: &mut Turn,
-        grant: &CapabilityGrant,
-        session_id: &SessionId,
-        sender_id: &str,
-        outbound: &mpsc::Sender<OutboundEvent>,
-    ) {
-        self.execute_tool_calls(
-            &response.message,
-            messages,
-            current_turn,
-            grant,
-            session_id,
-            sender_id,
-            outbound,
-        )
-        .await;
-    }
-
     /// Extract tool-use blocks from an assistant message, execute them, scan
     /// outputs for injection, and append tool results to the message list.
     ///
-    /// Shared between the non-streaming (`handle_tool_use_round`) and streaming
+    /// Shared between the non-streaming (`run_agentic_loop`) and streaming
     /// (`run_agentic_loop_streaming`) paths to avoid duplicating security-critical
     /// tool execution code.
     #[allow(clippy::too_many_arguments)]

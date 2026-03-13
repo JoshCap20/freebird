@@ -252,6 +252,17 @@ pub struct AnthropicProvider {
     info: ProviderInfo,
 }
 
+impl std::fmt::Debug for AnthropicProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnthropicProvider")
+            .field("base_url", &self.base_url)
+            .field("default_model", &self.default_model)
+            .field("api_key", &"[REDACTED]")
+            .field("info", &self.info)
+            .finish_non_exhaustive()
+    }
+}
+
 impl AnthropicProvider {
     /// Construct a new Anthropic provider.
     ///

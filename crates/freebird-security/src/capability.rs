@@ -267,6 +267,15 @@ pub struct RevocationList {
     revoked_sessions: std::sync::RwLock<BTreeSet<String>>,
 }
 
+impl std::fmt::Debug for RevocationList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let count = self.revoked_sessions.read().map(|s| s.len()).unwrap_or(0);
+        f.debug_struct("RevocationList")
+            .field("revoked_count", &count)
+            .finish()
+    }
+}
+
 impl RevocationList {
     /// Create an empty revocation list.
     #[must_use]

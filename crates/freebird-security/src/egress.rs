@@ -73,6 +73,7 @@ pub fn is_private_ip(ip: &IpAddr) -> bool {
 ///
 /// Also provides DNS rebinding prevention via [`check_resolved_ip`](EgressPolicy::check_resolved_ip),
 /// which rejects resolved IP addresses in private/loopback/link-local ranges.
+#[derive(Debug)]
 pub struct EgressPolicy {
     allowed_hosts: BTreeSet<String>,
     allowed_ports: BTreeSet<u16>,
@@ -232,6 +233,15 @@ pub struct EgressRateLimiter {
     limit: u32,
     /// Atomic cursor for the next slot in the circular buffer.
     cursor: AtomicU64,
+}
+
+impl std::fmt::Debug for EgressRateLimiter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EgressRateLimiter")
+            .field("limit", &self.limit)
+            .field("cursor", &self.cursor.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
 }
 
 impl EgressRateLimiter {

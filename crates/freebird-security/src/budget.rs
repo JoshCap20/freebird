@@ -54,6 +54,34 @@ pub struct TokenBudget {
     cost_microdollars_used: AtomicU64,
 }
 
+impl std::fmt::Debug for TokenBudget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenBudget")
+            .field(
+                "max_tokens_per_session",
+                &self.max_tokens_per_session.load(Ordering::Relaxed),
+            )
+            .field(
+                "max_tokens_per_request",
+                &self.max_tokens_per_request.load(Ordering::Relaxed),
+            )
+            .field(
+                "max_tool_rounds_per_turn",
+                &self.max_tool_rounds_per_turn.load(Ordering::Relaxed),
+            )
+            .field(
+                "max_cost_microdollars",
+                &self.max_cost_microdollars.load(Ordering::Relaxed),
+            )
+            .field("tokens_used", &self.tokens_used.load(Ordering::Relaxed))
+            .field(
+                "cost_microdollars_used",
+                &self.cost_microdollars_used.load(Ordering::Relaxed),
+            )
+            .finish()
+    }
+}
+
 impl TokenBudget {
     /// Create a new budget from typed configuration.
     #[must_use]
