@@ -68,6 +68,9 @@ url = "2"
 # CLI
 clap = { version = "4", features = ["derive"] }
 
+# Allocator
+mimalloc = { version = "0.1", default-features = false }
+
 # Terminal UI
 crossterm = { version = "0.28", features = ["event-stream"] }
 unicode-width = "0.2"
