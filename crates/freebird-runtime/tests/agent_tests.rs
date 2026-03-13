@@ -54,6 +54,7 @@ fn make_runtime(channel: MockChannel) -> AgentRuntime {
             allowed_shell_commands: vec![],
             max_shell_output_bytes: 1_048_576,
             edit: EditConfig::default(),
+            git_timeout_secs: 5,
         },
         BudgetConfig::default(),
         24, // default_session_ttl_hours

@@ -28,6 +28,7 @@ use freebird_types::config::AppConfig;
 /// - Repo map tool (`repo_map`) — AST-based codebase overview
 /// - Cargo verify tool (`cargo_verify`) — Rust build/test/lint/fmt pipeline
 /// - Session recall tools (`list_sessions`, `search_sessions`, `recall_session`)
+/// - Workspace status tool (`workspace_status`) — on-demand git status
 pub fn build_tool_registry(config: &AppConfig) -> Result<ToolRegistry> {
     let mut registry = ToolRegistry::new();
 
@@ -84,6 +85,11 @@ pub fn build_tool_registry(config: &AppConfig) -> Result<ToolRegistry> {
 
     // Session recall tools — list, search, and replay past conversations.
     registry.register_all(freebird_tools::session::session_tools());
+
+    // Workspace status tool — on-demand git workspace inspection.
+    registry.register_all(freebird_tools::workspace::workspace_tools(
+        config.tools.git_timeout_secs,
+    ));
 
     tracing::info!(
         tool_count = registry.tool_count(),
@@ -237,8 +243,12 @@ format = "pretty"
             "missing rollback_to_checkpoint"
         );
         assert!(
-            registry.tool_count() >= 22,
-            "expected at least 22 tools, got {}",
+            registry.get("workspace_status").is_some(),
+            "missing workspace_status"
+        );
+        assert!(
+            registry.tool_count() >= 23,
+            "expected at least 23 tools, got {}",
             registry.tool_count()
         );
     }

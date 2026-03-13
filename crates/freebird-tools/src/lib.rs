@@ -21,3 +21,4 @@ pub mod shell;
 #[cfg(test)]
 pub mod test_utils;
 pub mod viewer;
+pub mod workspace;

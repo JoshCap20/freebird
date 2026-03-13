@@ -190,6 +190,14 @@ pub struct ToolsConfig {
     /// Edit tool configuration (diff preview, context lines).
     #[serde(default)]
     pub edit: EditConfig,
+    /// Timeout in seconds for git subprocess calls used by `workspace_status`
+    /// tool. Default: 5.
+    #[serde(default = "default_git_timeout_secs")]
+    pub git_timeout_secs: u64,
+}
+
+const fn default_git_timeout_secs() -> u64 {
+    5
 }
 
 /// Configuration for the search/replace edit tool.

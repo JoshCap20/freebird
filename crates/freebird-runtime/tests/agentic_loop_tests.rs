@@ -689,6 +689,7 @@ async fn test_tool_use_timeout() {
         allowed_shell_commands: vec![],
         max_shell_output_bytes: 1_048_576,
         edit: EditConfig::default(),
+        git_timeout_secs: 5,
     };
 
     // Use a 1-second timeout executor to match tools_config
