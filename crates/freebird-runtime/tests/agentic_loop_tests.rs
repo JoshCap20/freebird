@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use freebird_memory::in_memory::InMemoryMemory;
 use freebird_runtime::agent::AgentRuntime;
 use freebird_runtime::registry::ProviderRegistry;
-use freebird_runtime::tool_executor::ToolExecutor;
+use freebird_runtime::tool_executor::{ToolExecutor, ToolExecutorBuilder};
 use freebird_security::capability::CapabilityGrant;
 use freebird_traits::channel::InboundEvent;
 use freebird_traits::id::{ModelId, ProviderId, SessionId};
@@ -40,8 +40,8 @@ use freebird_traits::tool::{
     ToolOutput,
 };
 use freebird_types::config::{
-    BudgetConfig, ContextConfig, EditConfig, InjectionConfig, KnowledgeConfig, RuntimeConfig,
-    SummarizationConfig, ToolsConfig,
+    BudgetConfig, ContextConfig, EditConfig, KnowledgeConfig, RuntimeConfig, SummarizationConfig,
+    ToolsConfig,
 };
 
 use helpers::{
@@ -593,22 +593,18 @@ async fn test_tool_use_timeout() {
     };
 
     // Use a 1-second timeout executor to match tools_config
-    let short_timeout_executor = ToolExecutor::new(
-        vec![Box::new(slow_tool)],
-        Duration::from_secs(1),
-        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
-        vec![],
-        None,
-        Some(Arc::new(helpers::NoopKnowledgeStore)
-            as Arc<dyn freebird_traits::knowledge::KnowledgeStore>),
-        Some(Arc::new(helpers::NoopMemory) as Arc<dyn freebird_traits::memory::Memory>),
-        None,
-        InjectionConfig::default(),
-        Some(Arc::new(
-            freebird_security::capability::RevocationList::new(),
-        )),
-    )
-    .unwrap();
+    let short_timeout_executor =
+        ToolExecutorBuilder::new(vec![Box::new(slow_tool)], Duration::from_secs(1))
+            .audit_sink(Arc::new(helpers::MockAuditSink::new())
+                as Arc<dyn freebird_traits::audit::AuditSink>)
+            .knowledge_store(Arc::new(helpers::NoopKnowledgeStore)
+                as Arc<dyn freebird_traits::knowledge::KnowledgeStore>)
+            .memory(Arc::new(helpers::NoopMemory) as Arc<dyn freebird_traits::memory::Memory>)
+            .revocation_list(Arc::new(
+                freebird_security::capability::RevocationList::new(),
+            ))
+            .build()
+            .unwrap();
 
     let runtime = AgentRuntime::new(
         make_registry(provider.clone()),

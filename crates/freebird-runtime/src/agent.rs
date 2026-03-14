@@ -34,7 +34,7 @@ use freebird_types::config::{
 };
 // Re-exported for test module via `use super::*`.
 #[cfg(test)]
-use freebird_types::config::{ContextConfig, InjectionConfig};
+use freebird_types::config::ContextConfig;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -112,13 +112,189 @@ pub struct AgentRuntime {
     sessions: SessionManager,
 }
 
+/// Builder for constructing an [`AgentRuntime`] with named parameters.
+///
+/// Prevents argument transposition bugs that arise from the many
+/// `Option<Arc<dyn Trait>>` parameters that `AgentRuntime` requires.
+///
+/// # Required fields
+///
+/// - `provider_registry`, `channel`, `tool_executor`, `config` — set via [`new()`](Self::new)
+/// - `memory` — set via [`memory()`](Self::memory)
+pub struct AgentRuntimeBuilder {
+    provider_registry: ProviderRegistry,
+    channel: Box<dyn Channel>,
+    tool_executor: crate::tool_executor::ToolExecutor,
+    config: RuntimeConfig,
+    approval_rx: Option<tokio::sync::mpsc::Receiver<ApprovalRequest>>,
+    memory: Option<Arc<dyn Memory>>,
+    knowledge_store: Option<Arc<dyn KnowledgeStore>>,
+    knowledge_config: KnowledgeConfig,
+    tools_config: ToolsConfig,
+    budget_config: BudgetConfig,
+    default_session_ttl_hours: u64,
+    event_sink: Option<Arc<dyn EventSink>>,
+    audit_sink: Option<Arc<dyn AuditSink>>,
+    summary_store: Option<Arc<dyn SummarySink>>,
+    summarization_config: SummarizationConfig,
+}
+
+#[expect(
+    clippy::missing_const_for_fn,
+    reason = "builder methods take trait objects"
+)]
+impl AgentRuntimeBuilder {
+    /// Start building with the four required dependencies.
+    #[must_use]
+    pub fn new(
+        provider_registry: ProviderRegistry,
+        channel: Box<dyn Channel>,
+        tool_executor: crate::tool_executor::ToolExecutor,
+        config: RuntimeConfig,
+    ) -> Self {
+        Self {
+            provider_registry,
+            channel,
+            tool_executor,
+            config,
+            approval_rx: None,
+            memory: None,
+            knowledge_store: None,
+            knowledge_config: KnowledgeConfig::default(),
+            tools_config: ToolsConfig::default(),
+            budget_config: BudgetConfig::default(),
+            default_session_ttl_hours: 24,
+            event_sink: None,
+            audit_sink: None,
+            summary_store: None,
+            summarization_config: SummarizationConfig::default(),
+        }
+    }
+
+    /// Set the approval request receiver from the `ApprovalGate`.
+    #[must_use]
+    pub fn approval_rx(mut self, rx: tokio::sync::mpsc::Receiver<ApprovalRequest>) -> Self {
+        self.approval_rx = Some(rx);
+        self
+    }
+
+    /// **Required.** Set the memory backend.
+    #[must_use]
+    pub fn memory(mut self, memory: Arc<dyn Memory>) -> Self {
+        self.memory = Some(memory);
+        self
+    }
+
+    /// Set the knowledge store for retrieval-augmented generation.
+    #[must_use]
+    pub fn knowledge_store(mut self, store: Arc<dyn KnowledgeStore>) -> Self {
+        self.knowledge_store = Some(store);
+        self
+    }
+
+    /// Set the knowledge retrieval configuration.
+    #[must_use]
+    pub fn knowledge_config(mut self, config: KnowledgeConfig) -> Self {
+        self.knowledge_config = config;
+        self
+    }
+
+    /// Set the tools configuration (sandbox root, timeouts, allowed dirs).
+    #[must_use]
+    pub fn tools_config(mut self, config: ToolsConfig) -> Self {
+        self.tools_config = config;
+        self
+    }
+
+    /// Set the token budget configuration (ASI08).
+    #[must_use]
+    pub fn budget_config(mut self, config: BudgetConfig) -> Self {
+        self.budget_config = config;
+        self
+    }
+
+    /// Set the default session TTL in hours.
+    #[must_use]
+    pub fn default_session_ttl_hours(mut self, hours: u64) -> Self {
+        self.default_session_ttl_hours = hours;
+        self
+    }
+
+    /// Set the event sink for conversation event persistence.
+    #[must_use]
+    pub fn event_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
+        self.event_sink = Some(sink);
+        self
+    }
+
+    /// Set the audit sink for security audit logging.
+    #[must_use]
+    pub fn audit_sink(mut self, sink: Arc<dyn AuditSink>) -> Self {
+        self.audit_sink = Some(sink);
+        self
+    }
+
+    /// Set the summary store for conversation summarization.
+    #[must_use]
+    pub fn summary_store(mut self, store: Arc<dyn SummarySink>) -> Self {
+        self.summary_store = Some(store);
+        self
+    }
+
+    /// Set the summarization configuration.
+    #[must_use]
+    pub fn summarization_config(mut self, config: SummarizationConfig) -> Self {
+        self.summarization_config = config;
+        self
+    }
+
+    /// Consume the builder and construct an [`AgentRuntime`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `memory` was not set — it is a required field.
+    #[must_use]
+    #[expect(
+        clippy::expect_used,
+        reason = "memory is a required field — panicking here is the intentional API contract"
+    )]
+    pub fn build(self) -> AgentRuntime {
+        let memory = self
+            .memory
+            .expect("AgentRuntimeBuilder: `memory` is required — call .memory() before .build()");
+        AgentRuntime::new(
+            self.provider_registry,
+            self.channel,
+            self.tool_executor,
+            self.approval_rx,
+            memory,
+            self.knowledge_store,
+            self.knowledge_config,
+            self.config,
+            self.tools_config,
+            self.budget_config,
+            self.default_session_ttl_hours,
+            self.event_sink,
+            self.audit_sink,
+            self.summary_store,
+            self.summarization_config,
+        )
+    }
+}
+
 impl AgentRuntime {
     /// Build a new runtime with all dependencies.
     ///
     /// The `SessionManager` is created internally — it's an implementation
     /// detail, not an external dependency.
+    ///
+    /// Prefer [`AgentRuntimeBuilder`] for new call sites — the positional
+    /// parameter list here is fragile and easy to transpose.
     #[must_use]
-    #[expect(clippy::too_many_arguments, reason = "composition root wiring")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "prefer AgentRuntimeBuilder for new call sites"
+    )]
     pub fn new(
         provider_registry: ProviderRegistry,
         channel: Box<dyn Channel>,
@@ -2360,18 +2536,11 @@ mod tests {
         AgentRuntime::new(
             ProviderRegistry::new(),
             Box::new(NullChannel),
-            crate::tool_executor::ToolExecutor::new(
+            crate::tool_executor::ToolExecutorBuilder::new(
                 vec![],
                 std::time::Duration::from_secs(30),
-                None,
-                vec![],
-                None,
-                None,
-                None,
-                None,
-                InjectionConfig::default(),
-                None,
             )
+            .build()
             .unwrap(),
             None,
             Arc::new(NullMemory),

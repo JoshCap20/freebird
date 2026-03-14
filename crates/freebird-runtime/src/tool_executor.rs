@@ -92,17 +92,139 @@ impl std::fmt::Debug for ToolExecutor {
     }
 }
 
+/// Builder for constructing a [`ToolExecutor`] without positional parameter
+/// transposition risk.
+///
+/// Required fields: `tools` and `default_timeout`. All other fields default
+/// to `None` / empty / `InjectionConfig::default()`.
+///
+/// # Example
+///
+/// ```ignore
+/// let executor = ToolExecutorBuilder::new(tools, timeout)
+///     .audit_sink(sink)
+///     .approval_gate(gate)
+///     .build()?;
+/// ```
+pub struct ToolExecutorBuilder {
+    tools: Vec<Box<dyn Tool>>,
+    default_timeout: Duration,
+    audit_sink: Option<Arc<dyn AuditSink>>,
+    allowed_directories: Vec<PathBuf>,
+    approval_gate: Option<ApprovalGate>,
+    knowledge_store: Option<Arc<dyn KnowledgeStore>>,
+    memory: Option<Arc<dyn freebird_traits::memory::Memory>>,
+    secret_guard: Option<SecretGuard>,
+    injection_config: InjectionConfig,
+    revocation_list: Option<Arc<RevocationList>>,
+}
+
+impl ToolExecutorBuilder {
+    /// Start building a `ToolExecutor` with the two required parameters.
+    #[must_use]
+    pub fn new(tools: Vec<Box<dyn Tool>>, default_timeout: Duration) -> Self {
+        Self {
+            tools,
+            default_timeout,
+            audit_sink: None,
+            allowed_directories: Vec::new(),
+            approval_gate: None,
+            knowledge_store: None,
+            memory: None,
+            secret_guard: None,
+            injection_config: InjectionConfig::default(),
+            revocation_list: None,
+        }
+    }
+
+    /// Set the audit sink for security event logging.
+    #[must_use]
+    pub fn audit_sink(mut self, sink: Arc<dyn AuditSink>) -> Self {
+        self.audit_sink = Some(sink);
+        self
+    }
+
+    /// Set the directories the agent is allowed to access.
+    #[must_use]
+    pub fn allowed_directories(mut self, dirs: Vec<PathBuf>) -> Self {
+        self.allowed_directories = dirs;
+        self
+    }
+
+    /// Set the approval gate for consent-gated tool execution.
+    #[must_use]
+    pub fn approval_gate(mut self, gate: ApprovalGate) -> Self {
+        self.approval_gate = Some(gate);
+        self
+    }
+
+    /// Set the knowledge store for tool context.
+    #[must_use]
+    pub fn knowledge_store(mut self, store: Arc<dyn KnowledgeStore>) -> Self {
+        self.knowledge_store = Some(store);
+        self
+    }
+
+    /// Set the memory backend for tool context.
+    #[must_use]
+    pub fn memory(mut self, memory: Arc<dyn freebird_traits::memory::Memory>) -> Self {
+        self.memory = Some(memory);
+        self
+    }
+
+    /// Set the secret guard for sensitive input/output protection.
+    #[must_use]
+    pub fn secret_guard(mut self, guard: SecretGuard) -> Self {
+        self.secret_guard = Some(guard);
+        self
+    }
+
+    /// Set the injection response configuration.
+    #[must_use]
+    pub const fn injection_config(mut self, config: InjectionConfig) -> Self {
+        self.injection_config = config;
+        self
+    }
+
+    /// Set the capability revocation list.
+    #[must_use]
+    pub fn revocation_list(mut self, list: Arc<RevocationList>) -> Self {
+        self.revocation_list = Some(list);
+        self
+    }
+
+    /// Consume the builder and construct a [`ToolExecutor`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolExecutorError::DuplicateToolName`] if two or more tools
+    /// share the same name.
+    pub fn build(self) -> Result<ToolExecutor, ToolExecutorError> {
+        ToolExecutor::new(
+            self.tools,
+            self.default_timeout,
+            self.audit_sink,
+            self.allowed_directories,
+            self.approval_gate,
+            self.knowledge_store,
+            self.memory,
+            self.secret_guard,
+            self.injection_config,
+            self.revocation_list,
+        )
+    }
+}
+
 impl ToolExecutor {
-    /// Create a new executor from a list of tools, a default timeout,
-    /// and an optional audit logger.
+    /// Create a new executor. Prefer [`ToolExecutorBuilder`] at call sites.
     ///
     /// # Errors
     ///
     /// Returns [`ToolExecutorError::DuplicateToolName`] if two or more tools
     /// share the same name. Duplicate tool names are a configuration bug —
     /// fail loudly at startup rather than silently overwriting (CLAUDE.md §3.4).
-    #[expect(clippy::too_many_arguments, reason = "composition root wiring")]
-    pub fn new(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
         tools: Vec<Box<dyn Tool>>,
         default_timeout: Duration,
         audit_sink: Option<Arc<dyn AuditSink>>,

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use freebird_channels::tcp::TcpChannel;
-use freebird_runtime::agent::AgentRuntime;
+use freebird_runtime::agent::AgentRuntimeBuilder;
 use freebird_types::config::AppConfig;
 
 use crate::database::{DatabaseComponents, PassphraseStrategy};
@@ -182,19 +182,29 @@ impl FreebirdBuilder {
         let revocation_list = Arc::new(freebird_security::capability::RevocationList::new());
 
         // 11. TOOL EXECUTOR
-        let tool_executor = freebird_runtime::tool_executor::ToolExecutor::new(
+        let mut tool_executor_builder = freebird_runtime::tool_executor::ToolExecutorBuilder::new(
             tool_registry.into_tools(),
             Duration::from_secs(tools_config.default_timeout_secs),
-            audit_sink.clone(),
-            tools_config.allowed_directories.clone(),
-            Some(approval_gate),
-            knowledge_store,
-            Some(Arc::clone(&memory)),
-            secret_guard,
-            config.security.injection.clone(),
-            Some(Arc::clone(&revocation_list)),
         )
-        .map_err(|e| CoreError::ToolRegistry(e.to_string()))?;
+        .allowed_directories(tools_config.allowed_directories.clone())
+        .approval_gate(approval_gate)
+        .memory(Arc::clone(&memory))
+        .injection_config(config.security.injection.clone())
+        .revocation_list(Arc::clone(&revocation_list));
+
+        if let Some(sink) = audit_sink.clone() {
+            tool_executor_builder = tool_executor_builder.audit_sink(sink);
+        }
+        if let Some(ks) = knowledge_store {
+            tool_executor_builder = tool_executor_builder.knowledge_store(ks);
+        }
+        if let Some(sg) = secret_guard {
+            tool_executor_builder = tool_executor_builder.secret_guard(sg);
+        }
+
+        let tool_executor = tool_executor_builder
+            .build()
+            .map_err(|e| CoreError::ToolRegistry(e.to_string()))?;
 
         // 12. SUMMARY STORE (cast to trait object for runtime DAG compliance)
         let summary_store: Option<Arc<dyn freebird_traits::summary::SummarySink>> = Some(Arc::new(
@@ -202,23 +212,30 @@ impl FreebirdBuilder {
         ));
 
         // 13. AGENT RUNTIME
-        let runtime = AgentRuntime::new(
-            registry,
-            channel,
-            tool_executor,
-            Some(approval_rx),
-            memory.clone(),
-            ks_for_runtime,
-            config.knowledge,
-            config.runtime,
-            tools_config,
-            config.security.budgets,
-            config.security.default_session_ttl_hours,
-            event_sink,
-            audit_sink.clone(),
-            summary_store,
-            config.summarization,
-        );
+        let mut runtime_builder =
+            AgentRuntimeBuilder::new(registry, channel, tool_executor, config.runtime)
+                .memory(memory.clone())
+                .approval_rx(approval_rx)
+                .knowledge_config(config.knowledge)
+                .tools_config(tools_config)
+                .budget_config(config.security.budgets)
+                .default_session_ttl_hours(config.security.default_session_ttl_hours)
+                .summarization_config(config.summarization);
+
+        if let Some(ks) = ks_for_runtime {
+            runtime_builder = runtime_builder.knowledge_store(ks);
+        }
+        if let Some(es) = event_sink {
+            runtime_builder = runtime_builder.event_sink(es);
+        }
+        if let Some(aus) = audit_sink.clone() {
+            runtime_builder = runtime_builder.audit_sink(aus);
+        }
+        if let Some(ss) = summary_store {
+            runtime_builder = runtime_builder.summary_store(ss);
+        }
+
+        let runtime = runtime_builder.build();
 
         Ok(FreebirdApp {
             runtime,

@@ -31,14 +31,14 @@ use tokio_util::sync::CancellationToken;
 
 use freebird_memory::in_memory::InMemoryMemory;
 use freebird_runtime::agent::AgentRuntime;
-use freebird_runtime::tool_executor::ToolExecutor;
+use freebird_runtime::tool_executor::ToolExecutorBuilder;
 use freebird_security::approval::ApprovalGate;
 use freebird_traits::channel::{InboundEvent, OutboundEvent};
 use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
     ToolOutput,
 };
-use freebird_types::config::{BudgetConfig, InjectionConfig, KnowledgeConfig, SummarizationConfig};
+use freebird_types::config::{BudgetConfig, KnowledgeConfig, SummarizationConfig};
 use helpers::{
     MockChannel, QueuedProvider, default_config, default_tools_config, make_registry, message_text,
     text_response, tool_use_response, without_status_events,
@@ -132,22 +132,19 @@ async fn test_consent_request_forwarded_to_channel() {
     // Create approval gate with High threshold
     let (gate, approval_rx) = ApprovalGate::new(RiskLevel::High, Duration::from_secs(5), 10);
 
-    let executor = ToolExecutor::new(
-        vec![Box::new(tool)],
-        Duration::from_secs(30),
-        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
-        vec![],
-        Some(gate),
-        Some(Arc::new(helpers::NoopKnowledgeStore)
-            as Arc<dyn freebird_traits::knowledge::KnowledgeStore>),
-        Some(Arc::new(helpers::NoopMemory) as Arc<dyn freebird_traits::memory::Memory>),
-        None,
-        InjectionConfig::default(),
-        Some(Arc::new(
+    let executor = ToolExecutorBuilder::new(vec![Box::new(tool)], Duration::from_secs(30))
+        .audit_sink(
+            Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>
+        )
+        .approval_gate(gate)
+        .knowledge_store(Arc::new(helpers::NoopKnowledgeStore)
+            as Arc<dyn freebird_traits::knowledge::KnowledgeStore>)
+        .memory(Arc::new(helpers::NoopMemory) as Arc<dyn freebird_traits::memory::Memory>)
+        .revocation_list(Arc::new(
             freebird_security::capability::RevocationList::new(),
-        )),
-    )
-    .expect("executor construction should succeed");
+        ))
+        .build()
+        .expect("executor construction should succeed");
 
     let runtime = AgentRuntime::new(
         make_registry(provider),
@@ -262,22 +259,19 @@ async fn test_consent_approved_executes_tool() {
 
     let (gate, approval_rx) = ApprovalGate::new(RiskLevel::High, Duration::from_secs(5), 10);
 
-    let executor = ToolExecutor::new(
-        vec![Box::new(tool)],
-        Duration::from_secs(30),
-        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
-        vec![],
-        Some(gate),
-        Some(Arc::new(helpers::NoopKnowledgeStore)
-            as Arc<dyn freebird_traits::knowledge::KnowledgeStore>),
-        Some(Arc::new(helpers::NoopMemory) as Arc<dyn freebird_traits::memory::Memory>),
-        None,
-        InjectionConfig::default(),
-        Some(Arc::new(
+    let executor = ToolExecutorBuilder::new(vec![Box::new(tool)], Duration::from_secs(30))
+        .audit_sink(
+            Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>
+        )
+        .approval_gate(gate)
+        .knowledge_store(Arc::new(helpers::NoopKnowledgeStore)
+            as Arc<dyn freebird_traits::knowledge::KnowledgeStore>)
+        .memory(Arc::new(helpers::NoopMemory) as Arc<dyn freebird_traits::memory::Memory>)
+        .revocation_list(Arc::new(
             freebird_security::capability::RevocationList::new(),
-        )),
-    )
-    .expect("executor construction should succeed");
+        ))
+        .build()
+        .expect("executor construction should succeed");
 
     let runtime = AgentRuntime::new(
         make_registry(provider),
@@ -401,22 +395,19 @@ async fn test_consent_denied_returns_error_to_provider() {
 
     let (gate, approval_rx) = ApprovalGate::new(RiskLevel::High, Duration::from_secs(5), 10);
 
-    let executor = ToolExecutor::new(
-        vec![Box::new(tool)],
-        Duration::from_secs(30),
-        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
-        vec![],
-        Some(gate),
-        Some(Arc::new(helpers::NoopKnowledgeStore)
-            as Arc<dyn freebird_traits::knowledge::KnowledgeStore>),
-        Some(Arc::new(helpers::NoopMemory) as Arc<dyn freebird_traits::memory::Memory>),
-        None,
-        InjectionConfig::default(),
-        Some(Arc::new(
+    let executor = ToolExecutorBuilder::new(vec![Box::new(tool)], Duration::from_secs(30))
+        .audit_sink(
+            Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>
+        )
+        .approval_gate(gate)
+        .knowledge_store(Arc::new(helpers::NoopKnowledgeStore)
+            as Arc<dyn freebird_traits::knowledge::KnowledgeStore>)
+        .memory(Arc::new(helpers::NoopMemory) as Arc<dyn freebird_traits::memory::Memory>)
+        .revocation_list(Arc::new(
             freebird_security::capability::RevocationList::new(),
-        )),
-    )
-    .expect("executor construction should succeed");
+        ))
+        .build()
+        .expect("executor construction should succeed");
 
     let runtime = AgentRuntime::new(
         make_registry(provider),
@@ -539,22 +530,19 @@ async fn test_consent_low_risk_no_prompt() {
     // Gate requires approval for High+, so Low tools should auto-approve
     let (gate, approval_rx) = ApprovalGate::new(RiskLevel::High, Duration::from_secs(5), 10);
 
-    let executor = ToolExecutor::new(
-        vec![Box::new(tool)],
-        Duration::from_secs(30),
-        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
-        vec![],
-        Some(gate),
-        Some(Arc::new(helpers::NoopKnowledgeStore)
-            as Arc<dyn freebird_traits::knowledge::KnowledgeStore>),
-        Some(Arc::new(helpers::NoopMemory) as Arc<dyn freebird_traits::memory::Memory>),
-        None,
-        InjectionConfig::default(),
-        Some(Arc::new(
+    let executor = ToolExecutorBuilder::new(vec![Box::new(tool)], Duration::from_secs(30))
+        .audit_sink(
+            Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>
+        )
+        .approval_gate(gate)
+        .knowledge_store(Arc::new(helpers::NoopKnowledgeStore)
+            as Arc<dyn freebird_traits::knowledge::KnowledgeStore>)
+        .memory(Arc::new(helpers::NoopMemory) as Arc<dyn freebird_traits::memory::Memory>)
+        .revocation_list(Arc::new(
             freebird_security::capability::RevocationList::new(),
-        )),
-    )
-    .expect("executor construction should succeed");
+        ))
+        .build()
+        .expect("executor construction should succeed");
 
     let runtime = AgentRuntime::new(
         make_registry(provider),
@@ -647,22 +635,18 @@ async fn test_consent_no_gate_executes_freely() {
     );
 
     // No approval gate
-    let executor = ToolExecutor::new(
-        vec![Box::new(tool)],
-        Duration::from_secs(30),
-        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
-        vec![],
-        None,
-        Some(Arc::new(helpers::NoopKnowledgeStore)
-            as Arc<dyn freebird_traits::knowledge::KnowledgeStore>),
-        Some(Arc::new(helpers::NoopMemory) as Arc<dyn freebird_traits::memory::Memory>),
-        None,
-        InjectionConfig::default(),
-        Some(Arc::new(
+    let executor = ToolExecutorBuilder::new(vec![Box::new(tool)], Duration::from_secs(30))
+        .audit_sink(
+            Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>
+        )
+        .knowledge_store(Arc::new(helpers::NoopKnowledgeStore)
+            as Arc<dyn freebird_traits::knowledge::KnowledgeStore>)
+        .memory(Arc::new(helpers::NoopMemory) as Arc<dyn freebird_traits::memory::Memory>)
+        .revocation_list(Arc::new(
             freebird_security::capability::RevocationList::new(),
-        )),
-    )
-    .expect("executor construction should succeed");
+        ))
+        .build()
+        .expect("executor construction should succeed");
 
     let runtime = AgentRuntime::new(
         make_registry(provider),
@@ -739,22 +723,19 @@ async fn test_consent_response_unknown_id_logged() {
 
     let (gate, approval_rx) = ApprovalGate::new(RiskLevel::High, Duration::from_secs(5), 10);
 
-    let executor = ToolExecutor::new(
-        vec![],
-        Duration::from_secs(30),
-        Some(Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>),
-        vec![],
-        Some(gate),
-        Some(Arc::new(helpers::NoopKnowledgeStore)
-            as Arc<dyn freebird_traits::knowledge::KnowledgeStore>),
-        Some(Arc::new(helpers::NoopMemory) as Arc<dyn freebird_traits::memory::Memory>),
-        None,
-        InjectionConfig::default(),
-        Some(Arc::new(
+    let executor = ToolExecutorBuilder::new(vec![], Duration::from_secs(30))
+        .audit_sink(
+            Arc::new(helpers::MockAuditSink::new()) as Arc<dyn freebird_traits::audit::AuditSink>
+        )
+        .approval_gate(gate)
+        .knowledge_store(Arc::new(helpers::NoopKnowledgeStore)
+            as Arc<dyn freebird_traits::knowledge::KnowledgeStore>)
+        .memory(Arc::new(helpers::NoopMemory) as Arc<dyn freebird_traits::memory::Memory>)
+        .revocation_list(Arc::new(
             freebird_security::capability::RevocationList::new(),
-        )),
-    )
-    .expect("executor construction should succeed");
+        ))
+        .build()
+        .expect("executor construction should succeed");
 
     let runtime = AgentRuntime::new(
         make_registry(provider),

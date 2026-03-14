@@ -19,7 +19,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use chrono::Utc;
 use freebird_runtime::agent::AgentRuntime;
 use freebird_runtime::registry::ProviderRegistry;
-use freebird_runtime::tool_executor::ToolExecutor;
+use freebird_runtime::tool_executor::{ToolExecutor, ToolExecutorBuilder};
 use freebird_security::capability::RevocationList;
 use freebird_traits::audit::AuditSink;
 use freebird_traits::channel::{
@@ -392,19 +392,13 @@ pub fn make_tool_executor_with_audit(
     tools: Vec<Box<dyn Tool>>,
     audit_sink: Arc<MockAuditSink>,
 ) -> ToolExecutor {
-    ToolExecutor::new(
-        tools,
-        Duration::from_secs(30),
-        Some(audit_sink as Arc<dyn AuditSink>),
-        vec![],
-        None,
-        Some(Arc::new(NoopKnowledgeStore) as Arc<dyn KnowledgeStore>),
-        Some(Arc::new(NoopMemory) as Arc<dyn Memory>),
-        None,
-        freebird_types::config::InjectionConfig::default(),
-        Some(Arc::new(RevocationList::new())),
-    )
-    .expect("test tool executor construction should not fail")
+    ToolExecutorBuilder::new(tools, Duration::from_secs(30))
+        .audit_sink(audit_sink as Arc<dyn AuditSink>)
+        .knowledge_store(Arc::new(NoopKnowledgeStore) as Arc<dyn KnowledgeStore>)
+        .memory(Arc::new(NoopMemory) as Arc<dyn Memory>)
+        .revocation_list(Arc::new(RevocationList::new()))
+        .build()
+        .expect("test tool executor construction should not fail")
 }
 
 pub fn make_registry(provider: Arc<QueuedProvider>) -> ProviderRegistry {
