@@ -294,49 +294,10 @@ pub fn bash_exec_tool() -> Box<dyn Tool> {
     clippy::needless_pass_by_value
 )]
 mod tests {
-    use std::path::PathBuf;
-
-    use freebird_traits::id::SessionId;
-    use freebird_traits::tool::{Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError};
+    use freebird_traits::tool::{Capability, RiskLevel, SideEffects, Tool, ToolError};
 
     use super::*;
-
-    /// Test harness that owns the temp directory, session ID, and capabilities,
-    /// providing a zero-boilerplate `context()` method for tool tests.
-    struct TestHarness {
-        _tmp: tempfile::TempDir,
-        sandbox: PathBuf,
-        session_id: SessionId,
-        capabilities: Vec<Capability>,
-    }
-
-    impl TestHarness {
-        fn new() -> Self {
-            let tmp = tempfile::tempdir().unwrap();
-            let sandbox = tmp.path().to_path_buf();
-            Self {
-                _tmp: tmp,
-                sandbox,
-                session_id: SessionId::from_string("test-session"),
-                capabilities: vec![Capability::ShellExecute],
-            }
-        }
-
-        fn path(&self) -> &std::path::Path {
-            &self.sandbox
-        }
-
-        fn context(&self) -> ToolContext<'_> {
-            ToolContext {
-                session_id: &self.session_id,
-                sandbox_root: &self.sandbox,
-                granted_capabilities: &self.capabilities,
-                allowed_directories: &[],
-                knowledge_store: None,
-                memory: None,
-            }
-        }
-    }
+    use crate::test_utils::TestHarness;
 
     fn tool() -> BashExecTool {
         BashExecTool::new()
@@ -346,7 +307,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_command_field() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let result = t.execute(serde_json::json!({}), &h.context()).await;
         assert!(matches!(result, Err(ToolError::InvalidInput { .. })));
@@ -354,7 +315,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_command() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let result = t
             .execute(serde_json::json!({"command": ""}), &h.context())
@@ -364,7 +325,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_whitespace_only_command() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let result = t
             .execute(serde_json::json!({"command": "   "}), &h.context())
@@ -374,7 +335,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_too_long() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let long = "a".repeat(33_000);
         let result = t
@@ -385,7 +346,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_null_byte_in_command() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let result = t
             .execute(serde_json::json!({"command": "ls\0-la"}), &h.context())
@@ -397,7 +358,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_command() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let output = t
             .execute(serde_json::json!({"command": "echo hello"}), &h.context())
@@ -411,7 +372,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_echo() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let output = t
             .execute(serde_json::json!({"command": "echo hello"}), &h.context())
@@ -427,7 +388,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exit_code_in_output() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let output = t
             .execute(serde_json::json!({"command": "echo ok"}), &h.context())
@@ -443,7 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_zero_exit_is_success() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let output = t
             .execute(serde_json::json!({"command": "false"}), &h.context())
@@ -456,7 +417,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_not_found() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let output = t
             .execute(
@@ -475,7 +436,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pipe_command() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let output = t
             .execute(
@@ -490,7 +451,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_semicolon_compound() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let output = t
             .execute(
@@ -506,7 +467,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_and_operator() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let output = t
             .execute(
@@ -523,7 +484,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stderr_in_output() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let output = t
             .execute(
@@ -543,7 +504,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stdout_and_stderr_interleaved() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let output = t
             .execute(
@@ -561,7 +522,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_default_cwd_is_sandbox() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let output = t
             .execute(serde_json::json!({"command": "pwd"}), &h.context())
@@ -578,7 +539,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_custom_working_directory() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
 
         // Create a subdirectory in the sandbox
@@ -605,7 +566,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_working_directory_traversal_rejected() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let result = t
             .execute(
@@ -624,7 +585,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_timeout_kills_process() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let output = t
             .execute(
@@ -645,7 +606,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_timeout_returns_partial_output() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let output = t
             .execute(
@@ -670,7 +631,7 @@ mod tests {
     async fn test_timeout_max_clamped() {
         // We can't easily test that 999 gets clamped to 300 without a long wait,
         // but we can verify the metadata for a quick command with a large timeout.
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let output = t
             .execute(
@@ -689,7 +650,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_timeout_zero_clamped() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         // timeout: 0 should be clamped to 1, so a quick command succeeds
         let output = t
@@ -753,7 +714,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_clean_environment() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let output = t
             .execute(serde_json::json!({"command": "env"}), &h.context())
@@ -783,7 +744,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_path_restricted() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let output = t
             .execute(
@@ -802,7 +763,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stdin_closed() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         // `read` with no stdin should exit immediately
         let output = t
@@ -823,7 +784,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_metadata_exit_code() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let output = t
             .execute(serde_json::json!({"command": "exit 42"}), &h.context())
@@ -837,7 +798,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_metadata_truncation_info() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let t = tool();
         let output = t
             .execute(serde_json::json!({"command": "echo one"}), &h.context())

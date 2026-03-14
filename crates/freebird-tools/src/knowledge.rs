@@ -455,7 +455,10 @@ impl Tool for UpdateKnowledgeTool {
 
         // Apply updates — content check has an early return, so suppress the
         // `useless_let_if_seq` lint that can't handle that pattern.
-        #[allow(clippy::useless_let_if_seq)]
+        #[expect(
+            clippy::useless_let_if_seq,
+            reason = "early return in conditional makes let-if-seq unavoidable"
+        )]
         let mut changed = false;
 
         if let Ok(new_content) = tainted.extract_file_content("content") {

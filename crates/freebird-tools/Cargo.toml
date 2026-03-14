@@ -26,6 +26,9 @@ glob = { workspace = true }
 tree-sitter = { workspace = true }
 tree-sitter-rust = { workspace = true }
 
+[lints]
+workspace = true
+
 [dev-dependencies]
 tempfile = { workspace = true }
 serde_json = { workspace = true }

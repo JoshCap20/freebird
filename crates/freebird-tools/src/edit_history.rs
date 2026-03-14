@@ -23,7 +23,7 @@ const CHECKPOINT_TTL: Duration = Duration::from_secs(3600);
 /// A previous version of a file, stored before an edit.
 struct FileVersion {
     content: String,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "reserved for future use")]
     timestamp: Instant,
 }
 
@@ -64,7 +64,10 @@ pub struct EditHistory {
 
 // `significant_drop_tightening` is suppressed: lock guards must be held for
 // the entire critical section, not dropped after a single use.
-#[allow(clippy::significant_drop_tightening)]
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "false positive with MutexGuard"
+)]
 impl EditHistory {
     pub fn new() -> Self {
         Self {
@@ -214,7 +217,7 @@ impl EditHistory {
     }
 
     /// Remove all state for a session.
-    #[allow(dead_code)] // Public API for future runtime integration
+    #[allow(dead_code)] // fires in lib but not test (called from test module)
     pub fn cleanup_session(&self, session_id: &SessionId) {
         let mut sessions = self
             .sessions

@@ -476,51 +476,11 @@ fn parse_grep_params(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
+    use freebird_traits::tool::{Capability, RiskLevel, SideEffects, Tool, ToolError};
     use std::io::Write as _;
-    use std::path::PathBuf;
-
-    use freebird_traits::id::SessionId;
-    use freebird_traits::tool::{Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError};
 
     use super::*;
-
-    /// Test harness matching the pattern from filesystem.rs.
-    struct TestHarness {
-        _tmp: tempfile::TempDir,
-        sandbox: PathBuf,
-        session_id: SessionId,
-        capabilities: Vec<Capability>,
-        allowed_directories: Vec<PathBuf>,
-    }
-
-    impl TestHarness {
-        fn new() -> Self {
-            let tmp = tempfile::tempdir().unwrap();
-            let sandbox = tmp.path().canonicalize().unwrap();
-            Self {
-                _tmp: tmp,
-                sandbox,
-                session_id: SessionId::from_string("test-session"),
-                capabilities: vec![Capability::FileRead],
-                allowed_directories: vec![],
-            }
-        }
-
-        fn path(&self) -> &Path {
-            &self.sandbox
-        }
-
-        fn context(&self) -> ToolContext<'_> {
-            ToolContext {
-                session_id: &self.session_id,
-                sandbox_root: &self.sandbox,
-                granted_capabilities: &self.capabilities,
-                allowed_directories: &self.allowed_directories,
-                knowledge_store: None,
-                memory: None,
-            }
-        }
-    }
+    use crate::test_utils::TestHarness;
 
     fn tool() -> GrepSearchTool {
         GrepSearchTool::new()
@@ -542,7 +502,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_pattern_match() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(
             h.path().join("hello.rs"),
             "fn main() {\n    println!(\"hello\");\n}\n",
@@ -564,7 +524,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_regex_pattern_match() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(
             h.path().join("code.rs"),
             "fn process_input() {\n}\n\nfn validate_output() {\n}\n",
@@ -586,7 +546,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_matches_returns_informative_message() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("empty.rs"), "fn main() {}\n").unwrap();
 
         let output = tool()
@@ -607,7 +567,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_context_lines_shown() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let content = "line1\nline2\nline3\nTARGET\nline5\nline6\nline7\n";
         std::fs::write(h.path().join("ctx.txt"), content).unwrap();
 
@@ -644,7 +604,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_context_lines_zero_compact() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let content = "line1\nline2\nTARGET\nline4\nline5\n";
         std::fs::write(h.path().join("compact.txt"), content).unwrap();
 
@@ -667,7 +627,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_matches_same_file() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let content = "first match\nno match\nsecond match\n";
         std::fs::write(h.path().join("multi.txt"), content).unwrap();
 
@@ -688,7 +648,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_matches_across_files() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("a.txt"), "target line\n").unwrap();
         std::fs::write(h.path().join("b.txt"), "another target\n").unwrap();
         std::fs::write(h.path().join("c.txt"), "no match here\n").unwrap();
@@ -718,7 +678,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_results_caps_output() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         // Create a file with 100 matching lines
         std::fs::write(h.path().join("many.txt"), make_match_lines(100)).unwrap();
 
@@ -742,7 +702,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_truncation_message_shows_remaining_count() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("many.txt"), make_match_lines(100)).unwrap();
 
         let output = tool()
@@ -762,7 +722,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_default_max_results_is_50() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         // Create 60 matching lines
         std::fs::write(h.path().join("lots.txt"), make_match_lines(60)).unwrap();
 
@@ -787,7 +747,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_glob_filters_by_extension() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("code.rs"), "fn search_target() {}\n").unwrap();
         std::fs::write(h.path().join("notes.txt"), "search_target in notes\n").unwrap();
 
@@ -808,7 +768,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_case_insensitive_search() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("case.txt"), "Foo\nfoo\nFOO\nbar\n").unwrap();
 
         let output = tool()
@@ -827,7 +787,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_skips_binary_files() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         // Create a binary file with null bytes
         let binary_path = h.path().join("binary.dat");
         {
@@ -854,7 +814,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_skips_git_directory() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let git_dir = h.path().join(".git");
         std::fs::create_dir(&git_dir).unwrap();
         std::fs::write(git_dir.join("config"), "match_this\n").unwrap();
@@ -877,7 +837,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_skips_node_modules() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let nm_dir = h.path().join("node_modules");
         std::fs::create_dir(&nm_dir).unwrap();
         std::fs::write(nm_dir.join("dep.js"), "match_this\n").unwrap();
@@ -902,7 +862,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_path_traversal_rejected() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
 
         let err = tool()
             .execute(
@@ -920,7 +880,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_subdirectory() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let src = h.path().join("src");
         std::fs::create_dir(&src).unwrap();
         std::fs::write(src.join("lib.rs"), "fn target_fn() {}\n").unwrap();
@@ -947,7 +907,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_single_file() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let src = h.path().join("src");
         std::fs::create_dir(&src).unwrap();
         std::fs::write(src.join("main.rs"), "fn target_fn() {}\n").unwrap();
@@ -971,7 +931,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_output_uses_relative_paths() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("test.rs"), "fn target() {}\n").unwrap();
 
         let output = tool()
@@ -994,7 +954,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_regex_returns_descriptive_error() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
 
         let err = tool()
             .execute(serde_json::json!({"pattern": "["}), &h.context())
@@ -1015,7 +975,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_nonexistent_path_returns_error() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
 
         let err = tool()
             .execute(
@@ -1037,7 +997,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_sandbox_returns_no_matches() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         // No files created — empty directory
 
         let output = tool()
@@ -1054,7 +1014,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_context_lines_clamped_to_max() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let content = "line1\nline2\nTARGET\nline4\nline5\n";
         std::fs::write(h.path().join("clamp.txt"), content).unwrap();
 
@@ -1074,7 +1034,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_results_clamped_to_hard_cap() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("cap.txt"), "match\n").unwrap();
 
         // Request 999 max_results — should be clamped to MAX_RESULTS_HARD_CAP (200)
@@ -1092,7 +1052,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_regex_size_limit_rejects_huge_pattern() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("a.txt"), "x\n").unwrap();
 
         // A pattern that would produce a large NFA

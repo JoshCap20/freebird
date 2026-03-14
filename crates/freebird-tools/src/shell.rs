@@ -269,51 +269,13 @@ pub fn shell_tool(allowed_commands: Vec<String>, max_output_bytes: usize) -> Box
     clippy::needless_pass_by_value
 )]
 mod tests {
-    use std::path::PathBuf;
-
     use freebird_traits::id::SessionId;
     use freebird_traits::tool::{Capability, Tool, ToolContext, ToolError, ToolOutcome};
 
     use super::*;
+    use crate::test_utils::TestHarness;
 
     const TEST_MAX_OUTPUT: usize = 1_048_576;
-
-    /// Test harness that owns the temp directory, session ID, and capabilities,
-    /// providing a zero-boilerplate `context()` method for tool tests.
-    struct TestHarness {
-        _tmp: tempfile::TempDir,
-        sandbox: PathBuf,
-        session_id: SessionId,
-        capabilities: Vec<Capability>,
-    }
-
-    impl TestHarness {
-        fn new() -> Self {
-            let tmp = tempfile::tempdir().unwrap();
-            let sandbox = tmp.path().to_path_buf();
-            Self {
-                _tmp: tmp,
-                sandbox,
-                session_id: SessionId::from_string("test-session"),
-                capabilities: vec![Capability::ShellExecute],
-            }
-        }
-
-        fn path(&self) -> &std::path::Path {
-            &self.sandbox
-        }
-
-        fn context(&self) -> ToolContext<'_> {
-            ToolContext {
-                session_id: &self.session_id,
-                sandbox_root: &self.sandbox,
-                granted_capabilities: &self.capabilities,
-                allowed_directories: &[],
-                knowledge_store: None,
-                memory: None,
-            }
-        }
-    }
 
     fn echo_tool() -> ShellTool {
         ShellTool::new(["echo".to_string()], TEST_MAX_OUTPUT)
@@ -327,7 +289,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_allowlisted_command_succeeds() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = echo_tool();
 
         let output = tool
@@ -347,7 +309,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_allowlisted_command_returns_security_violation() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = ls_tool();
 
         let err = tool
@@ -373,7 +335,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_allowlist_rejects_all() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = ShellTool::new(Vec::<String>::new(), TEST_MAX_OUTPUT);
 
         let err = tool
@@ -385,7 +347,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_command_field_returns_invalid_input() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = echo_tool();
 
         let err = tool
@@ -403,7 +365,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_command_name_rejected() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = echo_tool();
 
         // Empty string is rejected by SafeShellArg (empty/whitespace-only check)
@@ -416,7 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_with_pipe_returns_invalid_input() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = echo_tool();
 
         let err = tool
@@ -428,7 +390,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_with_semicolon_returns_invalid_input() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = echo_tool();
 
         let err = tool
@@ -440,7 +402,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_arg_with_pipe_returns_invalid_input() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = echo_tool();
 
         let err = tool
@@ -460,7 +422,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_arg_with_semicolon_returns_invalid_input() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = echo_tool();
 
         let err = tool
@@ -475,7 +437,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_arg_with_backtick_returns_invalid_input() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = echo_tool();
 
         let err = tool
@@ -490,7 +452,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_arg_with_dollar_sign_returns_invalid_input() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = echo_tool();
 
         let err = tool
@@ -505,7 +467,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_array_args_returns_invalid_input() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = echo_tool();
 
         let err = tool
@@ -520,7 +482,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_string_array_element_returns_invalid_input() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = echo_tool();
 
         let err = tool
@@ -540,7 +502,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_args_defaults_to_empty() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = echo_tool();
 
         let output = tool
@@ -552,7 +514,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_args_array_is_valid() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = echo_tool();
 
         let output = tool
@@ -569,7 +531,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_successful_command_returns_stdout() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = echo_tool();
 
         let output = tool
@@ -585,7 +547,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_failed_command_returns_stderr_and_is_error() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = ls_tool();
 
         let output = tool
@@ -605,7 +567,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exit_code_in_metadata() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = echo_tool();
 
         let output = tool
@@ -622,7 +584,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stderr_separated_by_marker() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = ls_tool();
 
         // ls on a nonexistent path produces stderr
@@ -642,7 +604,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_runs_in_sandbox_root_cwd() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         std::fs::write(h.path().join("test_marker.txt"), "marker").unwrap();
         let tool = ls_tool();
 
@@ -660,7 +622,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_not_found_returns_execution_failed() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = ShellTool::new(["nonexistent_cmd_xyz_12345".to_string()], TEST_MAX_OUTPUT);
 
         let err = tool
@@ -677,7 +639,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_environment_is_clean() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = ShellTool::new(["env".to_string()], TEST_MAX_OUTPUT);
 
         let output = tool
@@ -700,7 +662,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_path_is_restricted() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = ShellTool::new(["printenv".to_string()], TEST_MAX_OUTPUT);
 
         let output = tool
@@ -716,7 +678,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_output_truncated_at_limit() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         // Create a file with known content > 100 bytes
         let content = "x".repeat(200);
         std::fs::write(h.path().join("big.txt"), &content).unwrap();
@@ -741,7 +703,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_zero_max_output_truncates_everything() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = ShellTool::new(["echo".to_string()], 0);
 
         let output = tool
@@ -758,7 +720,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_output_not_truncated_when_under_limit() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = ShellTool::new(["echo".to_string()], 1000);
 
         let output = tool
@@ -778,7 +740,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stdin_is_closed() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = ShellTool::new(["cat".to_string()], TEST_MAX_OUTPUT);
 
         // cat with no args reads from stdin — should exit immediately
@@ -840,7 +802,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_too_many_args_rejected() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = echo_tool();
 
         let args: Vec<String> = (0..=MAX_ARG_COUNT).map(|i| format!("arg{i}")).collect();
@@ -861,7 +823,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_args_at_limit_succeeds() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = echo_tool();
 
         let args: Vec<String> = (0..MAX_ARG_COUNT).map(|i| format!("arg{i}")).collect();
@@ -877,7 +839,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_very_long_arg_rejected() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = echo_tool();
 
         let long_arg = "a".repeat(5000); // > 4096 SafeShellArg limit
@@ -893,7 +855,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_unicode_command_name() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = echo_tool();
 
         // Unicode passes SafeShellArg (no forbidden chars) but fails allowlist
@@ -906,7 +868,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_unicode_args_pass_validation() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = echo_tool();
 
         let output = tool
@@ -980,7 +942,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_truncation_at_multibyte_char_boundary() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         // "日" is 3 bytes in UTF-8 (E6 97 A5). Write 10 of them = 30 bytes.
         let content = "日".repeat(10);
         std::fs::write(h.path().join("mb.txt"), &content).unwrap();
@@ -1016,7 +978,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_path_traversal_in_args_constrained_by_sandbox_cwd() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = ls_tool();
 
         // ".." doesn't contain shell metacharacters, so SafeShellArg allows it.

@@ -1126,49 +1126,10 @@ pub fn cargo_verify_tools() -> Vec<Box<dyn Tool>> {
 mod tests {
     use std::path::PathBuf;
 
-    use freebird_traits::id::SessionId;
-    use freebird_traits::tool::{
-        Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolOutcome,
-    };
+    use freebird_traits::tool::{Capability, RiskLevel, SideEffects, Tool, ToolError, ToolOutcome};
 
     use super::*;
-
-    // ── Test Harness ─────────────────────────────────────────────────
-
-    struct TestHarness {
-        _tmp: tempfile::TempDir,
-        sandbox: PathBuf,
-        session_id: SessionId,
-        capabilities: Vec<Capability>,
-    }
-
-    impl TestHarness {
-        fn new() -> Self {
-            let tmp = tempfile::tempdir().unwrap();
-            let sandbox = tmp.path().to_path_buf();
-            Self {
-                _tmp: tmp,
-                sandbox,
-                session_id: SessionId::from_string("test-session"),
-                capabilities: vec![Capability::ShellExecute],
-            }
-        }
-
-        fn context(&self) -> ToolContext<'_> {
-            ToolContext {
-                session_id: &self.session_id,
-                sandbox_root: &self.sandbox,
-                granted_capabilities: &self.capabilities,
-                allowed_directories: &[],
-                knowledge_store: None,
-                memory: None,
-            }
-        }
-
-        fn path(&self) -> &Path {
-            &self.sandbox
-        }
-    }
+    use crate::test_utils::TestHarness;
 
     /// Create a minimal Cargo project in the given directory.
     fn create_cargo_project(dir: &Path, src: &str) {
@@ -1222,7 +1183,7 @@ edition = "2021"
 
     #[tokio::test]
     async fn test_unknown_check_rejected() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = make_tool();
 
         let err = tool
@@ -1241,7 +1202,7 @@ edition = "2021"
 
     #[tokio::test]
     async fn test_package_with_metacharacters_rejected() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = make_tool();
 
         let err = tool
@@ -1257,7 +1218,7 @@ edition = "2021"
 
     #[tokio::test]
     async fn test_test_filter_with_metacharacters_rejected() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         let tool = make_tool();
 
         let err = tool
@@ -1275,7 +1236,7 @@ edition = "2021"
 
     #[tokio::test]
     async fn test_clean_project_passes_check() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         create_cargo_project(h.path(), "pub fn add(a: i32, b: i32) -> i32 { a + b }");
         let tool = make_tool();
 
@@ -1305,7 +1266,7 @@ edition = "2021"
 
     #[tokio::test]
     async fn test_syntax_error_fails_check() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         create_cargo_project(h.path(), "fn broken( {");
         let tool = make_tool();
 
@@ -1330,7 +1291,7 @@ edition = "2021"
 
     #[tokio::test]
     async fn test_clippy_warning_fails_with_deny() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         // `len() == 0` triggers clippy::len_zero warning
         create_cargo_project(
             h.path(),
@@ -1362,7 +1323,7 @@ pub fn check_empty(v: &Vec<i32>) -> bool {
 
     #[tokio::test]
     async fn test_failing_test_detected() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         create_cargo_project(
             h.path(),
             r#"
@@ -1397,7 +1358,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fmt_unformatted_detected() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         // Intentionally bad formatting
         create_cargo_project_bin(h.path(), "fn main(){let x=1;println!(\"{}\",x);}");
         let tool = make_tool();
@@ -1417,7 +1378,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_all_stops_on_first_failure() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         // Syntax error will fail check, so clippy/test/fmt should be skipped
         create_cargo_project(h.path(), "fn broken( {");
         let tool = make_tool();
@@ -1440,7 +1401,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_all_expands_to_four_steps() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         create_cargo_project(h.path(), "pub fn ok() {}");
         let tool = make_tool();
 
@@ -1460,7 +1421,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_individual_step_runs_only_that_step() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         create_cargo_project(h.path(), "pub fn ok() {}");
         let tool = make_tool();
 
@@ -1477,7 +1438,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_checks_defaults_to_all() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         create_cargo_project(h.path(), "pub fn ok() {}");
         let tool = make_tool();
 
@@ -1628,7 +1589,7 @@ test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
 
     #[tokio::test]
     async fn test_cargo_not_found_returns_error() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::ShellExecute]);
         create_cargo_project(h.path(), "pub fn ok() {}");
 
         // Create a tool with an empty PATH so cargo can't be found

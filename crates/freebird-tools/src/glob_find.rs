@@ -273,50 +273,10 @@ impl Tool for GlobFindTool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
-    use std::path::PathBuf;
-
-    use freebird_traits::id::SessionId;
-    use freebird_traits::tool::{Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError};
+    use freebird_traits::tool::{Capability, RiskLevel, SideEffects, Tool, ToolError};
 
     use super::*;
-
-    /// Test harness matching the pattern from filesystem.rs / grep.rs.
-    struct TestHarness {
-        _tmp: tempfile::TempDir,
-        sandbox: PathBuf,
-        session_id: SessionId,
-        capabilities: Vec<Capability>,
-        allowed_directories: Vec<PathBuf>,
-    }
-
-    impl TestHarness {
-        fn new() -> Self {
-            let tmp = tempfile::tempdir().unwrap();
-            let sandbox = tmp.path().canonicalize().unwrap();
-            Self {
-                _tmp: tmp,
-                sandbox,
-                session_id: SessionId::from_string("test-session"),
-                capabilities: vec![Capability::FileRead],
-                allowed_directories: vec![],
-            }
-        }
-
-        fn path(&self) -> &Path {
-            &self.sandbox
-        }
-
-        fn context(&self) -> ToolContext<'_> {
-            ToolContext {
-                session_id: &self.session_id,
-                sandbox_root: &self.sandbox,
-                granted_capabilities: &self.capabilities,
-                allowed_directories: &self.allowed_directories,
-                knowledge_store: None,
-                memory: None,
-            }
-        }
-    }
+    use crate::test_utils::TestHarness;
 
     fn tool() -> GlobFindTool {
         GlobFindTool::new()
@@ -338,7 +298,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_glob_matches() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("main.rs"), "fn main() {}\n").unwrap();
         std::fs::write(h.path().join("lib.rs"), "pub fn lib() {}\n").unwrap();
         std::fs::write(h.path().join("readme.md"), "# readme\n").unwrap();
@@ -367,7 +327,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_recursive_glob() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let src = h.path().join("src");
         let nested = src.join("tools");
         std::fs::create_dir_all(&nested).unwrap();
@@ -397,7 +357,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_matches_informative() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("file.txt"), "content").unwrap();
 
         let output = tool()
@@ -418,7 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_directory_entries_included() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let subdir = h.path().join("mydir");
         std::fs::create_dir(&subdir).unwrap();
         std::fs::write(h.path().join("myfile"), "").unwrap();
@@ -444,7 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_results_caps() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         // Create 200 files
         for i in 0..200 {
             std::fs::write(h.path().join(format!("file_{i:03}.txt")), "").unwrap();
@@ -475,7 +435,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_results_sorted_alphabetically() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("charlie.rs"), "").unwrap();
         std::fs::write(h.path().join("alpha.rs"), "").unwrap();
         std::fs::write(h.path().join("bravo.rs"), "").unwrap();
@@ -501,7 +461,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_skips_git_directory() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let git_dir = h.path().join(".git");
         std::fs::create_dir(&git_dir).unwrap();
         std::fs::write(git_dir.join("config"), "").unwrap();
@@ -522,7 +482,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_skips_node_modules() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let nm_dir = h.path().join("node_modules");
         std::fs::create_dir(&nm_dir).unwrap();
         std::fs::write(nm_dir.join("dep.js"), "").unwrap();
@@ -543,7 +503,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_skips_target_directory() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let target_dir = h.path().join("target");
         let debug_dir = target_dir.join("debug");
         std::fs::create_dir_all(&debug_dir).unwrap();
@@ -565,7 +525,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_default_max_results_is_100() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         // Create 120 files
         for i in 0..120 {
             std::fs::write(h.path().join(format!("file_{i:03}.txt")), "").unwrap();
@@ -591,7 +551,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_results_clamped_to_hard_cap() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("only.txt"), "").unwrap();
 
         // Request 999 max_results — should be clamped to 500
@@ -611,7 +571,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_path_traversal_rejected() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
 
         let err = tool()
             .execute(
@@ -629,7 +589,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_subdirectory() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let src = h.path().join("src");
         std::fs::create_dir(&src).unwrap();
         std::fs::write(src.join("lib.rs"), "").unwrap();
@@ -656,7 +616,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_output_uses_relative_paths() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("test.rs"), "").unwrap();
 
         let output = tool()
@@ -676,7 +636,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_glob_returns_error() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
 
         let err = tool()
             .execute(serde_json::json!({"pattern": "[invalid"}), &h.context())
@@ -700,7 +660,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn test_symlink_escape_rejected() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
 
         // Create a file inside the sandbox
         std::fs::write(h.path().join("legit.txt"), "safe").unwrap();

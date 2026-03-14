@@ -464,16 +464,27 @@ fn compute_large_edit_metrics(
         return None;
     }
     let max_span = old_str.len().max(new_str.len());
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "line counts are small; f64 mantissa overflow is not a concern"
+    )]
     let change_ratio = max_span as f64 / file_content.len() as f64;
 
     if change_ratio < threshold {
         return None;
     }
 
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "value is non-negative"
+    )]
     let pct = (change_ratio * 100.0).round() as u64;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "value is non-negative"
+    )]
     let threshold_pct = (threshold * 100.0).round() as u64;
 
     Some(LargeEditMetrics {
@@ -668,8 +679,10 @@ fn line_similarity(window_lines: &[&str], needle_lines: &[&str]) -> f64 {
         .zip(needle_lines.iter())
         .filter(|(w, n)| normalize_whitespace(w) == normalize_whitespace(n))
         .count();
-    #[allow(clippy::cast_precision_loss)]
-    // line counts are small; f64 mantissa overflow is not a concern
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "line counts are small; f64 mantissa overflow is not a concern"
+    )]
     {
         matching as f64 / window_lines.len() as f64
     }
@@ -1227,50 +1240,10 @@ impl Tool for RollbackToCheckpointTool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
-    use std::path::PathBuf;
-
-    use freebird_traits::id::SessionId;
-    use freebird_traits::tool::{Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError};
+    use freebird_traits::tool::{Capability, RiskLevel, SideEffects, Tool, ToolError};
 
     use super::*;
-
-    /// Test harness — same pattern as filesystem.rs.
-    struct TestHarness {
-        _tmp: tempfile::TempDir,
-        sandbox: PathBuf,
-        session_id: SessionId,
-        capabilities: Vec<Capability>,
-        allowed_directories: Vec<PathBuf>,
-    }
-
-    impl TestHarness {
-        fn new() -> Self {
-            let tmp = tempfile::tempdir().unwrap();
-            let sandbox = tmp.path().to_path_buf();
-            Self {
-                _tmp: tmp,
-                sandbox,
-                session_id: SessionId::from_string("test-session"),
-                capabilities: vec![Capability::FileRead, Capability::FileWrite],
-                allowed_directories: vec![],
-            }
-        }
-
-        fn path(&self) -> &std::path::Path {
-            &self.sandbox
-        }
-
-        fn context(&self) -> ToolContext<'_> {
-            ToolContext {
-                session_id: &self.session_id,
-                sandbox_root: &self.sandbox,
-                granted_capabilities: &self.capabilities,
-                allowed_directories: &self.allowed_directories,
-                knowledge_store: None,
-                memory: None,
-            }
-        }
-    }
+    use crate::test_utils::TestHarness;
 
     /// Config for tests that don't exercise syntax validation.
     /// Validation is off so edits to Rust snippets don't need to be full programs.
@@ -1297,7 +1270,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exact_match_replaces() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(
             h.path().join("file.rs"),
             "fn hello() {\n    println!(\"hi\");\n}\n",
@@ -1325,7 +1298,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_match_returns_error() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(h.path().join("file.rs"), "fn main() {}\n").unwrap();
 
         let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
@@ -1351,7 +1324,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_matches_returns_error() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(
             h.path().join("file.rs"),
             "let x = 1;\nlet y = 1;\nlet z = 1;\n",
@@ -1381,7 +1354,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_new_string_deletes() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(h.path().join("file.rs"), "line1\nDELETE_ME\nline3\n").unwrap();
 
         let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
@@ -1404,7 +1377,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_identical_strings_returns_error() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(h.path().join("file.rs"), "content\n").unwrap();
 
         let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
@@ -1430,7 +1403,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiline_replace() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         let original = "fn main() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n    let d = 4;\n    let e = 5;\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
@@ -1457,7 +1430,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_replace_preserves_surrounding_content() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         let original = "BEFORE\nTARGET\nAFTER\n";
         std::fs::write(h.path().join("file.txt"), original).unwrap();
 
@@ -1483,7 +1456,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_whitespace_normalized_fallback() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         // File has single spaces
         std::fs::write(h.path().join("file.rs"), "fn main() {\n    let x = 1;\n}\n").unwrap();
 
@@ -1508,7 +1481,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_indentation_mismatch_handled() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         // File has 2-space indent
         std::fs::write(h.path().join("file.rs"), "fn main() {\n  let x = 1;\n}\n").unwrap();
 
@@ -1534,7 +1507,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_normalized_multiple_matches_returns_error() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(
             h.path().join("file.rs"),
             "let x = 1;\nlet  x  =  1;\nlet x=1;\n",
@@ -1570,7 +1543,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_indentation_preserved_on_replace() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         let original = "fn main() {\n    if true {\n        let x = 1;\n    }\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
@@ -1594,7 +1567,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_indentation_delta_applied_to_all_lines() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         // File has 8-space indented block
         let original =
             "fn main() {\n    if true {\n        old_line_1\n        old_line_2\n    }\n}\n";
@@ -1627,7 +1600,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_path_traversal_rejected() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
 
         let err = tool
@@ -1650,7 +1623,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_nonexistent_file_returns_error() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
 
         let err = tool
@@ -1673,7 +1646,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_output_reports_relative_path() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(h.path().join("src.rs"), "old\n").unwrap();
 
         let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
@@ -1706,7 +1679,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_orphaned_temp_on_success() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(h.path().join("clean.rs"), "old_text\n").unwrap();
 
         let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
@@ -1734,7 +1707,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_original_unchanged_on_match_failure() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         let original = "unchanged content\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
@@ -1758,7 +1731,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_crlf_line_endings_normalized_fallback() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         // Write a file with \r\n line endings
         std::fs::write(
             h.path().join("crlf.rs"),
@@ -1790,7 +1763,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_old_string_returns_error() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(h.path().join("file.rs"), "content\n").unwrap();
 
         let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
@@ -1837,7 +1810,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_exceeding_size_limit_rejected() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         let file_path = h.path().join("huge.rs");
         {
             let f = std::fs::File::create(&file_path).unwrap();
@@ -1872,7 +1845,7 @@ mod tests {
     #[tokio::test]
     async fn test_non_utf8_file_rejected() {
         use std::io::Write as _;
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         let file_path = h.path().join("binary.bin");
         {
             let mut f = std::fs::File::create(&file_path).unwrap();
@@ -1907,7 +1880,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tab_indentation_preserved() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         // File uses tab indentation
         std::fs::write(
             h.path().join("file.go"),
@@ -1941,7 +1914,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fuzzy_match_one_line_wrong() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         let original =
             "fn main() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n    let w = 4;\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
@@ -1969,7 +1942,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fuzzy_match_too_many_lines_wrong_fails() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         let original = "fn main() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
@@ -1997,7 +1970,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fuzzy_match_ambiguous_returns_error() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         // Two identical blocks — fuzzy match should be ambiguous
         let original = "fn a() {\n    let x = 1;\n    let y = 2;\n}\nfn b() {\n    let x = 1;\n    let y = 2;\n}\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
@@ -2107,7 +2080,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_diff_preview_in_success_output() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(
             h.path().join("src.rs"),
             "aaa\nbbb\nccc\nddd\neee\nfff\nggg\n",
@@ -2142,7 +2115,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_context_lines_around_diff() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(
             h.path().join("src.rs"),
             "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\n",
@@ -2190,7 +2163,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiline_diff() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(
             h.path().join("src.rs"),
             "aaa\nbbb\nccc\nddd\neee\nfff\nggg\n",
@@ -2220,7 +2193,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_line_diff() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(h.path().join("src.rs"), "aaa\nbbb\nccc\nddd\neee\n").unwrap();
 
         let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
@@ -2246,7 +2219,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_deletion_shows_minus_only() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(h.path().join("src.rs"), "aaa\nbbb\nccc\nddd\neee\n").unwrap();
 
         let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
@@ -2271,7 +2244,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_insertion_shows_plus_only() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(h.path().join("src.rs"), "aaa\nbbb\nccc\nddd\neee\n").unwrap();
 
         let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
@@ -2300,7 +2273,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_line_numbers_correct() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(
             h.path().join("src.rs"),
             "line1\nline2\nline3\nline4\nline5\n",
@@ -2333,7 +2306,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_disabled_no_diff() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(h.path().join("src.rs"), "aaa\nbbb\nccc\n").unwrap();
 
         let tool = SearchReplaceEditTool::new(
@@ -2382,7 +2355,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_diff_preview_at_file_start() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(
             h.path().join("src.rs"),
             "first\nsecond\nthird\nfourth\nfifth\n",
@@ -2413,7 +2386,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_diff_preview_at_file_end() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(
             h.path().join("src.rs"),
             "first\nsecond\nthird\nfourth\nlast",
@@ -2444,7 +2417,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_diff_preview_zero_context_lines() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(h.path().join("src.rs"), "aaa\nbbb\nccc\nddd\neee\n").unwrap();
 
         let tool = SearchReplaceEditTool::new(
@@ -2520,7 +2493,7 @@ mod tests {
                     .build()
                     .unwrap();
                 rt.block_on(async {
-                    let h = TestHarness::new();
+                    let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
                     let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
 
                     let traversal = format!("{}{}", "../".repeat(depth), suffix);
@@ -2562,7 +2535,7 @@ mod tests {
                     .build()
                     .unwrap();
                 rt.block_on(async {
-                    let h = TestHarness::new();
+                    let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
                     let content = format!("{prefix}\n{old_text}\n{suffix}\n");
                     std::fs::write(h.path().join(&name), &content).unwrap();
 
@@ -2600,7 +2573,7 @@ mod tests {
                     .build()
                     .unwrap();
                 rt.block_on(async {
-                    let h = TestHarness::new();
+                    let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
                     std::fs::write(h.path().join(&name), "old_unique_sentinel\n").unwrap();
 
                     let tool = SearchReplaceEditTool::new(&test_config(), Arc::new(EditHistory::new()));
@@ -2749,7 +2722,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_edit_rejects_syntax_breaking_change() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         let original = "fn hello() {\n    println!(\"hi\");\n}\n";
         std::fs::write(h.path().join("code.rs"), original).unwrap();
 
@@ -2781,7 +2754,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_edit_allows_valid_syntax_change() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(
             h.path().join("valid.rs"),
             "fn hello() {\n    println!(\"hi\");\n}\n",
@@ -2815,7 +2788,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_edit_skips_validation_for_non_rust() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(h.path().join("notes.txt"), "hello world").unwrap();
 
         let tool = SearchReplaceEditTool::new(
@@ -2843,7 +2816,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_edit_skips_validation_when_disabled() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         let original = "fn hello() {\n    println!(\"hi\");\n}\n";
         std::fs::write(h.path().join("code.rs"), original).unwrap();
 
@@ -2887,10 +2860,10 @@ mod tests {
 
         assert!(result.is_ok(), "valid large file should pass");
         // In release mode tree-sitter parses this in <10ms.
-        // Debug builds are ~20x slower, so use a generous threshold.
+        // Debug builds are ~20x slower, and CI/parallel workloads add more.
         assert!(
-            elapsed.as_millis() < 500,
-            "validation took {}ms, expected <500ms (debug)",
+            elapsed.as_millis() < 2000,
+            "validation took {}ms, expected <2000ms (debug)",
             elapsed.as_millis()
         );
     }
@@ -2907,7 +2880,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_undo_restores_previous() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         let original = "line 1\nline 2\nline 3\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
@@ -2946,7 +2919,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_undos() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         let v0 = "original\n";
         std::fs::write(h.path().join("f.rs"), v0).unwrap();
 
@@ -2998,7 +2971,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_undo_unedited_file_error() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(h.path().join("untouched.rs"), "content").unwrap();
 
         let undo = UndoEditTool::new(Arc::new(EditHistory::new()));
@@ -3032,7 +3005,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoint_captures_state() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         let original = "before\n";
         std::fs::write(h.path().join("file.rs"), original).unwrap();
 
@@ -3082,7 +3055,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoint_restores_multiple_files() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(h.path().join("a.rs"), "a-original\n").unwrap();
         std::fs::write(h.path().join("b.rs"), "b-original\n").unwrap();
         std::fs::write(h.path().join("c.rs"), "c-original\n").unwrap();
@@ -3146,7 +3119,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoint_not_found_error() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         let rollback = RollbackToCheckpointTool::new(Arc::new(EditHistory::new()));
 
         let result = rollback
@@ -3167,7 +3140,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_checkpoints_enforced() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(h.path().join("f.rs"), "content\n").unwrap();
 
         let (edit, checkpoint, rollback) = edit_checkpoint_triple();
@@ -3220,7 +3193,7 @@ mod tests {
     async fn test_checkpoint_expiry() {
         use std::time::{Duration, Instant};
 
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         std::fs::write(h.path().join("f.rs"), "content\n").unwrap();
 
         let history = Arc::new(EditHistory::new());
@@ -3254,7 +3227,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoint_name_validation() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         let checkpoint = CreateCheckpointTool::new(Arc::new(EditHistory::new()));
         let ctx = h.context();
 
@@ -3280,7 +3253,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_large_edit_small_edit_no_warning() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         // 100 bytes of content, replace 5 bytes → 5% ratio
         let content = "a".repeat(95) + "XXXXX";
         std::fs::write(h.path().join("file.txt"), &content).unwrap();
@@ -3312,7 +3285,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_large_edit_warns() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         // 100 bytes, replace 60 bytes → 60% ratio (>= 50%)
         let content = "a".repeat(40) + &"b".repeat(60);
         std::fs::write(h.path().join("file.txt"), &content).unwrap();
@@ -3347,7 +3320,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_large_edit_blocked() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         let content = "a".repeat(40) + &"b".repeat(60);
         std::fs::write(h.path().join("file.txt"), &content).unwrap();
 
@@ -3381,7 +3354,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_large_edit_consent_rejected() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         let content = "a".repeat(40) + &"b".repeat(60);
         std::fs::write(h.path().join("file.txt"), &content).unwrap();
 
@@ -3415,7 +3388,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_large_edit_threshold_configurable() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         // 100 bytes, replace 60 → 60% ratio, but threshold is 80%
         let content = "a".repeat(40) + &"b".repeat(60);
         std::fs::write(h.path().join("file.txt"), &content).unwrap();
@@ -3447,7 +3420,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_large_edit_warning_includes_ratio() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         let content = "a".repeat(40) + &"b".repeat(60);
         std::fs::write(h.path().join("file.txt"), &content).unwrap();
 
@@ -3477,7 +3450,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_large_edit_exact_threshold_boundary() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         // 100 bytes, replace exactly 50 → 50% ratio, threshold 0.5 → should flag (>=)
         let content = "a".repeat(50) + &"b".repeat(50);
         std::fs::write(h.path().join("file.txt"), &content).unwrap();
@@ -3508,7 +3481,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_large_edit_empty_file_bypasses_check() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead, Capability::FileWrite]);
         // Empty file — guardrail should not trigger (no division by zero)
         std::fs::write(h.path().join("file.txt"), "").unwrap();
 

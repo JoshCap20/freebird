@@ -54,7 +54,10 @@ pub(super) fn pagerank_with_params(
         adjacency.len(),
     );
 
-    #[allow(clippy::cast_precision_loss)] // Graph sizes are well within f64 mantissa range.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "graph sizes well within f64 mantissa range"
+    )]
     let n = num_nodes as f64;
     let initial = 1.0 / n;
     let mut ranks = vec![initial; num_nodes];
@@ -77,7 +80,10 @@ pub(super) fn pagerank_with_params(
             if neighbors.is_empty() {
                 continue; // Dangling mass handled separately.
             }
-            #[allow(clippy::cast_precision_loss)]
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "graph sizes well within f64 mantissa range"
+            )]
             let contribution = rank_i / neighbors.len() as f64;
             for &j in neighbors {
                 if let Some(r) = new_ranks.get_mut(j) {

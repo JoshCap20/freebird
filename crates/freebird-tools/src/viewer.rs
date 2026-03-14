@@ -365,49 +365,10 @@ fn format_lines(lines: &[&str], start_line: usize) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
-    use std::path::PathBuf;
-
-    use freebird_traits::id::SessionId;
-    use freebird_traits::tool::{Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError};
+    use freebird_traits::tool::{Capability, RiskLevel, SideEffects, Tool, ToolError};
 
     use super::*;
-
-    struct TestHarness {
-        _tmp: tempfile::TempDir,
-        sandbox: PathBuf,
-        session_id: SessionId,
-        capabilities: Vec<Capability>,
-        allowed_directories: Vec<PathBuf>,
-    }
-
-    impl TestHarness {
-        fn new() -> Self {
-            let tmp = tempfile::tempdir().unwrap();
-            let sandbox = tmp.path().to_path_buf();
-            Self {
-                _tmp: tmp,
-                sandbox,
-                session_id: SessionId::from_string("test-session"),
-                capabilities: vec![Capability::FileRead],
-                allowed_directories: vec![],
-            }
-        }
-
-        fn path(&self) -> &std::path::Path {
-            &self.sandbox
-        }
-
-        fn context(&self) -> ToolContext<'_> {
-            ToolContext {
-                session_id: &self.session_id,
-                sandbox_root: &self.sandbox,
-                granted_capabilities: &self.capabilities,
-                allowed_directories: &self.allowed_directories,
-                knowledge_store: None,
-                memory: None,
-            }
-        }
-    }
+    use crate::test_utils::TestHarness;
 
     /// Generate a file with `n` numbered lines: "Line 1\nLine 2\n..."
     fn generate_numbered_file(h: &TestHarness, name: &str, n: usize) {
@@ -422,7 +383,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_default_window_100_lines() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         generate_numbered_file(&h, "big.txt", 200);
 
         let tool = FileViewerTool::new();
@@ -440,7 +401,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_offset_starts_at_specified_line() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         generate_numbered_file(&h, "big.txt", 200);
 
         let tool = FileViewerTool::new();
@@ -460,7 +421,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_custom_limit() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         generate_numbered_file(&h, "big.txt", 100);
 
         let tool = FileViewerTool::new();
@@ -479,7 +440,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_limit_clamped_at_300() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         generate_numbered_file(&h, "big.txt", 500);
 
         let tool = FileViewerTool::new();
@@ -498,7 +459,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_offset_beyond_end() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         generate_numbered_file(&h, "small.txt", 10);
 
         let tool = FileViewerTool::new();
@@ -520,7 +481,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_header_format() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         generate_numbered_file(&h, "test.rs", 50);
 
         let tool = FileViewerTool::new();
@@ -537,7 +498,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_footer_shows_remaining() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         generate_numbered_file(&h, "big.txt", 200);
 
         let tool = FileViewerTool::new();
@@ -556,7 +517,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_line_numbers_right_aligned() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         generate_numbered_file(&h, "aligned.txt", 200);
 
         let tool = FileViewerTool::new();
@@ -577,7 +538,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pattern_jump() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let mut content = String::new();
         for i in 1..=100 {
             if i == 50 {
@@ -607,7 +568,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pattern_not_found() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         generate_numbered_file(&h, "code.rs", 100);
 
         let tool = FileViewerTool::new();
@@ -630,7 +591,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pattern_on_first_line() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(
             h.path().join("first.txt"),
             "target_pattern\nline 2\nline 3\n",
@@ -654,7 +615,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_small_file_shows_all() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         generate_numbered_file(&h, "tiny.txt", 10);
 
         let tool = FileViewerTool::new();
@@ -670,7 +631,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_file() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("empty.txt"), "").unwrap();
 
         let tool = FileViewerTool::new();
@@ -685,7 +646,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_path_traversal_rejected() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
 
         let tool = FileViewerTool::new();
         let result = tool
@@ -705,7 +666,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_output_uses_relative_paths() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         generate_numbered_file(&h, "rel.txt", 5);
 
         let tool = FileViewerTool::new();
@@ -736,7 +697,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_utf8_returns_error() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("binary.bin"), [0xFF, 0xFE, 0x00, 0x01]).unwrap();
 
         let tool = FileViewerTool::new();
@@ -755,7 +716,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_offset_zero_rejected() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         generate_numbered_file(&h, "file.txt", 10);
 
         let tool = FileViewerTool::new();
@@ -777,7 +738,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_limit_zero_rejected() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         generate_numbered_file(&h, "file.txt", 10);
 
         let tool = FileViewerTool::new();
@@ -799,7 +760,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pattern_overrides_offset() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let mut content = String::new();
         for i in 1..=100 {
             if i == 80 {
@@ -830,7 +791,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_exactly_default_limit_lines() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         generate_numbered_file(&h, "exact.txt", 100);
 
         let tool = FileViewerTool::new();
@@ -848,7 +809,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_integer_offset_returns_error() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         generate_numbered_file(&h, "file.txt", 10);
 
         let tool = FileViewerTool::new();
@@ -869,7 +830,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_not_found_returns_error() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         // SafeFilePath resolves symlinks + checks existence during path validation,
         // so a non-existent file fails at the path extraction stage (InvalidInput).
         let tool = FileViewerTool::new();
@@ -887,7 +848,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_pattern_treated_as_no_pattern() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         generate_numbered_file(&h, "file.txt", 50);
 
         let tool = FileViewerTool::new();

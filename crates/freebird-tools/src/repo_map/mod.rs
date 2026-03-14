@@ -852,7 +852,6 @@ impl RepoMapTool {
 
     /// Execute the ranked mode: extract tags, build reference graph, run
     /// `PageRank`, then format output with files ordered by importance.
-    #[allow(clippy::too_many_arguments)]
     fn execute_ranked(
         files: &[PathBuf],
         language: &tree_sitter::Language,
@@ -1087,51 +1086,11 @@ impl Tool for RepoMapTool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
-    use std::path::PathBuf;
-
     use freebird_traits::id::SessionId;
     use freebird_traits::tool::{Capability, Tool, ToolContext, ToolError, ToolOutcome};
 
     use super::*;
-
-    // ── TestHarness ───────────────────────────────────────────────
-
-    struct TestHarness {
-        _tmp: tempfile::TempDir,
-        sandbox: PathBuf,
-        session_id: SessionId,
-        capabilities: Vec<Capability>,
-        allowed_directories: Vec<PathBuf>,
-    }
-
-    impl TestHarness {
-        fn new() -> Self {
-            let tmp = tempfile::tempdir().unwrap();
-            let sandbox = tmp.path().canonicalize().unwrap();
-            Self {
-                _tmp: tmp,
-                sandbox,
-                session_id: SessionId::from_string("test-session"),
-                capabilities: vec![Capability::FileRead],
-                allowed_directories: vec![],
-            }
-        }
-
-        fn path(&self) -> &Path {
-            &self.sandbox
-        }
-
-        fn context(&self) -> ToolContext<'_> {
-            ToolContext {
-                session_id: &self.session_id,
-                sandbox_root: &self.sandbox,
-                granted_capabilities: &self.capabilities,
-                allowed_directories: &self.allowed_directories,
-                knowledge_store: None,
-                memory: None,
-            }
-        }
-    }
+    use crate::test_utils::TestHarness;
 
     // ── Phase 1: Pure types ───────────────────────────────────────
 
@@ -1167,7 +1126,7 @@ mod tests {
 
     #[test]
     fn test_discover_finds_rs_files() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("main.rs"), "fn main() {}").unwrap();
         std::fs::write(h.path().join("lib.rs"), "pub mod foo;").unwrap();
 
@@ -1177,7 +1136,7 @@ mod tests {
 
     #[test]
     fn test_discover_skips_hidden_dirs() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let hidden = h.path().join(".hidden");
         std::fs::create_dir(&hidden).unwrap();
         std::fs::write(hidden.join("secret.rs"), "fn secret() {}").unwrap();
@@ -1190,7 +1149,7 @@ mod tests {
 
     #[test]
     fn test_discover_skips_target() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let target = h.path().join("target");
         std::fs::create_dir(&target).unwrap();
         std::fs::write(target.join("build.rs"), "fn build() {}").unwrap();
@@ -1202,7 +1161,7 @@ mod tests {
 
     #[test]
     fn test_discover_respects_max() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         for i in 0..20 {
             std::fs::write(h.path().join(format!("file{i:02}.rs")), "fn f() {}").unwrap();
         }
@@ -1213,7 +1172,7 @@ mod tests {
 
     #[test]
     fn test_discover_sorted() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("zebra.rs"), "").unwrap();
         std::fs::write(h.path().join("alpha.rs"), "").unwrap();
         std::fs::write(h.path().join("middle.rs"), "").unwrap();
@@ -1228,14 +1187,14 @@ mod tests {
 
     #[test]
     fn test_discover_empty_dir() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let files = discover_files(h.path(), "rs", 100);
         assert!(files.is_empty());
     }
 
     #[test]
     fn test_discover_recursive() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let sub = h.path().join("src").join("tools");
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(sub.join("deep.rs"), "fn deep() {}").unwrap();
@@ -1549,7 +1508,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_repo_map_default_params() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("main.rs"), "pub fn main() {}").unwrap();
 
         let tool = RepoMapTool::new();
@@ -1564,7 +1523,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_repo_map_with_explicit_path() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let sub = h.path().join("subdir");
         std::fs::create_dir(&sub).unwrap();
         std::fs::write(sub.join("inner.rs"), "pub fn inner() {}").unwrap();
@@ -1581,7 +1540,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_repo_map_outline_depth() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(
             h.path().join("lib.rs"),
             "pub fn foo(x: i32) -> bool { true }",
@@ -1599,7 +1558,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_repo_map_full_depth() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("lib.rs"), "/// My function\npub fn foo() {}").unwrap();
 
         let tool = RepoMapTool::new();
@@ -1612,7 +1571,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_repo_map_invalid_language() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let tool = RepoMapTool::new();
 
         let err = tool
@@ -1630,7 +1589,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_repo_map_invalid_depth() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let tool = RepoMapTool::new();
 
         let err = tool
@@ -1645,7 +1604,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_repo_map_no_files_found() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let tool = RepoMapTool::new();
         let output = tool
             .execute(serde_json::json!({}), &h.context())
@@ -1657,7 +1616,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_repo_map_max_files_respected() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         for i in 0..20 {
             std::fs::write(
                 h.path().join(format!("f{i:02}.rs")),
@@ -1685,7 +1644,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_repo_map_path_traversal_rejected() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         let tool = RepoMapTool::new();
 
         let err = tool
@@ -1700,7 +1659,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_repo_map_output_uses_relative_paths() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("main.rs"), "pub fn main() {}").unwrap();
 
         let tool = RepoMapTool::new();
@@ -1815,7 +1774,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_repo_map_file_path_rejected() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("lib.rs"), "pub fn foo() {}").unwrap();
 
         let tool = RepoMapTool::new();
@@ -1837,7 +1796,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_repo_map_rust_language_accepted() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("lib.rs"), "pub fn foo() {}").unwrap();
 
         let tool = RepoMapTool::new();
@@ -1851,7 +1810,7 @@ mod tests {
 
     #[test]
     fn test_discover_skips_symlinks() {
-        let h = TestHarness::new();
+        let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
         std::fs::write(h.path().join("real.rs"), "pub fn real() {}").unwrap();
 
         // Create a symlinked directory pointing outside the sandbox
@@ -1914,7 +1873,7 @@ mod tests {
         proptest! {
             #[test]
             fn discover_never_exceeds_max(max in 1usize..50) {
-                let h = TestHarness::new();
+                let h = TestHarness::with_capabilities(vec![Capability::FileRead]);
                 for i in 0..60 {
                     std::fs::write(
                         h.path().join(format!("f{i:03}.rs")),
