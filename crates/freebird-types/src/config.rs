@@ -212,6 +212,20 @@ pub struct ToolsConfig {
     pub git_timeout_secs: u64,
 }
 
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            sandbox_root: std::env::temp_dir(),
+            default_timeout_secs: 30,
+            allowed_directories: Vec::new(),
+            allowed_shell_commands: default_allowed_shell_commands(),
+            max_shell_output_bytes: default_max_shell_output_bytes(),
+            edit: EditConfig::default(),
+            git_timeout_secs: default_git_timeout_secs(),
+        }
+    }
+}
+
 const fn default_git_timeout_secs() -> u64 {
     5
 }
