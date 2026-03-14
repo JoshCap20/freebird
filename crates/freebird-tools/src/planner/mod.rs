@@ -2,7 +2,9 @@
 //!
 //! Uses `repo_map`'s tree-sitter AST analysis and reference graph to infer
 //! dependencies, change kinds, and crate kinds, then delegates to
-//! `freebird_types::planner::plan_changes` for topological sorting.
+//! `algorithm::plan_changes` for topological sorting.
+
+pub mod algorithm;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,7 +17,8 @@ use freebird_traits::tool::{
     Capability, RiskLevel, SideEffects, Tool, ToolContext, ToolError, ToolInfo, ToolOutcome,
     ToolOutput,
 };
-use freebird_types::planner::{ChangeKind, CrateKind, PlannedChange};
+
+use algorithm::{ChangeKind, CrateKind, PlannedChange};
 
 use crate::common::{extract_optional_bool, extract_optional_usize};
 use crate::repo_map::cache::TagCache;
@@ -436,7 +439,7 @@ impl Tool for PlanEditsTool {
         }
 
         // Run the topological sort
-        match freebird_types::planner::plan_changes(planned) {
+        match algorithm::plan_changes(planned) {
             Ok(plan) => {
                 let json = serde_json::to_string_pretty(&plan).map_err(|e| {
                     ToolError::ExecutionFailed {

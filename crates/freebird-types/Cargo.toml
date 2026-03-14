@@ -13,11 +13,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
-thiserror = { workspace = true }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 toml = { workspace = true }
-proptest = { workspace = true }
