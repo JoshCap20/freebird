@@ -17,7 +17,8 @@ use freebird_traits::tool::{
 };
 
 use crate::common::{
-    extract_optional_bool, extract_optional_str, extract_optional_usize, should_skip_dir,
+    extract_optional_bool, extract_optional_str, extract_optional_usize, extract_required_string,
+    should_skip_dir,
 };
 
 /// Default number of context lines before and after each match.
@@ -424,21 +425,10 @@ fn parse_grep_params(
                 reason: e.to_string(),
             })?;
     // Re-extract from raw JSON since Tainted::inner() is pub(crate)
-    let pattern = input
-        .get("pattern")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| ToolError::InvalidInput {
-            tool: GrepSearchTool::NAME.into(),
-            reason: "missing or non-string 'pattern' field".into(),
-        })?
-        .to_string();
+    let pattern = extract_required_string(input, "pattern", GrepSearchTool::NAME)?;
 
     // Optional: path (validated through SafeFilePath)
-    let search_path = if input
-        .get("path")
-        .and_then(serde_json::Value::as_str)
-        .is_some()
-    {
+    let search_path = if extract_optional_str(input, "path").is_some() {
         let safe_path = tainted
             .extract_path_multi_root("path", context.sandbox_root, context.allowed_directories)
             .map_err(|e| ToolError::InvalidInput {

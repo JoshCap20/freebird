@@ -48,3 +48,31 @@ pub fn extract_optional_bool(input: &serde_json::Value, key: &str) -> Option<boo
 pub fn extract_optional_str<'a>(input: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     input.get(key).and_then(serde_json::Value::as_str)
 }
+
+/// Extract a required string field from tool input JSON.
+///
+/// Returns the string value or a `ToolError::InvalidInput` describing the missing field.
+pub fn extract_required_str<'a>(
+    input: &'a serde_json::Value,
+    key: &str,
+    tool_name: &str,
+) -> Result<&'a str, freebird_traits::tool::ToolError> {
+    input
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| freebird_traits::tool::ToolError::InvalidInput {
+            tool: tool_name.into(),
+            reason: format!("missing or non-string '{key}' field"),
+        })
+}
+
+/// Extract a required owned `String` field from tool input JSON.
+///
+/// Convenience wrapper around [`extract_required_str`] for callers that need ownership.
+pub fn extract_required_string(
+    input: &serde_json::Value,
+    key: &str,
+    tool_name: &str,
+) -> Result<String, freebird_traits::tool::ToolError> {
+    extract_required_str(input, key, tool_name).map(ToOwned::to_owned)
+}

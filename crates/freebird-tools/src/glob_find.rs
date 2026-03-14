@@ -16,7 +16,7 @@ use freebird_traits::tool::{
     ToolOutput,
 };
 
-use crate::common;
+use crate::common::{self, extract_required_string};
 
 /// Default maximum number of results to return.
 const DEFAULT_MAX_RESULTS: usize = 100;
@@ -112,21 +112,10 @@ fn parse_glob_find_params(
                 reason: e.to_string(),
             })?;
     // Re-extract from raw JSON since Tainted::inner() is pub(crate)
-    let pattern = input
-        .get("pattern")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| ToolError::InvalidInput {
-            tool: GlobFindTool::NAME.into(),
-            reason: "missing or non-string 'pattern' field".into(),
-        })?
-        .to_string();
+    let pattern = extract_required_string(input, "pattern", GlobFindTool::NAME)?;
 
     // Optional: path (validated through SafeFilePath)
-    let search_root = if input
-        .get("path")
-        .and_then(serde_json::Value::as_str)
-        .is_some()
-    {
+    let search_root = if common::extract_optional_str(input, "path").is_some() {
         let safe_path = tainted
             .extract_path_multi_root("path", context.sandbox_root, context.allowed_directories)
             .map_err(|e| ToolError::InvalidInput {

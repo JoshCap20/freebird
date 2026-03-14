@@ -23,6 +23,8 @@ use freebird_traits::tool::{
     ToolOutput,
 };
 
+use crate::common::extract_optional_str;
+
 /// Default maximum files to scan.
 const DEFAULT_MAX_FILES: usize = 100;
 
@@ -689,7 +691,7 @@ impl RepoMapTool {
 
     /// Parse and validate tool input parameters before taint wrapping.
     fn parse_input_params(input: &serde_json::Value) -> Result<ParsedParams, ToolError> {
-        let depth = match input.get("depth").and_then(serde_json::Value::as_str) {
+        let depth = match extract_optional_str(input, "depth") {
             Some(s) => parse_depth(s).map_err(|reason| ToolError::InvalidInput {
                 tool: Self::NAME.into(),
                 reason,
@@ -697,7 +699,7 @@ impl RepoMapTool {
             None => Depth::Signatures,
         };
 
-        let mode = match input.get("mode").and_then(serde_json::Value::as_str) {
+        let mode = match extract_optional_str(input, "mode") {
             Some(s) => parse_mode(s).map_err(|reason| ToolError::InvalidInput {
                 tool: Self::NAME.into(),
                 reason,
@@ -712,7 +714,7 @@ impl RepoMapTool {
                 usize::try_from(v).unwrap_or(DEFAULT_TOKEN_BUDGET_CHARS)
             });
 
-        if let Some(lang) = input.get("language").and_then(serde_json::Value::as_str) {
+        if let Some(lang) = extract_optional_str(input, "language") {
             if lang != "rust" {
                 return Err(ToolError::InvalidInput {
                     tool: Self::NAME.into(),
