@@ -6,12 +6,13 @@
 
 use std::collections::BTreeSet;
 
-use anyhow::{Context, Result};
 use chrono::Utc;
 
 use freebird_runtime::tool_registry::ToolRegistry;
 use freebird_traits::id::KnowledgeId;
-use freebird_traits::knowledge::{KnowledgeEntry, KnowledgeKind, KnowledgeSource, KnowledgeStore};
+use freebird_traits::knowledge::{
+    KnowledgeEntry, KnowledgeError, KnowledgeKind, KnowledgeSource, KnowledgeStore,
+};
 use freebird_types::config::AppConfig;
 
 /// Populate the knowledge store with system-level entries on startup.
@@ -23,7 +24,7 @@ pub async fn populate_system_knowledge(
     store: &dyn KnowledgeStore,
     tool_registry: &ToolRegistry,
     config: &AppConfig,
-) -> Result<()> {
+) -> Result<(), KnowledgeError> {
     let now = Utc::now();
 
     // --- ToolCapability entries ---
@@ -55,8 +56,7 @@ pub async fn populate_system_knowledge(
 
     store
         .replace_kind(&KnowledgeKind::ToolCapability, tool_entries)
-        .await
-        .context("failed to populate ToolCapability knowledge")?;
+        .await?;
 
     // --- SystemConfig entries ---
     let config_facts = [
@@ -100,8 +100,7 @@ pub async fn populate_system_knowledge(
     let entry_count = config_entries.len();
     store
         .replace_kind(&KnowledgeKind::SystemConfig, config_entries)
-        .await
-        .context("failed to populate SystemConfig knowledge")?;
+        .await?;
 
     tracing::info!(
         tool_capabilities = tool_registry.tool_count(),

@@ -4,8 +4,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context as _;
-
 use freebird_channels::tcp::TcpChannel;
 use freebird_runtime::agent::AgentRuntime;
 use freebird_types::config::AppConfig;
@@ -100,7 +98,8 @@ impl FreebirdBuilder {
             event_sink,
             audit_sink,
             db,
-        } = database::init_database(&config, &self.passphrase).map_err(CoreError::Database)?;
+        } = database::init_database(&config, &self.passphrase)
+            .map_err(|e| CoreError::Database(format!("{e:#}")))?;
 
         // 3. VERIFY AUDIT CHAIN
         if let Some(ref sink) = audit_sink {
@@ -113,7 +112,7 @@ impl FreebirdBuilder {
         // 4. PROVIDER REGISTRY
         let registry = providers::build_provider_registry(&config)
             .await
-            .map_err(CoreError::Provider)?;
+            .map_err(|e| CoreError::Provider(format!("{e:#}")))?;
 
         // 5. CHANNEL
         let channel: Box<dyn freebird_traits::channel::Channel> = match self.channel {
@@ -126,8 +125,7 @@ impl FreebirdBuilder {
 
         // 6. TOOLS
         let tool_registry = tools::build_tool_registry(&config)
-            .context("failed to build tool registry")
-            .map_err(CoreError::ToolRegistry)?;
+            .map_err(|e| CoreError::ToolRegistry(format!("{e:#}")))?;
 
         // 6b. BOOTSTRAP KNOWLEDGE
         if let Some(ref store) = knowledge_store {
@@ -142,13 +140,12 @@ impl FreebirdBuilder {
             .map_err(|e| CoreError::Config(e.to_string()))?;
         tokio::fs::create_dir_all(&tools_config.sandbox_root)
             .await
-            .with_context(|| {
-                format!(
-                    "failed to create sandbox directory `{}`",
+            .map_err(|e| {
+                CoreError::Config(format!(
+                    "failed to create sandbox directory `{}`: {e}",
                     tools_config.sandbox_root.display()
-                )
-            })
-            .map_err(|e| CoreError::Config(e.to_string()))?;
+                ))
+            })?;
         util::merge_allow_dirs(&mut tools_config, self.extra_allow_dirs)
             .map_err(|e| CoreError::Config(e.to_string()))?;
 
@@ -170,13 +167,9 @@ impl FreebirdBuilder {
 
         // 9. SECRET GUARD
         let secret_guard = if config.security.secret_guard.enabled {
-            Some(
-                freebird_security::secret_guard::SecretGuard::from_config(
-                    &config.security.secret_guard,
-                )
-                .context("failed to construct SecretGuard from config")
-                .map_err(CoreError::Security)?,
-            )
+            Some(freebird_security::secret_guard::SecretGuard::from_config(
+                &config.security.secret_guard,
+            )?)
         } else {
             tracing::info!("secret guard disabled via config");
             None
@@ -198,8 +191,7 @@ impl FreebirdBuilder {
             config.security.injection.clone(),
             Some(Arc::clone(&revocation_list)),
         )
-        .context("failed to construct ToolExecutor (duplicate tool names?)")
-        .map_err(CoreError::ToolRegistry)?;
+        .map_err(|e| CoreError::ToolRegistry(e.to_string()))?;
 
         // 12. SUMMARY STORE (cast to trait object for runtime DAG compliance)
         let summary_store: Option<Arc<dyn freebird_traits::summary::SummarySink>> = Some(Arc::new(

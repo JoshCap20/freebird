@@ -45,7 +45,7 @@ impl FreebirdApp {
         Arc::new(self.runtime)
             .run(token)
             .await
-            .map_err(|e| CoreError::Runtime(e.into()))
+            .map_err(CoreError::Runtime)
     }
 
     /// Access the audit sink for pre-run/post-run audit events.

@@ -1,5 +1,8 @@
 //! Core error types for `FreebirdBuilder` and `FreebirdApp`.
 
+use freebird_runtime::agent::RuntimeError;
+use freebird_security::error::SecurityError;
+use freebird_traits::knowledge::KnowledgeError;
 use freebird_traits::memory::MemoryError;
 
 /// Errors from building or running a `FreebirdApp`.
@@ -11,19 +14,19 @@ pub enum CoreError {
 
     /// Database initialization or key derivation failed.
     #[error("database initialization failed: {0}")]
-    Database(#[source] anyhow::Error),
+    Database(String),
 
     /// Provider construction or credential validation failed.
     #[error("provider initialization failed: {0}")]
-    Provider(#[source] anyhow::Error),
+    Provider(String),
 
     /// Tool registry construction failed (e.g. duplicate tool names).
     #[error("tool registry error: {0}")]
-    ToolRegistry(#[source] anyhow::Error),
+    ToolRegistry(String),
 
     /// Knowledge store bootstrap failed.
     #[error("knowledge bootstrap failed: {0}")]
-    Knowledge(#[source] anyhow::Error),
+    Knowledge(#[source] KnowledgeError),
 
     /// Audit chain integrity verification failed on startup.
     #[error("audit chain integrity violation: {0}")]
@@ -31,7 +34,7 @@ pub enum CoreError {
 
     /// Agent runtime error during execution.
     #[error("runtime error: {0}")]
-    Runtime(#[source] anyhow::Error),
+    Runtime(#[from] RuntimeError),
 
     /// Channel construction failed.
     #[error("channel construction failed: {0}")]
@@ -39,5 +42,5 @@ pub enum CoreError {
 
     /// Security subsystem construction failed.
     #[error("security initialization failed: {0}")]
-    Security(#[source] anyhow::Error),
+    Security(#[from] SecurityError),
 }
