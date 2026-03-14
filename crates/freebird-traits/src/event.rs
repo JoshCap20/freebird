@@ -18,7 +18,6 @@ use crate::provider::Message;
 /// Events are appended to an event log and replayed to reconstruct
 /// [`Conversation`](crate::memory::Conversation) state. The `turn_index`
 /// fields provide deterministic ordering for replay.
-#[allow(clippy::derive_partial_eq_without_eq)] // Message contains serde_json::Value
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConversationEvent {

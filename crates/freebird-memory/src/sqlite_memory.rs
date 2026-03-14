@@ -45,7 +45,11 @@ impl SqliteMemory {
 }
 
 /// Saturating conversion from `usize` to `i64` for SQL LIMIT parameters.
-#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "value range checked"
+)]
 const fn limit_i64(limit: usize) -> i64 {
     if limit > i64::MAX as usize {
         i64::MAX
@@ -291,7 +295,7 @@ fn upsert_session_metadata(
         .map(|t| crate::helpers::extract_message_preview(&t.user_message))
         .unwrap_or_default();
 
-    #[allow(clippy::cast_possible_wrap)]
+    #[expect(clippy::cast_possible_wrap, reason = "value range checked")]
     let turn_count = conv.turns.len() as i64;
 
     db_conn
@@ -355,7 +359,11 @@ fn list_from_metadata(
             .map_err(|e| MemoryError::Serialization(format!("updated_at: {e}")))?
             .to_utc();
 
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_sign_loss,
+            clippy::cast_possible_truncation,
+            reason = "value range checked"
+        )]
         let turn_count = row.turn_count as usize;
 
         summaries.push(SessionSummary {
@@ -425,7 +433,11 @@ fn search_fts(
             .map_err(|e| MemoryError::Serialization(format!("updated_at: {e}")))?
             .to_utc();
 
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_sign_loss,
+            clippy::cast_possible_truncation,
+            reason = "value range checked"
+        )]
         let turn_count = row.turn_count as usize;
 
         summaries.push(SessionSummary {

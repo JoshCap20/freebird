@@ -251,8 +251,6 @@ impl EgressRateLimiter {
     /// effectively unlimited.
     #[must_use]
     pub fn new(limit: u32) -> Self {
-        // u32→usize is always safe: usize ≥ 32 bits on all supported platforms.
-        #[allow(clippy::cast_possible_truncation)]
         let size = limit as usize;
         let mut timestamps = Vec::with_capacity(size);
         for _ in 0..size {
@@ -289,7 +287,7 @@ impl EgressRateLimiter {
         }
 
         // Truncation from u128→u64 is safe: millis since epoch fit in u64 until year 584M.
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(clippy::cast_possible_truncation, reason = "value range checked")]
         let now_millis = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -299,7 +297,7 @@ impl EgressRateLimiter {
 
         // `slot` is always < self.limit (which fits in u32), so truncation to usize
         // is safe on all platforms (usize ≥ 32 bits).
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(clippy::cast_possible_truncation, reason = "value range checked")]
         let slot_idx = slot as usize;
         let Some(entry) = self.timestamps.get(slot_idx) else {
             return Err(SecurityError::EgressRateLimited {

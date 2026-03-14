@@ -90,3 +90,13 @@ tree-sitter-rust = "0.24"
 tempfile = "3"
 wiremock = "0.6"
 proptest = "1"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+module_name_repetitions = "allow"

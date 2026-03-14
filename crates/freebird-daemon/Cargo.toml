@@ -25,6 +25,9 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 mimalloc = { workspace = true }
 
+[lints]
+workspace = true
+
 [dev-dependencies]
 figment = { workspace = true }
 tempfile = { workspace = true }

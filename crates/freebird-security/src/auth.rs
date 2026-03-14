@@ -179,7 +179,7 @@ impl TryFrom<SessionCredentialUnchecked> for SessionCredential {
 ///
 /// Panics if the system RNG fails (indicates a broken OS — no recovery possible).
 /// This is the only `expect()` in the codebase, matching `ring`'s own guidance.
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used, reason = "system RNG failure is unrecoverable")]
 pub fn generate_session_key(
     capabilities: Vec<Capability>,
     ttl: Option<Duration>,

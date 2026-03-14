@@ -145,7 +145,10 @@ const COMMAND_KEYS: &[&str] = &["command", "cmd"];
 
 // ── File pattern matching ───────────────────────────────────────────────
 
-#[allow(clippy::option_if_let_else)] // if-let chain is clearer than map_or_else here
+#[expect(
+    clippy::option_if_let_else,
+    reason = "if-let chain is clearer than map_or_else here"
+)]
 fn matches_extra_pattern(filename: &str, pattern: &str) -> bool {
     if let Some(suffix) = pattern.strip_prefix('*') {
         // *.ext pattern

@@ -4,11 +4,6 @@
 //! `freebird-*` dependencies. External deps are the minimum needed for
 //! async trait signatures and serialization.
 
-#![deny(clippy::all, clippy::pedantic, clippy::nursery)]
-#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-#![deny(clippy::indexing_slicing)]
-#![allow(clippy::module_name_repetitions)]
-
 pub mod audit;
 pub mod channel;
 pub mod event;

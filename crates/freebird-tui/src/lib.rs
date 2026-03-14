@@ -5,10 +5,6 @@
 //! - [`replay`] — Human-readable and JSON formatters for past session traces
 //! - [`ui`] — Interactive TUI with crossterm raw mode, multi-line editing, spinners, etc.
 
-#![deny(clippy::all, clippy::pedantic, clippy::nursery)]
-#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-#![deny(clippy::indexing_slicing)]
-#![allow(clippy::module_name_repetitions)]
 // These lints were implicitly suppressed when this code lived inside the daemon
 // bin crate. Allow them here to avoid adding boilerplate to every pub function
 // in what is effectively an internal crate.

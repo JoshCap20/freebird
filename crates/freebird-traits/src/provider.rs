@@ -72,7 +72,6 @@ pub struct CompletionRequest {
 }
 
 /// A message in a conversation.
-#[allow(clippy::derive_partial_eq_without_eq)] // serde_json::Value does not impl Eq
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
@@ -81,7 +80,10 @@ pub struct Message {
 }
 
 /// A single piece of content within a message.
-#[allow(clippy::derive_partial_eq_without_eq)] // serde_json::Value does not impl Eq
+#[expect(
+    clippy::derive_partial_eq_without_eq,
+    reason = "serde_json::Value does not impl Eq"
+)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
@@ -106,7 +108,6 @@ pub enum ContentBlock {
 }
 
 /// A complete (non-streaming) response from the provider.
-#[allow(clippy::derive_partial_eq_without_eq)] // serde_json::Value does not impl Eq
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompletionResponse {
     pub message: Message,

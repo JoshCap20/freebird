@@ -86,7 +86,7 @@ impl TaintedToolInput {
     }
 
     /// Access the raw inner JSON. Only callable within `freebird-security`.
-    #[allow(dead_code)] // Will be used when tool input validation needs raw JSON access
+    #[expect(dead_code, reason = "reserved for future use")]
     pub(crate) const fn inner(&self) -> &serde_json::Value {
         &self.0
     }

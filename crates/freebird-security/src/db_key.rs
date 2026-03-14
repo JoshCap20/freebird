@@ -68,7 +68,7 @@ pub fn derive_key(
     let mut key_bytes = [0u8; KEY_LEN];
     // SAFETY of unwrap: we checked `iterations > 0` above, so NonZeroU32::new
     // is guaranteed to return Some.
-    #[allow(clippy::unwrap_used)]
+    #[expect(clippy::unwrap_used, reason = "iterations > 0 checked above")]
     let non_zero_iters = std::num::NonZeroU32::new(iterations).unwrap();
     pbkdf2::derive(
         PBKDF2_ALG,

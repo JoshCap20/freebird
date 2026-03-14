@@ -61,7 +61,11 @@ pub fn should_summarize(
     }
 
     let estimated_tokens = estimate_token_count(messages);
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "value is non-negative"
+    )]
     let threshold = (f64::from(max_context_tokens) * config.trigger_threshold) as usize;
 
     estimated_tokens > threshold

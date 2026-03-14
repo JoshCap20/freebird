@@ -7,11 +7,6 @@
 //! - `freebird stop`   — send graceful shutdown to daemon
 //! - `freebird replay` — replay a past session as a detailed trace
 
-#![deny(clippy::all, clippy::pedantic, clippy::nursery)]
-#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-#![deny(clippy::indexing_slicing)]
-#![allow(clippy::module_name_repetitions)]
-
 use mimalloc::MiMalloc;
 
 #[global_allocator]

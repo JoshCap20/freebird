@@ -118,7 +118,7 @@ impl AgentRuntime {
     /// The `SessionManager` is created internally — it's an implementation
     /// detail, not an external dependency.
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "composition root wiring")]
     pub fn new(
         provider_registry: ProviderRegistry,
         channel: Box<dyn Channel>,
@@ -178,7 +178,7 @@ impl AgentRuntime {
     ///
     /// Non-fatal: all errors are logged and skipped. Summarization is retried
     /// on the next turn. Returns the updated summary if one was generated.
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines, reason = "complex orchestration logic")]
     async fn maybe_summarize(
         &self,
         session_id: &SessionId,
@@ -702,7 +702,10 @@ impl AgentRuntime {
     ///   - `Prompt` → ask user via `ApprovalGate`; fallback to warn-and-proceed
     ///   - `Allow` → warn and proceed
     /// - `Rejected` → hard failure (e.g., input too long)
-    #[allow(clippy::too_many_lines)] // three-way config branch + three-way gate result
+    #[expect(
+        clippy::too_many_lines,
+        reason = "three-way config branch + three-way gate result"
+    )]
     async fn validate_input(
         &self,
         raw_text: &str,
@@ -1219,7 +1222,7 @@ impl AgentRuntime {
     /// When a budget is configured, delegates to `check_tool_rounds` and routes
     /// any exceeded error through the approval gate.  When no budget exists,
     /// falls back to the static `max_rounds` limit from config.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "complex orchestration logic")]
     async fn check_round_budget(
         &self,
         round: usize,
@@ -1298,7 +1301,11 @@ impl AgentRuntime {
     /// When `initial_request` is `Some`, the first loop iteration uses it directly
     /// instead of building a fresh `CompletionRequest`. This supports the streaming
     /// fallback path where the request has already been constructed.
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "complex orchestration logic"
+    )]
     async fn run_agentic_loop(
         &self,
         safe_message: &SafeMessage,
@@ -1553,7 +1560,7 @@ impl AgentRuntime {
     /// Shared between the non-streaming (`run_agentic_loop`) and streaming
     /// (`run_agentic_loop_streaming`) paths to avoid duplicating security-critical
     /// tool execution code.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "complex orchestration logic")]
     async fn execute_tool_calls(
         &self,
         assistant_message: &Message,
@@ -1861,8 +1868,11 @@ impl AgentRuntime {
     ///
     /// Injection scan on accumulated text is audit-only — the text has already
     /// been delivered to the user via `StreamChunk` events.
-    #[allow(clippy::too_many_lines)] // budget enforcement adds necessary branches
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_lines,
+        clippy::too_many_arguments,
+        reason = "complex orchestration logic"
+    )]
     async fn run_agentic_loop_streaming(
         &self,
         safe_message: &SafeMessage,

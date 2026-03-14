@@ -5,10 +5,6 @@
 //! The daemon binary becomes a thin shell that loads config, calls the builder,
 //! and manages process-level concerns (signals, logging).
 
-#![deny(clippy::all, clippy::pedantic, clippy::nursery)]
-#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-#![deny(clippy::indexing_slicing)]
-#![allow(clippy::module_name_repetitions)]
 #![allow(clippy::missing_errors_doc, clippy::must_use_candidate)]
 
 use std::sync::Arc;

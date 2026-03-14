@@ -170,7 +170,6 @@ impl ToolSpinner {
 
     /// Get the elapsed time for the current tool (for display if needed).
     #[must_use]
-    #[allow(dead_code)]
     pub fn elapsed_ms(&self) -> Option<u64> {
         self.active_tool
             .as_ref()

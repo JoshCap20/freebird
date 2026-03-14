@@ -101,7 +101,7 @@ impl ToolExecutor {
     /// Returns [`ToolExecutorError::DuplicateToolName`] if two or more tools
     /// share the same name. Duplicate tool names are a configuration bug —
     /// fail loudly at startup rather than silently overwriting (CLAUDE.md §3.4).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "composition root wiring")]
     pub fn new(
         tools: Vec<Box<dyn Tool>>,
         default_timeout: Duration,
@@ -281,7 +281,10 @@ impl ToolExecutor {
     /// 6. Injection scan on non-error output via `ScannedToolOutput::from_raw()`
     ///
     /// **Infallible**: returns `ToolOutput` with `outcome=ToolOutcome::Error` on failure.
-    #[allow(clippy::too_many_lines)] // security chokepoint — all checks must be in one path
+    #[expect(
+        clippy::too_many_lines,
+        reason = "security chokepoint — all checks must be in one path"
+    )]
     pub async fn execute(
         &self,
         tool_name: &str,

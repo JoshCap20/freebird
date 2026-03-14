@@ -120,7 +120,6 @@ impl CommandCompleter {
     ///
     /// Returns the suffix to display after the cursor (not the full command).
     #[must_use]
-    #[allow(clippy::unused_self)] // Method for API consistency with complete()
     pub fn hint(&self, input: &str) -> Option<&'static str> {
         let prefix = input.strip_prefix('/')?;
         if prefix.is_empty() {

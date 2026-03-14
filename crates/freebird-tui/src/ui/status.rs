@@ -47,7 +47,6 @@ impl StatusBar {
     }
 
     /// Display token usage after a turn completes.
-    #[allow(clippy::unused_self)] // Method on StatusBar for future cumulative tracking
     pub fn show_token_usage<W: Write>(
         &self,
         w: &mut W,
@@ -59,7 +58,6 @@ impl StatusBar {
 
     /// Whether the session header has been displayed.
     #[must_use]
-    #[allow(dead_code)]
     pub const fn header_shown(&self) -> bool {
         self.header_shown
     }

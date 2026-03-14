@@ -180,7 +180,10 @@ fn is_high_entropy_base64(s: &str) -> bool {
         .count();
 
     // Must be >85% base64 characters
-    #[allow(clippy::cast_precision_loss)] // Precision loss is acceptable for a ratio check
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "precision loss acceptable for ratio check"
+    )]
     if (base64_chars as f64 / total as f64) < 0.85 {
         return false;
     }

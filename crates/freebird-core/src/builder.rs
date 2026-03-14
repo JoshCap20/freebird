@@ -44,7 +44,10 @@ pub struct FreebirdBuilder {
 impl FreebirdBuilder {
     /// Start from an `AppConfig`. Uses production defaults for passphrase
     /// resolution and TCP channel.
-    #[allow(clippy::missing_const_for_fn)] // Vec::new() in const context is nightly-only
+    #[expect(
+        clippy::missing_const_for_fn,
+        reason = "false positive: Vec::new() in const context is nightly-only"
+    )]
     pub fn from_config(config: AppConfig) -> Self {
         Self {
             config,
@@ -85,7 +88,7 @@ impl FreebirdBuilder {
     /// # Errors
     ///
     /// Returns `CoreError` if any subsystem fails to initialize.
-    #[allow(clippy::too_many_lines)] // composition root — naturally long
+    #[expect(clippy::too_many_lines, reason = "composition root / builder pattern")]
     pub async fn build(self) -> Result<FreebirdApp, CoreError> {
         // 1. VALIDATE + ENFORCE
         config::validate_config(&self.config).map_err(|e| CoreError::Config(e.to_string()))?;

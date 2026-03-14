@@ -349,7 +349,6 @@ impl InputEditor {
 
     /// Get the number of terminal lines the input area occupies.
     #[must_use]
-    #[allow(dead_code)]
     pub fn height(&self) -> u16 {
         u16::try_from(self.lines.len()).unwrap_or(u16::MAX)
     }

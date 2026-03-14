@@ -13,7 +13,6 @@ use crate::tool::ToolOutcome;
 /// `assistant_messages` stores all assistant messages in order: intermediate
 /// `ToolUse` responses followed by the final text response. Empty when the
 /// turn is still in progress.
-#[allow(clippy::derive_partial_eq_without_eq)] // serde_json::Value does not impl Eq
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Turn {
     pub user_message: Message,
@@ -24,7 +23,10 @@ pub struct Turn {
 }
 
 /// Record of a single tool invocation within a turn.
-#[allow(clippy::derive_partial_eq_without_eq)] // serde_json::Value does not impl Eq
+#[expect(
+    clippy::derive_partial_eq_without_eq,
+    reason = "serde_json::Value does not impl Eq"
+)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolInvocation {
     pub tool_use_id: String,
@@ -36,7 +38,6 @@ pub struct ToolInvocation {
 }
 
 /// A complete conversation (ordered list of turns + metadata).
-#[allow(clippy::derive_partial_eq_without_eq)] // serde_json::Value does not impl Eq
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Conversation {
     pub session_id: SessionId,

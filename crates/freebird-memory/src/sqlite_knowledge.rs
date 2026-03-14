@@ -76,7 +76,11 @@ fn from_sql_err(col: usize, e: KnowledgeError) -> rusqlite::Error {
 ///
 /// Column order: id, kind, content, tags, source, confidence,
 /// `session_id`, `created_at`, `updated_at`, `access_count`, `last_accessed`
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "value range checked"
+)]
 fn row_to_entry(row: &rusqlite::Row<'_>) -> Result<KnowledgeEntry, rusqlite::Error> {
     Ok(KnowledgeEntry {
         id: KnowledgeId::from_string(row.get::<_, String>(0)?),
@@ -118,7 +122,11 @@ const SELECT_COLS: &str = "id, kind, content, tags, source, confidence, \
                            session_id, created_at, updated_at, access_count, last_accessed";
 
 /// Saturating conversion from `usize` to `i64` for SQL LIMIT parameters.
-#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "value range checked"
+)]
 const fn limit_i64(limit: usize) -> i64 {
     if limit > i64::MAX as usize {
         i64::MAX
@@ -127,7 +135,7 @@ const fn limit_i64(limit: usize) -> i64 {
     }
 }
 
-#[allow(clippy::cast_possible_wrap)]
+#[expect(clippy::cast_possible_wrap, reason = "value range checked")]
 #[async_trait]
 impl KnowledgeStore for SqliteKnowledgeStore {
     async fn store(&self, entry: KnowledgeEntry) -> Result<KnowledgeId, KnowledgeError> {

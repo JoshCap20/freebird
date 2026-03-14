@@ -113,10 +113,10 @@ struct ApiToolDefinition {
 #[derive(Debug, Deserialize)]
 struct ApiResponse {
     /// Deserialized for completeness; not currently used.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // fires in lib but not test (deserialized in tests)
     id: String,
     /// Deserialized for completeness; always "assistant" for responses.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // fires in lib but not test (deserialized in tests)
     role: String,
     content: Vec<ApiContentBlock>,
     model: String,
@@ -126,7 +126,10 @@ struct ApiResponse {
 
 /// Token usage from the API response.
 #[derive(Debug, Deserialize)]
-#[allow(clippy::struct_field_names)] // API field names match Anthropic's wire format
+#[expect(
+    clippy::struct_field_names,
+    reason = "field names match Anthropic API wire format"
+)]
 struct ApiUsage {
     input_tokens: u32,
     output_tokens: u32,
@@ -140,7 +143,7 @@ struct ApiUsage {
 #[derive(Debug, Deserialize)]
 struct ApiErrorResponse {
     /// Deserialized for completeness; not currently used.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // fires in lib but not test (deserialized in tests)
     #[serde(rename = "type")]
     error_type: String,
     error: ApiErrorDetail,
@@ -149,7 +152,7 @@ struct ApiErrorResponse {
 #[derive(Debug, Deserialize)]
 struct ApiErrorDetail {
     /// Deserialized for completeness; not currently used.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // fires in lib but not test (deserialized in tests)
     #[serde(rename = "type")]
     error_type: String,
     message: String,
@@ -163,16 +166,19 @@ struct ApiErrorDetail {
 /// Carries input token count — the ONLY place it appears in the stream.
 #[derive(Debug, Deserialize)]
 struct ApiStreamMessage {
-    #[allow(dead_code)]
+    #[allow(dead_code)] // fires in lib but not test (deserialized in tests)
     id: String,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // fires in lib but not test (deserialized in tests)
     model: String,
     usage: ApiUsage,
 }
 
 /// Cumulative usage from the `message_delta` SSE event.
 #[derive(Debug, Deserialize)]
-#[allow(clippy::struct_field_names)] // API field names match Anthropic's wire format
+#[expect(
+    clippy::struct_field_names,
+    reason = "field names match Anthropic API wire format"
+)]
 struct ApiStreamUsage {
     output_tokens: u32,
     #[serde(default)]
@@ -689,7 +695,7 @@ impl SseStreamState {
     /// Handle a `content_block_start` SSE event (sets up tool accumulator).
     fn process_content_block_start(&mut self, value: &serde_json::Value) {
         // Content block indices are small non-negative integers from the API; truncation is safe.
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(clippy::cast_possible_truncation, reason = "value range checked")]
         let index = value
             .get("index")
             .and_then(serde_json::Value::as_u64)
@@ -737,7 +743,7 @@ impl SseStreamState {
         value: &serde_json::Value,
     ) -> Option<Result<StreamEvent, ProviderError>> {
         // Content block indices are small non-negative integers from the API; truncation is safe.
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(clippy::cast_possible_truncation, reason = "value range checked")]
         let index = value
             .get("index")
             .and_then(serde_json::Value::as_u64)
